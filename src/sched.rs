@@ -214,6 +214,57 @@ mod tests {
     }
 
     #[test]
+    fn rate_limiter_holds_at_realistic_thread_counts() {
+        // The earlier tests use 8 threads, which says nothing about a single mutex
+        // shared by the 512 workers a default proxy scan actually spawns.
+        let rate = 500;
+        let threads = 512;
+        let per_thread = 2;
+        let r = Arc::new(RateLimiter::new(rate));
+        let cancel = Cancel::new();
+        let count = Arc::new(AtomicU64::new(0));
+
+        let start = Instant::now();
+        let mut handles = Vec::with_capacity(threads);
+        for _ in 0..threads {
+            let (r, cancel, count) = (r.clone(), cancel.clone(), count.clone());
+            handles.push(
+                std::thread::Builder::new()
+                    .stack_size(WORKER_STACK_BYTES)
+                    .spawn(move || {
+                        for _ in 0..per_thread {
+                            r.acquire(&cancel);
+                            count.fetch_add(1, Ordering::Relaxed);
+                        }
+                    })
+                    .expect("spawn"),
+            );
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        let elapsed = start.elapsed().as_secs_f64();
+        let total = count.load(Ordering::Relaxed);
+        assert_eq!(
+            total,
+            (threads * per_thread) as u64,
+            "every acquire must return"
+        );
+
+        let observed = total as f64 / elapsed;
+        assert!(
+            observed <= rate as f64 * 1.25,
+            "{threads} threads observed {observed:.0}/s against a {rate}/s limit"
+        );
+        // Contention must not dominate: 1024 tokens at 500/s is ~2s of real waiting,
+        // so anything past 3x that is the mutex, not the limiter.
+        assert!(
+            elapsed < 6.0,
+            "took {elapsed:.1}s, suggesting lock contention rather than rate limiting"
+        );
+    }
+
+    #[test]
     fn acquire_returns_promptly_when_cancelled() {
         let r = Arc::new(RateLimiter::new(1));
         let cancel = Cancel::new();
