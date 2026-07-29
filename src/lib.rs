@@ -10,6 +10,7 @@
 //! * Every run writes a JSONL record ending in exactly one terminal event, so a file
 //!   always answers "what was scanned, how, and did it finish?".
 
+pub mod config;
 pub mod net;
 pub mod plan;
 pub mod units;
