@@ -13,6 +13,7 @@
 pub mod cancel;
 pub mod config;
 pub mod diag;
+pub mod fidelity;
 pub mod net;
 pub mod output;
 pub mod plan;
