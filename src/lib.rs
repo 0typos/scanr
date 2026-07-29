@@ -11,6 +11,7 @@
 //!   always answers "what was scanned, how, and did it finish?".
 
 pub mod cancel;
+pub mod cli;
 pub mod config;
 pub mod diag;
 pub mod fidelity;
