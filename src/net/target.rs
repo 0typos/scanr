@@ -1,0 +1,575 @@
+//! Target specification parsing and expansion.
+//!
+//! Accepted forms: IP literal, CIDR block, inclusive `start-end` range, and hostname.
+//! CIDR and range arithmetic are written directly rather than pulling a crate — the
+//! logic is small, and owning it lets the errors name the actual problem.
+
+use std::collections::HashSet;
+use std::fmt;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+/// Expanded targets above this count require `--allow-large-range`. 4M addresses is
+/// ~64 MB materialized, and anything larger is almost always a typo'd prefix.
+pub const DEFAULT_MAX_TARGETS: u64 = 4_000_000;
+
+/// IPv6 prefixes shorter than this are refused without an explicit opt-in. A /112 is
+/// 65,536 addresses; a /64 is 18 quintillion and is never what someone meant.
+pub const MIN_IPV6_PREFIX: u8 = 112;
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TargetParseError {
+    #[error("empty target")]
+    Empty,
+    #[error("`{0}` is not a valid IP address, CIDR block, range, or hostname")]
+    Malformed(String),
+    #[error("`{spec}` has an invalid prefix length /{prefix} (max /{max} for {family})")]
+    BadPrefix {
+        spec: String,
+        prefix: u8,
+        max: u8,
+        family: &'static str,
+    },
+    #[error("range `{0}` mixes IPv4 and IPv6 addresses")]
+    MixedFamilies(String),
+    #[error("range `{0}` is reversed (start is greater than end)")]
+    ReversedRange(String),
+    #[error("`{0}` looks like a malformed IP address, not a hostname")]
+    LooksLikeBadIp(String),
+    #[error("hostname `{0}` is not valid")]
+    BadHostname(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ExpandError {
+    #[error(
+        "target set expands to {count} addresses, above the limit of {limit}\n\
+         pass --allow-large-range if this is intentional"
+    )]
+    TooLarge { count: u64, limit: u64 },
+    #[error(
+        "IPv6 prefix /{prefix} in `{spec}` covers {approx} addresses\n\
+         scanr refuses IPv6 prefixes shorter than /{min} unless --allow-large-range is set"
+    )]
+    Ipv6PrefixTooShort {
+        spec: String,
+        prefix: u8,
+        approx: String,
+        min: u8,
+    },
+}
+
+/// A single target expression, before expansion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetSpec {
+    Addr(IpAddr),
+    /// Base is already masked to the prefix.
+    Cidr {
+        base: IpAddr,
+        prefix: u8,
+    },
+    Range {
+        start: IpAddr,
+        end: IpAddr,
+    },
+    Host(String),
+}
+
+/// A single expanded probe target.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Target {
+    Addr(IpAddr),
+    /// Retained unresolved — only valid when the transport resolves remotely (D15).
+    Host(String),
+}
+
+impl fmt::Display for Target {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Target::Addr(a) => write!(f, "{a}"),
+            Target::Host(h) => write!(f, "{h}"),
+        }
+    }
+}
+
+impl fmt::Display for TargetSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TargetSpec::Addr(a) => write!(f, "{a}"),
+            TargetSpec::Cidr { base, prefix } => write!(f, "{base}/{prefix}"),
+            TargetSpec::Range { start, end } => write!(f, "{start}-{end}"),
+            TargetSpec::Host(h) => write!(f, "{h}"),
+        }
+    }
+}
+
+pub fn parse_target(input: &str) -> Result<TargetSpec, TargetParseError> {
+    let s = input.trim();
+    if s.is_empty() {
+        return Err(TargetParseError::Empty);
+    }
+
+    if let Some((base, prefix)) = s.split_once('/') {
+        return parse_cidr(s, base.trim(), prefix.trim());
+    }
+
+    // A range needs both halves to parse as addresses. Checking that first keeps
+    // hyphenated hostnames (`web-01.internal`) working.
+    if let Some((a, b)) = s.split_once('-')
+        && let (Ok(start), Ok(end)) = (a.trim().parse::<IpAddr>(), b.trim().parse::<IpAddr>())
+    {
+        return match (start, end) {
+            (IpAddr::V4(_), IpAddr::V6(_)) | (IpAddr::V6(_), IpAddr::V4(_)) => {
+                Err(TargetParseError::MixedFamilies(s.to_string()))
+            }
+            _ if to_u128(start) > to_u128(end) => {
+                Err(TargetParseError::ReversedRange(s.to_string()))
+            }
+            _ => Ok(TargetSpec::Range { start, end }),
+        };
+    }
+
+    if let Ok(addr) = s.parse::<IpAddr>() {
+        return Ok(TargetSpec::Addr(addr));
+    }
+
+    validate_hostname(s)?;
+    Ok(TargetSpec::Host(s.to_string()))
+}
+
+fn parse_cidr(spec: &str, base: &str, prefix: &str) -> Result<TargetSpec, TargetParseError> {
+    let addr: IpAddr = base
+        .parse()
+        .map_err(|_| TargetParseError::Malformed(spec.to_string()))?;
+    let prefix: u8 = prefix
+        .parse()
+        .map_err(|_| TargetParseError::Malformed(spec.to_string()))?;
+
+    let (max, family) = match addr {
+        IpAddr::V4(_) => (32u8, "IPv4"),
+        IpAddr::V6(_) => (128u8, "IPv6"),
+    };
+    if prefix > max {
+        return Err(TargetParseError::BadPrefix {
+            spec: spec.to_string(),
+            prefix,
+            max,
+            family,
+        });
+    }
+
+    // Mask host bits rather than rejecting them: `10.0.0.5/24` meaning the whole /24 is
+    // near-universal usage, and nmap accepts it.
+    Ok(TargetSpec::Cidr {
+        base: mask(addr, prefix),
+        prefix,
+    })
+}
+
+fn validate_hostname(s: &str) -> Result<(), TargetParseError> {
+    if s.len() > 253 {
+        return Err(TargetParseError::BadHostname(s.to_string()));
+    }
+    // `10.0.0.256` fails IP parsing and would otherwise be silently accepted as a
+    // hostname, then fail at resolution with a confusing message.
+    if s.split('.')
+        .all(|l| !l.is_empty() && l.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Err(TargetParseError::LooksLikeBadIp(s.to_string()));
+    }
+    if s.split(':').count() > 1 && s.chars().all(|c| c.is_ascii_hexdigit() || c == ':') {
+        return Err(TargetParseError::LooksLikeBadIp(s.to_string()));
+    }
+
+    let labels: Vec<&str> = s.trim_end_matches('.').split('.').collect();
+    if labels.is_empty() || labels.iter().any(|l| l.is_empty() || l.len() > 63) {
+        return Err(TargetParseError::BadHostname(s.to_string()));
+    }
+    for label in &labels {
+        if label.starts_with('-') || label.ends_with('-') {
+            return Err(TargetParseError::BadHostname(s.to_string()));
+        }
+        if !label
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Err(TargetParseError::BadHostname(s.to_string()));
+        }
+    }
+    Ok(())
+}
+
+fn to_u128(a: IpAddr) -> u128 {
+    match a {
+        IpAddr::V4(v4) => u32::from(v4) as u128,
+        IpAddr::V6(v6) => u128::from(v6),
+    }
+}
+
+fn from_u128(v: u128, is_v4: bool) -> IpAddr {
+    if is_v4 {
+        IpAddr::V4(Ipv4Addr::from(v as u32))
+    } else {
+        IpAddr::V6(Ipv6Addr::from(v))
+    }
+}
+
+fn mask(addr: IpAddr, prefix: u8) -> IpAddr {
+    match addr {
+        IpAddr::V4(v4) => {
+            let bits = u32::from(v4);
+            let m = if prefix == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix)
+            };
+            IpAddr::V4(Ipv4Addr::from(bits & m))
+        }
+        IpAddr::V6(v6) => {
+            let bits = u128::from(v6);
+            let m = if prefix == 0 {
+                0
+            } else {
+                u128::MAX << (128 - prefix)
+            };
+            IpAddr::V6(Ipv6Addr::from(bits & m))
+        }
+    }
+}
+
+impl TargetSpec {
+    /// Number of addresses this spec covers. Hostnames count as one until resolved.
+    pub fn count(&self) -> u128 {
+        match self {
+            TargetSpec::Addr(_) | TargetSpec::Host(_) => 1,
+            TargetSpec::Cidr { base, prefix } => {
+                let width = if base.is_ipv4() { 32 } else { 128 };
+                1u128 << (width - *prefix as u32)
+            }
+            TargetSpec::Range { start, end } => to_u128(*end) - to_u128(*start) + 1,
+        }
+    }
+
+    /// Check expansion is permitted before doing it.
+    fn check_expandable(&self, allow_large: bool) -> Result<(), ExpandError> {
+        if allow_large {
+            return Ok(());
+        }
+        if let TargetSpec::Cidr { base, prefix } = self
+            && base.is_ipv6()
+            && *prefix < MIN_IPV6_PREFIX
+        {
+            return Err(ExpandError::Ipv6PrefixTooShort {
+                spec: self.to_string(),
+                prefix: *prefix,
+                approx: approx_count(self.count()),
+                min: MIN_IPV6_PREFIX,
+            });
+        }
+        Ok(())
+    }
+
+    fn expand_into(&self, out: &mut Vec<Target>) {
+        match self {
+            TargetSpec::Addr(a) => out.push(Target::Addr(*a)),
+            TargetSpec::Host(h) => out.push(Target::Host(h.clone())),
+            TargetSpec::Cidr { base, prefix } => {
+                let is_v4 = base.is_ipv4();
+                let width = if is_v4 { 32u32 } else { 128 };
+                let start = to_u128(*base);
+                let n = 1u128 << (width - *prefix as u32);
+                for i in 0..n {
+                    out.push(Target::Addr(from_u128(start + i, is_v4)));
+                }
+            }
+            TargetSpec::Range { start, end } => {
+                let is_v4 = start.is_ipv4();
+                for v in to_u128(*start)..=to_u128(*end) {
+                    out.push(Target::Addr(from_u128(v, is_v4)));
+                }
+            }
+        }
+    }
+}
+
+fn approx_count(n: u128) -> String {
+    if n >= 1_000_000_000_000 {
+        format!("~{} trillion", n / 1_000_000_000_000)
+    } else if n >= 1_000_000_000 {
+        format!("~{} billion", n / 1_000_000_000)
+    } else if n >= 1_000_000 {
+        format!("~{} million", n / 1_000_000)
+    } else {
+        n.to_string()
+    }
+}
+
+/// A set of include specs with exclusions applied.
+#[derive(Debug, Clone, Default)]
+pub struct TargetSet {
+    pub include: Vec<TargetSpec>,
+    pub exclude: Vec<TargetSpec>,
+}
+
+impl TargetSet {
+    /// Expand to concrete targets, applying exclusions and de-duplicating.
+    ///
+    /// Order is preserved from the include specs; probe order is randomized later by
+    /// the permutation, so a stable canonical order here keeps plans diffable.
+    pub fn expand(&self, allow_large: bool, limit: u64) -> Result<Vec<Target>, ExpandError> {
+        let mut total: u128 = 0;
+        for spec in &self.include {
+            spec.check_expandable(allow_large)?;
+            total += spec.count();
+        }
+        if !allow_large && total > limit as u128 {
+            return Err(ExpandError::TooLarge {
+                count: total.min(u64::MAX as u128) as u64,
+                limit,
+            });
+        }
+
+        let mut excluded: HashSet<Target> = HashSet::new();
+        for spec in &self.exclude {
+            spec.check_expandable(allow_large)?;
+            let mut buf = Vec::new();
+            spec.expand_into(&mut buf);
+            excluded.extend(buf);
+        }
+
+        let mut seen: HashSet<Target> = HashSet::with_capacity(total.min(1 << 20) as usize);
+        let mut out = Vec::with_capacity(total.min(1 << 20) as usize);
+        let mut buf = Vec::new();
+        for spec in &self.include {
+            buf.clear();
+            spec.expand_into(&mut buf);
+            for t in buf.drain(..) {
+                if !excluded.contains(&t) && seen.insert(t.clone()) {
+                    out.push(t);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Total before exclusion, for plan projections that must not pay for expansion.
+    pub fn approx_count(&self) -> u128 {
+        self.include.iter().map(|s| s.count()).sum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn t(s: &str) -> TargetSpec {
+        parse_target(s).unwrap()
+    }
+
+    fn expand(specs: &[&str]) -> Vec<String> {
+        let set = TargetSet {
+            include: specs.iter().map(|s| t(s)).collect(),
+            exclude: vec![],
+        };
+        set.expand(false, DEFAULT_MAX_TARGETS)
+            .unwrap()
+            .iter()
+            .map(|x| x.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn parses_ipv4_literal() {
+        assert_eq!(t("10.0.0.1"), TargetSpec::Addr("10.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn parses_ipv6_literal() {
+        assert_eq!(t("::1"), TargetSpec::Addr("::1".parse().unwrap()));
+        assert_eq!(
+            t("2001:db8::5"),
+            TargetSpec::Addr("2001:db8::5".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn parses_and_masks_cidr() {
+        // Host bits set is near-universal usage; mask rather than reject.
+        assert_eq!(
+            t("10.20.30.5/24"),
+            TargetSpec::Cidr {
+                base: "10.20.30.0".parse().unwrap(),
+                prefix: 24
+            }
+        );
+    }
+
+    #[test]
+    fn parses_range() {
+        assert_eq!(
+            t("10.0.0.1-10.0.0.3"),
+            TargetSpec::Range {
+                start: "10.0.0.1".parse().unwrap(),
+                end: "10.0.0.3".parse().unwrap()
+            }
+        );
+    }
+
+    #[test]
+    fn parses_hostname_with_hyphen() {
+        // Must not be mistaken for a range.
+        assert_eq!(
+            t("web-01.internal"),
+            TargetSpec::Host("web-01.internal".into())
+        );
+    }
+
+    #[test]
+    fn expands_cidr_including_network_and_broadcast() {
+        // nmap includes them; excluding them surprises people.
+        let v = expand(&["10.0.0.0/30"]);
+        assert_eq!(v, ["10.0.0.0", "10.0.0.1", "10.0.0.2", "10.0.0.3"]);
+    }
+
+    #[test]
+    fn expands_slash_32_and_slash_31() {
+        assert_eq!(expand(&["10.0.0.7/32"]), ["10.0.0.7"]);
+        assert_eq!(expand(&["10.0.0.6/31"]), ["10.0.0.6", "10.0.0.7"]);
+    }
+
+    #[test]
+    fn expands_range_inclusively() {
+        assert_eq!(
+            expand(&["10.0.0.1-10.0.0.3"]),
+            ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+        );
+    }
+
+    #[test]
+    fn deduplicates_across_overlapping_includes() {
+        let v = expand(&["10.0.0.0/31", "10.0.0.1", "10.0.0.0/31"]);
+        assert_eq!(v, ["10.0.0.0", "10.0.0.1"]);
+    }
+
+    #[test]
+    fn applies_exclusions_after_expansion() {
+        let set = TargetSet {
+            include: vec![t("10.0.0.0/29")],
+            exclude: vec![t("10.0.0.1"), t("10.0.0.6-10.0.0.7")],
+        };
+        let v: Vec<String> = set
+            .expand(false, DEFAULT_MAX_TARGETS)
+            .unwrap()
+            .iter()
+            .map(|x| x.to_string())
+            .collect();
+        assert_eq!(
+            v,
+            ["10.0.0.0", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5"]
+        );
+    }
+
+    #[test]
+    fn counts_without_expanding() {
+        assert_eq!(t("10.0.0.0/24").count(), 256);
+        assert_eq!(t("10.0.0.0/16").count(), 65536);
+        assert_eq!(t("2001:db8::/112").count(), 65536);
+        assert_eq!(t("10.0.0.1-10.0.0.10").count(), 10);
+    }
+
+    #[test]
+    fn refuses_short_ipv6_prefix() {
+        let set = TargetSet {
+            include: vec![t("2001:db8::/64")],
+            exclude: vec![],
+        };
+        assert!(matches!(
+            set.expand(false, DEFAULT_MAX_TARGETS),
+            Err(ExpandError::Ipv6PrefixTooShort { .. })
+        ));
+        // /112 is fine.
+        let ok = TargetSet {
+            include: vec![t("2001:db8::/112")],
+            exclude: vec![],
+        };
+        assert_eq!(ok.expand(false, DEFAULT_MAX_TARGETS).unwrap().len(), 65536);
+    }
+
+    #[test]
+    fn refuses_oversized_expansion() {
+        let set = TargetSet {
+            include: vec![t("10.0.0.0/8")],
+            exclude: vec![],
+        };
+        assert!(matches!(
+            set.expand(false, DEFAULT_MAX_TARGETS),
+            Err(ExpandError::TooLarge { .. })
+        ));
+        // The opt-in path is checked against a small limit rather than by actually
+        // materializing 16.7M addresses, which dominated test runtime.
+        let small = TargetSet {
+            include: vec![t("10.0.0.0/24")],
+            exclude: vec![],
+        };
+        assert!(matches!(
+            small.expand(false, 10),
+            Err(ExpandError::TooLarge {
+                count: 256,
+                limit: 10
+            })
+        ));
+        assert_eq!(small.expand(true, 10).unwrap().len(), 256);
+    }
+
+    #[test]
+    fn rejects_malformed_ip_masquerading_as_hostname() {
+        // Would otherwise be accepted as a hostname and fail confusingly at resolution.
+        assert!(matches!(
+            parse_target("10.0.0.256"),
+            Err(TargetParseError::LooksLikeBadIp(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_bad_prefix() {
+        assert!(matches!(
+            parse_target("10.0.0.0/33"),
+            Err(TargetParseError::BadPrefix { .. })
+        ));
+        assert!(matches!(
+            parse_target("::1/129"),
+            Err(TargetParseError::BadPrefix { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_reversed_and_mixed_ranges() {
+        assert!(matches!(
+            parse_target("10.0.0.9-10.0.0.1"),
+            Err(TargetParseError::ReversedRange(_))
+        ));
+        assert!(matches!(
+            parse_target("10.0.0.1-::1"),
+            Err(TargetParseError::MixedFamilies(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_bad_hostnames() {
+        assert!(parse_target("-leading.hyphen").is_err());
+        assert!(parse_target("double..dot").is_err());
+        assert!(parse_target("bad host").is_err());
+        assert!(parse_target(&"a".repeat(300)).is_err());
+    }
+
+    #[test]
+    fn accepts_reasonable_hostnames() {
+        for h in [
+            "app.internal",
+            "web-01",
+            "srv_1.corp.example.com",
+            "localhost",
+        ] {
+            assert!(matches!(parse_target(h), Ok(TargetSpec::Host(_))), "{h}");
+        }
+    }
+}
