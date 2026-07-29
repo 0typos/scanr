@@ -71,34 +71,54 @@ impl ResultPrinter {
         !self.open_only || outcome.is_open()
     }
 
+    /// Widest state name (`filtered`).
+    const STATE_W: usize = 8;
+    /// Widest service label in the table (`kube-apiserver`).
+    const LABEL_W: usize = 14;
+    /// `99999.9ms`
+    const LATENCY_W: usize = 9;
+    const GAP: usize = 2;
+
     /// One result line. Format:
     /// `10.20.30.40:443/tcp   open   https   21.4ms`
+    ///
+    /// Padding is computed from *visible* width and applied explicitly, never by
+    /// handing pre-coloured strings to a format width. Escape sequences inflate
+    /// `str::len`, so `{:>9}` on a coloured value silently stops aligning — and a
+    /// service label wider than its column shifted every following field. Both showed
+    /// up only once the output was rendered on a real terminal.
     pub fn format(&self, target: &str, port: u16, outcome: &ProbeOutcome) -> String {
         let endpoint = format!("{target}:{port}/tcp");
         let label = service_label(port).unwrap_or("");
         let ms = outcome.phases.total.as_secs_f64() * 1000.0;
         let latency = format!("{ms:.1}ms");
 
-        if self.aligned {
-            format!(
-                "{:<ew$}  {:<w$}  {:<10}  {:>9}",
-                endpoint,
-                self.style.state(outcome.state),
-                label,
-                self.style.dim(&latency),
-                ew = self.target_width + 10,
-                // Colour codes inflate the string length, so pad the plain width.
-                w = if self.style.color { 8 + 9 } else { 8 },
-            )
-            .trim_end()
-            .to_string()
-        } else {
+        if !self.aligned {
             let mut s = format!("{endpoint} {} {label}", outcome.state);
             if s.ends_with(' ') {
                 s.pop();
             }
-            format!("{s} {latency}")
+            return format!("{s} {latency}");
         }
+
+        let pad = |n: usize| " ".repeat(n);
+        let endpoint_w = self.target_width + 10;
+        let state = outcome.state.as_str();
+
+        let mut line = String::with_capacity(96);
+        line.push_str(&endpoint);
+        line.push_str(&pad(endpoint_w.saturating_sub(endpoint.len()) + Self::GAP));
+
+        line.push_str(&self.style.state(outcome.state));
+        line.push_str(&pad(Self::STATE_W.saturating_sub(state.len()) + Self::GAP));
+
+        line.push_str(label);
+        line.push_str(&pad(Self::LABEL_W.saturating_sub(label.len()) + Self::GAP));
+
+        // Right-align the latency on its visible width.
+        line.push_str(&pad(Self::LATENCY_W.saturating_sub(latency.len())));
+        line.push_str(&self.style.dim(&latency));
+        line
     }
 
     pub fn print(&self, out: &mut impl Write, target: &str, port: u16, outcome: &ProbeOutcome) {
@@ -258,19 +278,92 @@ mod tests {
         assert!(painted.contains("open"));
     }
 
-    #[test]
-    fn aligned_output_pads_consistently() {
-        let p = ResultPrinter {
-            style: Style { color: false },
+    /// Visible text, with ANSI escape sequences removed.
+    fn visible(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for c in chars.by_ref() {
+                    if c == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    fn aligned_printer(color: bool) -> ResultPrinter {
+        ResultPrinter {
+            style: Style { color },
             aligned: true,
             target_width: 15,
             open_only: false,
-        };
+        }
+    }
+
+    #[test]
+    fn aligned_output_pads_consistently() {
+        let p = aligned_printer(false);
         let a = p.format("10.0.0.1", 22, &outcome(State::Open, 1));
         let b = p.format("10.20.30.400", 443, &outcome(State::Closed, 2));
         let col_a = a.find("open").unwrap();
         let col_b = b.find("closed").unwrap();
         assert_eq!(col_a, col_b, "state column should line up:\n{a}\n{b}");
+    }
+
+    #[test]
+    fn a_long_service_label_does_not_shift_later_columns() {
+        // `elasticsearch` (13) and `kube-apiserver` (14) both overflowed a 10-wide
+        // column, pushing the latency of those rows out of line with every other row.
+        let p = aligned_printer(false);
+        let rows = [
+            p.format("127.0.0.1", 22, &outcome(State::Open, 1)), // ssh
+            p.format("127.0.0.1", 9200, &outcome(State::Closed, 2)), // elasticsearch
+            p.format("127.0.0.1", 6443, &outcome(State::Open, 3)), // kube-apiserver
+            p.format("127.0.0.1", 64321, &outcome(State::Open, 4)), // no label
+        ];
+        let ends: Vec<usize> = rows.iter().map(|r| visible(r).trim_end().len()).collect();
+        assert!(
+            ends.windows(2).all(|w| w[0] == w[1]),
+            "latency column ends at different offsets {ends:?}:\n{}",
+            rows.join("\n")
+        );
+    }
+
+    #[test]
+    fn colour_does_not_disturb_alignment() {
+        // Escape sequences inflate str::len, so any padding computed on the coloured
+        // string silently stops aligning. Visible layout must be identical either way.
+        let plain = aligned_printer(false);
+        let colored = aligned_printer(true);
+        for (port, state) in [
+            (22, State::Open),
+            (9200, State::Closed),
+            (64321, State::Filtered),
+        ] {
+            let o = outcome(state, 21);
+            let p = plain.format("10.20.30.40", port, &o);
+            let c = visible(&colored.format("10.20.30.40", port, &o));
+            assert_eq!(p, c, "colour changed the visible layout for port {port}");
+        }
+    }
+
+    #[test]
+    fn latency_is_right_aligned_on_visible_width() {
+        let p = aligned_printer(true);
+        let short = visible(&p.format("10.0.0.1", 22, &outcome(State::Open, 1)));
+        let long = visible(&p.format("10.0.0.1", 22, &outcome(State::Open, 12345)));
+        assert!(short.ends_with("1.0ms"), "{short:?}");
+        assert!(long.ends_with("12345.0ms"), "{long:?}");
+        assert_eq!(
+            short.len(),
+            long.len(),
+            "latency should be right-aligned:\n{short}\n{long}"
+        );
     }
 
     #[test]
