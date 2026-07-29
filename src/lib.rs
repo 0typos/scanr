@@ -17,6 +17,7 @@ pub mod net;
 pub mod output;
 pub mod plan;
 pub mod probe;
+pub mod run;
 pub mod sched;
 pub mod testsupport;
 pub mod timefmt;
