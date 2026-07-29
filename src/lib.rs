@@ -24,3 +24,4 @@ pub mod testsupport;
 pub mod timefmt;
 pub mod transport;
 pub mod units;
+pub mod verify;
