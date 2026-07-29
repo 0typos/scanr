@@ -92,13 +92,31 @@ by omission.
 
 `scanr transport test` connects through the configured proxy to a known-open port, a
 known-closed port, and a blackhole, then reports which reply codes came back — i.e.
-whether this proxy can distinguish closed from filtered at all. Rotating commercial
-pools and `ssh -D` typically collapse everything to `0x01 general failure`; dante and
-microsocks generally map errors properly. The measured fidelity populates `source` and
-is recorded in the scan config event.
+whether this proxy can distinguish closed from filtered at all. The measured fidelity
+is declared in config (see `04-config-spec.md`) and recorded in the scan config event.
 
-**Open item:** OpenSSH's SOCKS5 reply mapping for `ssh -D` needs empirical confirmation
-against local `sshd` (M0).
+**Measured against real software (2026-07-29), by capturing raw bytes:**
+
+| proxy | open | refused | blackholed | verdict |
+|---|---|---|---|---|
+| microsocks 1.0 | `05 00 …` | `05 05 …` | no reply, timeout | `full` |
+| OpenSSH `ssh -D` | `05 00 …` | **no reply, channel closed** | no reply, timeout | `open_only` |
+
+This **corrected an assumption**. The earlier documentation claimed `ssh -D` collapses
+failures into `0x01 general failure`. It does not — it sends no SOCKS5 reply at all and
+closes the channel, while its own client log records
+`channel N: open failed: connect failed: Connection refused`. OpenSSH knows the reason
+and has no way to express it in its SOCKS5 layer. The conclusion (`open_only`) was
+right; the stated mechanism was wrong, and the docs now describe what was observed.
+
+Also confirmed empirically: the `BND.ADDR` in a successful `ssh -D` reply is
+`0.0.0.0:0`, which is direct evidence for D15 — a proxied hostname target genuinely
+cannot record which address was probed.
+
+**End-to-end validation.** The same 16 ports scanned three ways: direct and microsocks
+produced *identical* states on all 16; through `ssh -D` the 4 open ports agreed exactly
+and the 12 non-open became `error` carrying "proxy closed the connection while reading
+CONNECT reply". No `closed` was ever fabricated.
 
 ### D9 — Probe sockets close with `SO_LINGER {on, 0}`
 **Status:** accepted
@@ -243,3 +261,33 @@ offending source line, so an error about an inline `password = "hunter2"` printe
 secret to stderr while rejecting it. Redaction now happens inside `ConfigError::render`
 rather than at each call site, so no future error can leak a credential by forgetting to
 handle it.
+
+### D21 — SIGXFSZ is ignored so a write failure is reported, not fatal
+**Status:** accepted
+
+Exceeding `RLIMIT_FSIZE` raises `SIGXFSZ`, which by default kills the process. For a
+tool whose central guarantee is that the record always says what happened, dying from a
+signal is the worst possible outcome: no terminal event, no diagnostic, no exit code.
+Ignoring it makes the write fail with `EFBIG` instead, which the writer already handles
+by reporting the failure and leaving a `.partial` file. Same reasoning as `SIGPIPE`.
+
+This is also what made the writer-failure path testable without root: capping
+`RLIMIT_FSIZE` in a forked child is the closest reachable analogue of a full disk.
+
+### D22 — Column padding is computed from visible width, never from format width
+**Status:** accepted
+
+Two alignment defects survived 278 tests because every test rendered to a pipe, where
+the aligned path never runs. Rendering on a real pty showed both immediately:
+
+* ANSI escapes inflate `str::len`, so `{:>9}` applied to a coloured latency silently
+  stopped right-aligning.
+* A service label wider than its 10-column field (`elasticsearch` is 13,
+  `kube-apiserver` is 14) shifted every following field on that row only.
+
+Padding is now applied explicitly from the plain text width, with colour added after the
+layout is decided. Tests strip escape sequences and assert that visible column offsets
+match across rows with and without colour and with labels of every length.
+
+**Lesson worth keeping:** a formatter that is only ever exercised through a pipe is an
+untested formatter. The `is_terminal()` branch needs a pty to reach.
