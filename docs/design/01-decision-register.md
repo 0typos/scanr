@@ -1,0 +1,245 @@
+# Decision Register
+
+Status values: `proposed` · `accepted` · `rejected` · `deferred`
+
+Decisions D1–D18 were settled during the 2026-07-29 discovery session.
+
+---
+
+### D1 — I/O model: blocking sockets on a bounded thread pool
+**Status:** accepted · **Alternatives:** mio, Tokio, smol, io_uring
+
+**Rationale.** Target concurrency is 500–5,000 (see D2). SOCKS5 is the primary path,
+and a handshake is a 2–3 round-trip request/response exchange — straight-line code when
+blocking, a resumable partial-read/write state machine under any readiness-based loop.
+`std::net::TcpStream::connect_timeout` already *is* this tool's core primitive, and
+`set_read_timeout`/`set_write_timeout` give per-phase timeouts and per-phase measurement
+for free. I/O dependency footprint is effectively zero.
+
+**Consequences.** Cancellation latency is bounded by the longest outstanding timeout,
+not instant. Hard ceiling around 10k threads. musl's `mallocng` contends badly under
+many threads (see D17). Thread stacks set explicitly to 64 KiB.
+
+**Revisit trigger.** Feasibility probe (M0) fails its bar, or sustained concurrency
+requirement exceeds ~10k. Fallback is Tokio — the port is largely mechanical
+(`std::net` → `tokio::net`, add `.await`), which is why this is the cheapest choice to
+be wrong about.
+
+**M0 result (measured 2026-07-29): CONFIRMED with wide margin.**
+
+| metric | bar | measured |
+|---|---|---|
+| RSS at 5,000 threads | < 500 MiB | **40.6 MiB** |
+| RSS at 10,000 threads | — | 81 MiB |
+| Sustained rate, local accepting listener | >= 5,000/s | **68,949/s** |
+| Ctrl-C drain latency (2s connect timeout) | <= 2.25s | 838 ms |
+| Spawn cost, 10,000 threads | — | 227 ms, paid once |
+
+Two findings beyond the pass criteria. Throughput at 2,048 threads (62,805/s) was
+*lower* than at 512 (68,949/s), so concurrency is exposed as a tunable and documented as
+non-monotonic rather than something to maximize. And end-to-end on the finished binary,
+60,000 probes against loopback completed in 0.44–0.49s (~128,000 probes/s), well beyond
+what any proxied scan can consume.
+
+### D2 — `mio` rejected
+**Status:** rejected
+
+Two discovery answers dominated it. **Linux-only** removes its purpose as a portable
+readiness abstraction — on Linux it is a thin safe `epoll` wrapper, and it ships no
+timer facility at all, so a timer wheel, signalfd integration, and partial-IO state
+machines would be hand-written regardless. **SOCKS-primary** makes the state-machine
+cost apply to the dominant code path rather than an exotic one. It costs the most of
+the three options and its distinguishing benefit does not apply here.
+
+### D3 — Platform: Linux x86_64 only; glibc and static musl
+**Status:** accepted
+
+Windows and macOS deferred. Removes IOCP/kqueue, console control events, and
+cross-platform CI from v1 entirely.
+
+### D4 — SOCKS5 only; SOCKS4 and SOCKS4a dropped from v1
+**Status:** accepted
+
+SOCKS4 defines four reply codes (`0x5A` granted, `0x5B` rejected-or-failed, `0x5C`/`0x5D`
+identd) and cannot distinguish closed from filtered under any circumstance. Dropping
+4/4a removes two protocol implementations, two fixture servers, and a permanent
+fidelity mismatch in the result schema.
+
+### D5 — SOCKS5 implemented directly, no crate
+**Status:** accepted
+
+CONNECT with optional username/password auth (RFC 1928 / RFC 1929) is a few hundred
+lines. Writing it directly gives exact control over reply-code mapping — which is
+load-bearing for D8 — plus precise per-phase timing and auditable credential handling.
+
+### D6 — One proxy per scan
+**Status:** accepted · multi-proxy and chains deferred
+
+The scheduler enforces a single global concurrency limit. No per-transport-instance
+binding, no mid-scan proxy failover. Multi-proxy remains addable without reworking the
+transport seam.
+
+### D7 — Result states: `open` / `closed` / `filtered` / `error`
+**Status:** accepted · **Alternative rejected:** the 12-state taxonomy in the original brief
+
+Four public states, plus a structured `reason` and a `source` field recording whether
+the classification came from the local stack or a proxy reply byte. Most of the 12
+states would be permanently unreachable through a proxy, producing a schema that lies
+by omission.
+
+### D8 — Transport fidelity is measured and declared, not assumed
+**Status:** accepted
+
+`scanr transport test` connects through the configured proxy to a known-open port, a
+known-closed port, and a blackhole, then reports which reply codes came back — i.e.
+whether this proxy can distinguish closed from filtered at all. Rotating commercial
+pools and `ssh -D` typically collapse everything to `0x01 general failure`; dante and
+microsocks generally map errors properly. The measured fidelity populates `source` and
+is recorded in the scan config event.
+
+**Open item:** OpenSSH's SOCKS5 reply mapping for `ssh -D` needs empirical confirmation
+against local `sshd` (M0).
+
+### D9 — Probe sockets close with `SO_LINGER {on, 0}`
+**Status:** accepted
+
+Sends RST instead of FIN, skipping `TIME_WAIT` on our side. With one proxy per scan
+every probe is a connection to the *same* socket address, so only the source port
+varies: the default ephemeral range (`32768–60999` = 28,232 ports) against a hardcoded
+60s `TCP_TIMEWAIT_LEN` caps sustained throughput at **~470 probes/sec** to a remote
+proxy. This box has `tcp_tw_reuse = 2` (loopback-only, the default since ~2019), which
+covers local proxies but not remote ones.
+
+We have already extracted the answer from `connect()` and have no data to flush, so RST
+close costs nothing functionally. Costs: some proxies log RSTs as errors; marginally
+more detectable.
+
+**Note:** `TcpStream::set_linger` is still unstable (rust#88494, verified on 1.97.1), so
+this requires `socket2`.
+
+**M0 result: the highest-leverage decision in the design, by a wide margin.** Measured
+at a **7.5x sustained-throughput multiplier** — 9,189 probes/s without it versus 68,949
+with — and TIME_WAIT accumulation over a five-second run fell from **21,931 sockets to
+1**. Against a 28,232-port ephemeral range, the no-linger path was on course to exhaust
+local ports in roughly seven seconds against a remote proxy.
+
+### D10 — Retry timeouts once, emit one merged record
+**Status:** accepted
+
+Through a proxy a timeout is ambiguous between slow-proxy and filtered-destination; one
+retry disambiguates the common case. The record carries `attempts` and `attempt_states`
+so forensic detail survives while row count still equals probe count.
+
+### D11 — JSONL records every probe outcome
+**Status:** accepted
+
+Full fidelity. A 256×1000 scan is ~256k lines / tens of MB. Makes "what was never
+probed" derivable, which is what enables D12.
+
+### D12 — No `resume`; `scanr output remainder` instead
+**Status:** accepted · **Alternative rejected:** resume as specified in the original brief
+
+Resume is semantically murky under DNS churn and changed profiles. "The set of probes
+that never ran" is just a target list, so emitting it and piping it back gives
+resume-by-composition with zero schema commitment.
+
+### D13 — Config: user-level + project-local, project wins
+**Status:** accepted
+
+`~/.config/scanr/config.toml` for transports and credentials; `./scanr.toml` for scan
+definitions, version-controlled. Precedence in `04-config-spec.md`.
+
+### D14 — Credentials: no inline passwords, ever
+**Status:** accepted · stricter than the original brief, which specified a warning
+
+Only `password_env` and `password_file` are accepted. An inline `password` key is a
+hard validation error naming both alternatives. Project config is expected to be
+committed; a warning is not sufficient protection.
+
+### D15 — DNS mode `auto` — transport when supported, local otherwise
+**Status:** accepted, with mitigation
+
+Through SOCKS5 the proxy resolves, and the reply's `BND.ADDR` is the proxy's bound
+address, *not* the destination IP — so proxied hostname targets can never record a
+resolved address, and multi-A-record expansion is impossible. Direct scans can do both.
+The same config therefore behaves differently across transports.
+
+**Mitigation:** `plan` prints the effective mode; each `target_resolved` event records
+which mode applied; switching transports on a config containing hostnames warns.
+
+### D16 — Probe order: seeded keyed Feistel permutation
+**Status:** accepted
+
+Randomized order across the whole matrix, but an in-memory shuffle costs ~520 MB for a
+/16 × 1000 matrix. A 4-round Feistel network over the next power of two ≥ N, with
+cycle-walking to skip out-of-range outputs, gives O(1) memory, streaming random order,
+and exact reproducibility from the recorded seed.
+
+### D17 — Single crate, not a workspace
+**Status:** accepted · **Alternative rejected:** the 7-crate layout in the original brief
+
+No dependency isolation, platform separation, or independent-reuse boundary currently
+justifies it. Modules provide the same organization without the coordination cost.
+Revisit if a library API becomes a goal.
+
+### D18 — Dependency posture: pragmatic
+**Status:** accepted
+
+Well-maintained crates where they earn their place; SOCKS5 and the permutation written
+directly. Per-crate rationale in `03-architecture.md`.
+
+---
+
+## Deferred / open
+
+| Item | Status | Note |
+|---|---|---|
+| `ssh -D` reply-code fidelity | open | Needs a real `ssh -D` forward; `transport test` now measures it directly |
+| musl allocator under many threads | accepted as-is | See D19 |
+| gzip output | deferred | Revisit if files exceed ~1 GB |
+| Progress rendering on stderr | proposed | Interval-based, TTY-only |
+| Profile inheritance | rejected for v1 | Flat, complete profiles only |
+| `per_target_concurrency` | rejected | With a proxy the shared resource is the proxy |
+| IPv6 prefix expansion | accepted w/ guard | Refuse prefixes shorter than /112 absent opt-in |
+
+### D19 — musl ships without an allocator swap, despite exceeding the M0 bar
+**Status:** accepted · **Alternative rejected:** mimalloc / snmalloc for musl builds
+
+**Measured (2026-07-29).** 60,000 probes against loopback, concurrency 1024, three runs
+each on the same source revision:
+
+| build | wall | throughput | RSS |
+|---|---|---|---|
+| glibc | 0.44 / 0.45 / 0.49 s | ~128,000 probes/s | 12.4 MB |
+| musl | 0.83 / 0.76 / 0.84 s | ~75,000 probes/s | 8.7 MB |
+
+musl is **~1.7x slower**, which exceeds the "< 25% delta" pass criterion set in the M0
+plan. The stated remediation was to adopt mimalloc for musl builds. We are not taking
+it, deliberately:
+
+* mimalloc and snmalloc are C/C++ and require a musl-targeting C toolchain, which would
+  destroy the property that makes the musl build worth having — a fully static
+  `static-pie` binary produced by `cargo build --target x86_64-unknown-linux-musl` with
+  no system dependencies.
+* The delta is unobservable in the workload this tool exists for. 75,000 probes/s is
+  roughly 15x above what a proxied scan can reach; `ssh -D` sustains low hundreds and a
+  self-hosted daemon low thousands. The gap only appears on a loopback microbenchmark
+  where neither the network nor a proxy is the bottleneck.
+* musl uses *less* memory (8.7 MB vs 12.4 MB at the same concurrency).
+
+**Consequences.** Documented in the README so the tradeoff is visible rather than
+implicit. glibc is the better choice when you control the host; musl when portability
+matters.
+
+**Revisit trigger.** A workload where scanr itself is the bottleneck — realistically
+only large direct LAN scans. If that appears, revisit with a pure-Rust allocator so the
+static build survives.
+
+### D20 — Config errors redact credentials in the source line they point at
+**Status:** accepted
+
+Caught by an end-to-end test rather than by review: the caret renderer echoes the
+offending source line, so an error about an inline `password = "hunter2"` printed the
+secret to stderr while rejecting it. Redaction now happens inside `ConfigError::render`
+rather than at each call site, so no future error can leak a credential by forgetting to
+handle it.
