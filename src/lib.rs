@@ -9,3 +9,6 @@
 //!   multiplier, and it is what keeps a scan inside the local ephemeral port budget.
 //! * Every run writes a JSONL record ending in exactly one terminal event, so a file
 //!   always answers "what was scanned, how, and did it finish?".
+
+pub mod net;
+pub mod units;
