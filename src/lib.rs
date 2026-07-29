@@ -16,6 +16,7 @@ pub mod diag;
 pub mod net;
 pub mod plan;
 pub mod probe;
+pub mod sched;
 pub mod testsupport;
 pub mod transport;
 pub mod units;
