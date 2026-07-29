@@ -1,0 +1,50 @@
+[package]
+name = "scanr"
+version = "0.1.0"
+edition = "2024"
+description = "Proxy-aware TCP connect scanner with reproducible, durable scan records"
+license = "MIT OR Apache-2.0"
+rust-version = "1.97"
+
+[dependencies]
+# CLI: subcommand tree, help rendering, shell completions. Hand-rolling this for a
+# 12-command tree with completions is real work for no gain. (D18)
+clap = { version = "4", features = ["derive", "wrap_help"] }
+clap_complete = "4"
+
+# Config: deserialization with byte spans, which drive caret-annotated errors.
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+
+# JSONL emission. Correct escaping is not worth hand-rolling.
+serde_json = "1"
+
+# SO_LINGER{on,0} (D9). std::net::TcpStream::set_linger is still unstable
+# (rust#88494, verified on 1.97.1). M0 measured this as a 7.5x throughput multiplier.
+socket2 = "0.6"
+
+# Error definitions only.
+thiserror = "2"
+
+# sysctl/rlimit inspection, signal installation, getrandom. No std equivalent.
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+# panic = "unwind" (the default) is deliberate, not an oversight: a panicking worker
+# thread must not prevent the writer from finalizing the scan record. Aborting would
+# leave a .partial file and destroy the tool's core guarantee. (see docs/design)
+
+[profile.bench]
+inherits = "release"
+
+# Faster iteration: optimize dependencies even in debug builds, since the scheduler
+# and permutation are unusable at opt-level 0.
+[profile.dev.package."*"]
+opt-level = 2
