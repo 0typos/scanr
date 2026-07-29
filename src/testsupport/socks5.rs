@@ -3,7 +3,11 @@
 //! Real proxies differ enormously in how faithfully they report failures, and that
 //! difference is the whole basis of the fidelity model (D8). A fixture we control is
 //! the only way to test both a well-behaved proxy and one that collapses every failure
-//! into `0x01` — which is what `ssh -D` and most commercial pools appear to do.
+//! into `0x01`.
+//!
+//! Verified against real software: `Faithful` matches microsocks byte for byte, and
+//! `DisconnectAt("request")` matches OpenSSH's `ssh -D`, which answers a refused
+//! destination with no reply at all rather than a failure code.
 
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -17,8 +21,9 @@ use crate::transport::socks5::*;
 pub enum Behavior {
     /// Attempts the connection and maps OS errors to the proper RFC 1928 reply codes.
     Faithful,
-    /// Attempts the connection but reports every failure as `0x01 general failure`,
-    /// the way `ssh -D` and most commercial pools behave.
+    /// Attempts the connection but reports every failure as `0x01 general failure`.
+    /// Some proxies do this; `ssh -D` is worse still and sends no reply at all, which
+    /// `DisconnectAt("request")` models.
     Collapsing,
     RequireAuth {
         user: String,

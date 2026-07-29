@@ -206,8 +206,8 @@ pub fn judge(reachable: bool, open_ok: bool, closed_reply: Option<u8>) -> (Fidel
         None => (
             Fidelity::OpenOnly,
             "The known-closed destination produced no usable reply code (the proxy may \
-             have timed out or closed the connection), so closed and filtered cannot be \
-             distinguished."
+             have timed out or closed the connection, which is what OpenSSH's `ssh -D` \
+             does), so closed and filtered cannot be distinguished."
                 .into(),
         ),
     }

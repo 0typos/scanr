@@ -68,9 +68,20 @@ subfinder -d example.com | scanr run --targets - --ports web
 This is the part most worth understanding.
 
 SOCKS5 defines separate reply codes for refused (`0x05`), unreachable (`0x03`/`0x04`)
-and policy denial (`0x02`) — but many proxies collapse every failure into
-`0x01 general failure`. `ssh -D` dynamic forwards and most commercial pools behave this
-way. Through such a proxy, **a closed port and a filtered port are indistinguishable**.
+and policy denial (`0x02`), but not every proxy uses them. Measured against real
+software:
+
+| proxy | refused destination | usable? |
+|---|---|---|
+| microsocks | `05 05 ...` — reply `0x05` | yes, `closed` is distinguishable |
+| `ssh -D` (OpenSSH) | **no reply at all**; connection closed | no |
+
+OpenSSH is the more awkward case, and worse than merely collapsing codes: it sends *no
+SOCKS5 reply whatsoever* and closes the channel. Its own log says
+`connect failed: Connection refused`, so it knows the reason and simply has no way to
+convey it. Some proxies instead answer `0x01 general failure` for everything, which is
+equally unusable. Through any of these, **a closed port and a filtered port are
+indistinguishable**.
 
 `scanr` measures this rather than assuming it:
 
@@ -87,14 +98,29 @@ transport lab (socks5 127.0.0.1:1080)
   tell `closed` apart from `filtered` in your results.
 ```
 
-versus a proxy that collapses:
+versus a real `ssh -D` forward:
 
 ```console
-  known-closed      error     reply 0x01         1.2ms   <- expected closed
+$ scanr transport test sshd
+  known-open        open      reply 0x00         0.4ms
+  known-closed      error     no reply           0.3ms   <- expected closed
+  blackholed        filtered  no reply        3058.7ms
+
   fidelity          open_only
-  This proxy reports a generic failure (0x01) for refused connections, so
-  scanr cannot distinguish `closed` from `filtered`. Non-open results will
-  be recorded as `error` with source `proxy_reply` rather than guessed.
+  The known-closed destination produced no usable reply code (the proxy
+  may have timed out or closed the connection, which is what OpenSSH's
+  `ssh -D` does), so closed and filtered cannot be distinguished.
+```
+
+Scanning the same 16 ports three ways shows exactly what that costs. Direct and
+microsocks agree on every port; through `ssh -D` the open ports still agree and
+everything else becomes `error` with the reason recorded:
+
+```
+PORT                       direct    microsocks  ssh -D
+127.0.0.1:9201/tcp         open      open        open
+127.0.0.1:9195/tcp         closed    closed      error     "proxy closed the connection
+                                                             while reading CONNECT reply"
 ```
 
 When a proxy cannot tell the difference, `scanr` records `error` with
