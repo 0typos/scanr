@@ -1,0 +1,267 @@
+//! Host facts and operational diagnostics.
+//!
+//! The point of this module is that errors name the actual operational cause instead of
+//! an errno. `EADDRNOTAVAIL` at scale is ephemeral port exhaustion, and the remediation
+//! is a sysctl — saying so beats printing "Cannot assign requested address".
+
+use std::fmt;
+use std::path::Path;
+
+/// Linux holds TIME_WAIT for a hardcoded 60s (`TCP_TIMEWAIT_LEN`).
+pub const TIME_WAIT_SECS: u64 = 60;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostFacts {
+    /// `net.ipv4.ip_local_port_range`
+    pub ephemeral_range: Option<(u32, u32)>,
+    /// `net.ipv4.tcp_tw_reuse`: 0 = off, 1 = on, 2 = loopback only (the modern default)
+    pub tcp_tw_reuse: Option<u32>,
+    /// `RLIMIT_NOFILE` soft limit
+    pub rlimit_nofile: Option<u64>,
+}
+
+impl HostFacts {
+    pub fn probe() -> Self {
+        Self {
+            ephemeral_range: read_port_range(),
+            tcp_tw_reuse: read_sysctl_u32("/proc/sys/net/ipv4/tcp_tw_reuse"),
+            rlimit_nofile: read_rlimit_nofile(),
+        }
+    }
+
+    pub fn ephemeral_ports(&self) -> Option<u32> {
+        self.ephemeral_range
+            .map(|(lo, hi)| hi.saturating_sub(lo) + 1)
+    }
+
+    /// Sustained probes/sec ceiling imposed by ephemeral port recycling, for a proxy at
+    /// `remote` distance.
+    ///
+    /// With one proxy per scan every probe is a connection to the same socket address,
+    /// so only the source port varies. Without `SO_LINGER{on,0}` each closed probe sits
+    /// in TIME_WAIT for 60s, capping sustained rate at ports/60.
+    ///
+    /// `tcp_tw_reuse = 2` (the default on modern kernels) exempts loopback only, so a
+    /// local proxy escapes this and a remote one does not.
+    pub fn sustained_rate_ceiling(&self, remote: bool) -> Option<u32> {
+        let ports = self.ephemeral_ports()?;
+        let reuse = self.tcp_tw_reuse.unwrap_or(0);
+        let exempt = reuse == 1 || (reuse == 2 && !remote);
+        if exempt {
+            None
+        } else {
+            Some((ports as u64 / TIME_WAIT_SECS) as u32)
+        }
+    }
+}
+
+impl fmt::Display for HostFacts {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.ephemeral_range {
+            Some((lo, hi)) => write!(f, "ephemeral {lo}-{hi} ({} ports)", hi - lo + 1)?,
+            None => write!(f, "ephemeral unknown")?,
+        }
+        if let Some(r) = self.tcp_tw_reuse {
+            let note = match r {
+                0 => " (off)",
+                1 => " (on)",
+                2 => " (loopback only)",
+                _ => "",
+            };
+            write!(f, ", tcp_tw_reuse={r}{note}")?;
+        }
+        if let Some(n) = self.rlimit_nofile {
+            write!(f, ", nofile={n}")?;
+        }
+        Ok(())
+    }
+}
+
+fn read_sysctl_u32(path: &str) -> Option<u32> {
+    std::fs::read_to_string(Path::new(path))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+fn read_port_range() -> Option<(u32, u32)> {
+    let s = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").ok()?;
+    let mut it = s.split_whitespace();
+    Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
+}
+
+fn read_rlimit_nofile() -> Option<u64> {
+    let mut lim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit writes into a fully initialized rlimit we own.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } == 0 {
+        Some(lim.rlim_cur)
+    } else {
+        None
+    }
+}
+
+/// Classification of a probe-time OS error into something a human can act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceProblem {
+    EphemeralPortExhaustion,
+    FileDescriptorExhaustion,
+    Other,
+}
+
+impl ResourceProblem {
+    pub fn classify(err: &std::io::Error) -> Self {
+        match err.raw_os_error() {
+            Some(libc::EADDRNOTAVAIL) | Some(libc::EADDRINUSE) => Self::EphemeralPortExhaustion,
+            Some(libc::EMFILE) | Some(libc::ENFILE) => Self::FileDescriptorExhaustion,
+            _ => Self::Other,
+        }
+    }
+
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::EphemeralPortExhaustion => "ephemeral_pressure",
+            Self::FileDescriptorExhaustion => "fd_pressure",
+            Self::Other => "other",
+        }
+    }
+
+    /// Remediation text, tailored to the host we are actually running on.
+    pub fn remediation(&self, facts: &HostFacts, concurrency: u32) -> Option<String> {
+        match self {
+            Self::EphemeralPortExhaustion => {
+                let ports = facts.ephemeral_ports().unwrap_or(28_232);
+                let mut s = format!(
+                    "the local ephemeral port range ({ports} ports) is exhausted.\n\
+                     Every probe through a proxy consumes one source port, and Linux holds\n\
+                     TIME_WAIT for {TIME_WAIT_SECS}s. Options, cheapest first:\n\
+                     \x20 - lower --rate or --concurrency\n\
+                     \x20 - widen the range:  sysctl -w net.ipv4.ip_local_port_range=\"10000 65535\""
+                );
+                if facts.tcp_tw_reuse == Some(2) {
+                    s.push_str(
+                        "\n  - allow reuse for non-loopback too:  sysctl -w net.ipv4.tcp_tw_reuse=1\n\
+                         \x20   (currently 2, which exempts loopback only)",
+                    );
+                }
+                Some(s)
+            }
+            Self::FileDescriptorExhaustion => Some(format!(
+                "out of file descriptors at concurrency {concurrency}.\n\
+                 The soft RLIMIT_NOFILE is {}. Either:\n\
+                 \x20 - lower --concurrency below that limit, or\n\
+                 \x20 - raise it:  ulimit -n {}",
+                facts
+                    .rlimit_nofile
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "unknown".into()),
+                concurrency.saturating_add(256).max(4096),
+            )),
+            Self::Other => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn facts(range: Option<(u32, u32)>, reuse: Option<u32>) -> HostFacts {
+        HostFacts {
+            ephemeral_range: range,
+            tcp_tw_reuse: reuse,
+            rlimit_nofile: Some(1024),
+        }
+    }
+
+    #[test]
+    fn reads_real_host_facts() {
+        // These files exist on any Linux; the point is that parsing works.
+        let f = HostFacts::probe();
+        assert!(
+            f.ephemeral_range.is_some(),
+            "should read ip_local_port_range"
+        );
+        assert!(f.rlimit_nofile.is_some(), "should read RLIMIT_NOFILE");
+        let (lo, hi) = f.ephemeral_range.unwrap();
+        assert!(lo < hi && hi <= 65535);
+    }
+
+    #[test]
+    fn computes_the_default_ceiling() {
+        // 32768-60999 is the stock range: 28,232 ports over a 60s TIME_WAIT.
+        let f = facts(Some((32768, 60999)), Some(0));
+        assert_eq!(f.ephemeral_ports(), Some(28_232));
+        assert_eq!(f.sustained_rate_ceiling(true), Some(470));
+    }
+
+    #[test]
+    fn tw_reuse_2_exempts_loopback_only() {
+        let f = facts(Some((32768, 60999)), Some(2));
+        // Local proxy: no ceiling.
+        assert_eq!(f.sustained_rate_ceiling(false), None);
+        // Remote proxy: ceiling still applies.
+        assert_eq!(f.sustained_rate_ceiling(true), Some(470));
+    }
+
+    #[test]
+    fn tw_reuse_1_exempts_everything() {
+        let f = facts(Some((32768, 60999)), Some(1));
+        assert_eq!(f.sustained_rate_ceiling(true), None);
+        assert_eq!(f.sustained_rate_ceiling(false), None);
+    }
+
+    #[test]
+    fn wider_range_raises_the_ceiling() {
+        let f = facts(Some((10000, 65535)), Some(0));
+        assert_eq!(f.sustained_rate_ceiling(true), Some(925));
+    }
+
+    #[test]
+    fn classifies_resource_errors() {
+        let e = std::io::Error::from_raw_os_error(libc::EADDRNOTAVAIL);
+        assert_eq!(
+            ResourceProblem::classify(&e),
+            ResourceProblem::EphemeralPortExhaustion
+        );
+        let e = std::io::Error::from_raw_os_error(libc::EMFILE);
+        assert_eq!(
+            ResourceProblem::classify(&e),
+            ResourceProblem::FileDescriptorExhaustion
+        );
+        let e = std::io::Error::from_raw_os_error(libc::ECONNREFUSED);
+        assert_eq!(ResourceProblem::classify(&e), ResourceProblem::Other);
+    }
+
+    #[test]
+    fn remediation_mentions_the_actual_sysctl_state() {
+        let f = facts(Some((32768, 60999)), Some(2));
+        let r = ResourceProblem::EphemeralPortExhaustion
+            .remediation(&f, 512)
+            .unwrap();
+        assert!(r.contains("28232 ports"), "{r}");
+        assert!(r.contains("tcp_tw_reuse=1"), "{r}");
+        assert!(r.contains("currently 2"), "{r}");
+    }
+
+    #[test]
+    fn fd_remediation_suggests_a_workable_limit() {
+        let f = facts(None, None);
+        let r = ResourceProblem::FileDescriptorExhaustion
+            .remediation(&f, 8192)
+            .unwrap();
+        assert!(r.contains("ulimit -n 8448"), "{r}");
+    }
+
+    #[test]
+    fn other_errors_have_no_canned_remediation() {
+        assert!(
+            ResourceProblem::Other
+                .remediation(&facts(None, None), 1)
+                .is_none()
+        );
+    }
+}

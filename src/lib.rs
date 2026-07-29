@@ -11,6 +11,7 @@
 //!   always answers "what was scanned, how, and did it finish?".
 
 pub mod config;
+pub mod diag;
 pub mod net;
 pub mod plan;
 pub mod units;
