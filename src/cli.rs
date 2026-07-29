@@ -288,6 +288,9 @@ fn install_signal_handler() {
         libc::signal(libc::SIGTERM, on_sigint as *const () as libc::sighandler_t);
         // A closed stdout (`| head`) must not kill the scan before it finalizes.
         libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+        // Likewise for exceeding RLIMIT_FSIZE: the write should fail with EFBIG so we
+        // can report it and leave a .partial file, rather than the process dying.
+        libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
     }
 }
 
@@ -431,7 +434,13 @@ fn cmd_run(cli: &Cli, scan: Option<&str>, overrides: &OverrideArgs) -> Result<u8
         }
         Err(e) => {
             let _ = writeln!(std::io::stderr(), "error: {e}");
-            Ok(EXIT_SCAN_FAILED)
+            // A writer failure is reported as such wherever it happens. Previously a
+            // failure while writing the header returned 2 while the identical failure
+            // one event later returned 3, which made the exit code depend on timing.
+            Ok(match e {
+                crate::run::ScanError::Writer(_) => EXIT_WRITER_FAILED,
+                crate::run::ScanError::Output { .. } => EXIT_SCAN_FAILED,
+            })
         }
     }
 }
