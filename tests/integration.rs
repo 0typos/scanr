@@ -657,6 +657,91 @@ fn plan_output_has_no_trailing_whitespace() {
     }
 }
 
+/// Force a mid-scan write failure by capping the child's file size, so the writer
+/// hits EFBIG partway through. This is the closest reachable analogue of a full disk
+/// without needing root to mount a small filesystem.
+#[test]
+fn writer_failure_exits_three_and_leaves_a_partial_file() {
+    use std::os::unix::process::CommandExt;
+
+    let d = tempfile::tempdir().unwrap();
+
+    let mut cmd = Command::new(BIN);
+    cmd.args([
+        "run",
+        "--targets",
+        "127.0.0.1",
+        "--ports",
+        "9300-9400",
+        "--output-dir",
+        "out",
+        "--all",
+        "-q",
+        "--transport",
+        "direct",
+        // one worker keeps the failure deterministic rather than racing the drain
+        "--concurrency",
+        "1",
+    ])
+    .current_dir(d.path())
+    .env("XDG_CONFIG_HOME", d.path().join("xdg"))
+    .env("NO_COLOR", "1");
+
+    // SAFETY: setrlimit is async-signal-safe and this runs in the forked child
+    // between fork and exec.
+    unsafe {
+        cmd.pre_exec(|| {
+            let lim = libc::rlimit {
+                // Enough for the header, not enough for 101 probe results.
+                rlim_cur: 4096,
+                rlim_max: 4096,
+            };
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &lim) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let out = cmd.output().expect("scanr should run");
+
+    assert_eq!(
+        code(&out),
+        3,
+        "a writer failure must exit 3, got {:?}\nstderr: {}",
+        out.status,
+        stderr(&out)
+    );
+    assert!(
+        out.status.code().is_some(),
+        "the process must report the failure, not die from SIGXFSZ"
+    );
+
+    // The record must remain .partial: no terminal event could be written, and that is
+    // precisely the signal a consumer relies on.
+    let entries: Vec<_> = std::fs::read_dir(d.path().join("out"))
+        .expect("output dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        entries.iter().any(|n| n.ends_with(".jsonl.partial")),
+        "expected a .partial file, found {entries:?}"
+    );
+    assert!(
+        !entries.iter().any(|n| n.ends_with(".jsonl")),
+        "a failed scan must not be finalized: {entries:?}"
+    );
+
+    // And verify must call it out rather than accepting a truncated record.
+    let partial = entries.iter().find(|n| n.ends_with(".partial")).unwrap();
+    let path = d.path().join("out").join(partial);
+    let v = scanr(d.path(), &["output", "verify", path.to_str().unwrap()]);
+    assert_eq!(code(&v), 1, "verify should reject it: {}", stdout(&v));
+    let so = stdout(&v);
+    assert!(so.contains(".partial suffix"), "{so}");
+    assert!(so.contains("no terminal event"), "{so}");
+}
+
 #[test]
 fn help_lists_the_documented_command_tree() {
     let d = tempfile::tempdir().unwrap();
