@@ -22,6 +22,13 @@ use crate::plan::{Overrides, resolve};
 use crate::run::{RunOptions, Termination};
 use crate::units::{HumanElapsed, commas, parse_duration, render_duration};
 
+/// `--version` reports the commit the binary was built from, so a result file can be
+/// traced back to an exact build.
+fn build_version() -> &'static str {
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(crate::run::build_info)
+}
+
 /// Exit codes are part of the interface; see docs/design/06-cli-spec.md.
 pub const EXIT_OK: u8 = 0;
 pub const EXIT_USAGE: u8 = 1;
@@ -33,6 +40,7 @@ pub const EXIT_INTERRUPTED: u8 = 130;
 #[command(
     name = "scanr",
     version,
+    long_version = build_version(),
     about = "Proxy-aware TCP connect scanner with reproducible, durable scan records",
     long_about = "scanr performs unprivileged TCP connect() probes directly or through a \
                   SOCKS5 proxy, streams open ports to stdout as they are found, and always \
