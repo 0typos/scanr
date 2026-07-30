@@ -11,6 +11,16 @@ fn manifest_dir() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// The CLI tree with build provenance stripped.
+///
+/// `--version` deliberately reports the commit the binary was built from, but that must
+/// not reach the man page: it would change on every commit, so a committed page could
+/// never match and the drift test could never pass. A man page documents the interface,
+/// not the build.
+fn documented_tree() -> clap::Command {
+    scanr::cli::Cli::command().long_version(None)
+}
+
 fn render(cmd: &clap::Command) -> String {
     let mut buf = Vec::new();
     clap_mangen::Man::new(cmd.clone())
@@ -22,7 +32,7 @@ fn render(cmd: &clap::Command) -> String {
 /// Every page the generator would write, as (filename, contents).
 fn expected() -> Vec<(String, String)> {
     let mut out = Vec::new();
-    let top = scanr::cli::Cli::command();
+    let top = documented_tree();
     out.push(("scanr.1".to_string(), render(&top)));
 
     for sub in top.get_subcommands() {
@@ -82,7 +92,7 @@ fn no_orphaned_man_pages() {
 fn every_command_in_the_tree_has_a_page() {
     // Guards the generator itself: if the tree grows a level, the generator must be
     // taught about it rather than silently skipping the new commands.
-    let top = scanr::cli::Cli::command();
+    let top = documented_tree();
     let mut expected_count = 1;
     for sub in top.get_subcommands() {
         expected_count += 1;

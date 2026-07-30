@@ -15,7 +15,7 @@ fn main() -> std::io::Result<()> {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("man");
     std::fs::create_dir_all(&dir)?;
 
-    let top = scanr::cli::Cli::command();
+    let top = documented_tree();
     let mut written = write_page(&dir, "scanr", &top)?;
 
     for sub in top.get_subcommands() {
@@ -34,6 +34,16 @@ fn main() -> std::io::Result<()> {
     }
     eprintln!("wrote {written} pages to {}", dir.display());
     Ok(())
+}
+
+/// The CLI tree with build provenance stripped.
+///
+/// `--version` deliberately reports the commit the binary was built from, but that must
+/// not reach the man page: it would change on every commit, so a committed page could
+/// never match and the drift test could never pass. A man page documents the interface,
+/// not the build.
+fn documented_tree() -> clap::Command {
+    scanr::cli::Cli::command().long_version(None)
 }
 
 fn write_page(dir: &std::path::Path, name: &str, cmd: &clap::Command) -> std::io::Result<usize> {
