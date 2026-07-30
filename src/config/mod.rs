@@ -116,30 +116,55 @@ fn parse_config(text: &str, path: &Path) -> Result<RawConfig, ConfigError> {
             err = err.span(span);
         }
         // serde's "unknown field" message lists valid fields; add a typo suggestion.
-        if let Some(unknown) = extract_unknown_field(&e.to_string())
-            && let Some(hint) = suggest(&unknown, known_field_names())
-        {
-            err = err.help(format!("did you mean `{hint}`?"));
+        if let Some(unknown) = extract_unknown_field(&e.to_string()) {
+            // toml's span points at the enclosing table, not the offending key, so
+            // relocate the caret when the key can be found.
+            if let Some(span) = find_key_span(text, None, &unknown) {
+                err = err.span(span);
+            }
+            // A field valid elsewhere (`fidelity` belongs on a transport, not a scan)
+            // would otherwise produce "did you mean `fidelity`?", which reads as a bug.
+            if let Some(hint) = suggest(&unknown, known_field_names())
+                && hint != unknown
+            {
+                err = err.help(format!("did you mean `{hint}`?"));
+            }
         }
         err
     })
 }
 
+/// Pull the human-readable message out of a `toml` error.
+///
+/// `toml` renders its own caret block, which we duplicate, so it has to be stripped:
+///
+/// ```text
+/// TOML parse error at line 2, column 1
+///   |
+/// 2 | [scans.s]
+///   | ^^^^^^^^^
+/// unknown field `fidelity`
+/// ```
+///
+/// The real message is the **last** line, not the first. An earlier version took the
+/// first non-structural line and so reported `2 | [scans.s]` as the error text, making
+/// every unknown-field error unreadable. `2 | [scans.s]` is not all digits and pipes, so
+/// the structural filter let it through.
 fn strip_toml_prefix(msg: &str) -> String {
-    // toml prefixes messages with "TOML parse error at line N, column M\n  |\n..."
-    // which duplicates the caret rendering we do ourselves.
+    let is_structural = |t: &str| {
+        t.is_empty()
+            || t.starts_with("TOML parse error")
+            // "  |", "  | ^^^", and "2 | source" are all caret-block furniture.
+            || t.starts_with('|')
+            || t.split_once('|')
+                .is_some_and(|(before, _)| !before.trim().is_empty()
+                    && before.trim().chars().all(|c| c.is_ascii_digit()))
+    };
     msg.lines()
-        .find(|l| {
-            let t = l.trim();
-            !t.is_empty()
-                && !t.starts_with("TOML parse error")
-                && !t.starts_with('|')
-                && !t
-                    .chars()
-                    .all(|c| c.is_ascii_digit() || c.is_whitespace() || c == '|')
-        })
-        .map(|l| l.trim().to_string())
-        .unwrap_or_else(|| msg.lines().next().unwrap_or(msg).to_string())
+        .map(str::trim)
+        .rfind(|l| !is_structural(l))
+        .map(str::to_string)
+        .unwrap_or_else(|| msg.lines().next().unwrap_or(msg).trim().to_string())
 }
 
 fn extract_unknown_field(msg: &str) -> Option<String> {
@@ -197,9 +222,10 @@ fn find_key_span(text: &str, table: Option<&str>, key: &str) -> Option<std::ops:
                     .unwrap_or("")
                     .trim();
                 in_table = header == t;
-            } else {
-                in_table = false;
             }
+            // With no table named, search the whole file: a deserialization error knows
+            // the key but not which table it was in, and pointing at the key beats
+            // pointing at a table header.
         } else if in_table {
             let name = trimmed.split('=').next().map(|s| s.trim()).unwrap_or("");
             if name == key {
@@ -895,6 +921,33 @@ mod tests {
     #[test]
     fn key_span_absent_for_missing_table() {
         assert!(find_key_span("[a]\nkey = 1\n", Some("zzz"), "key").is_none());
+    }
+
+    #[test]
+    fn toml_message_is_the_real_error_not_the_source_line() {
+        // toml puts its message *after* the caret block it renders. Taking the first
+        // non-structural line reported `2 | [scans.s]` as the error text, which made
+        // every unknown-field error unreadable.
+        let raw = "TOML parse error at line 2, column 1\n  |\n2 | [scans.s]\n  | ^^^^^^^^^\nunknown field `fidelity`\n";
+        assert_eq!(strip_toml_prefix(raw), "unknown field `fidelity`");
+
+        let raw2 =
+            "TOML parse error at line 3, column 5\n  |\n3 | rate = \n  |     ^\ninvalid string\n";
+        assert_eq!(strip_toml_prefix(raw2), "invalid string");
+    }
+
+    #[test]
+    fn key_span_search_spans_all_tables_when_none_is_named() {
+        // A deserialization error knows the key but not its table, so the caret should
+        // still find the key rather than fall back to the table header.
+        let text = "version = 1\n[scans.s]\ntargets = []\nfidelity = \"full\"\n";
+        let span = find_key_span(text, None, "fidelity").expect("should find the key");
+        assert_eq!(&text[span.clone()], "fidelity");
+        assert_eq!(
+            text[..span.start].matches('\n').count(),
+            3,
+            "should be line 4"
+        );
     }
 
     #[test]
