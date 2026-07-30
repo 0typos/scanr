@@ -402,7 +402,7 @@ fn io_failure(e: &std::io::Error, what: &str, phases: Phases) -> ProbeOutcome {
     )
 }
 
-fn read_exact(s: &mut TcpStream, buf: &mut [u8]) -> std::io::Result<()> {
+fn read_exact<R: Read>(s: &mut R, buf: &mut [u8]) -> std::io::Result<()> {
     let mut filled = 0;
     while filled < buf.len() {
         match s.read(&mut buf[filled..]) {
@@ -448,7 +448,11 @@ pub fn build_connect_request(dest: &Destination) -> Vec<u8> {
 
 /// Read a CONNECT reply, consuming the variable-length bound address so a malformed or
 /// truncated response is detected rather than silently ignored.
-fn read_reply(s: &mut TcpStream) -> std::io::Result<u8> {
+///
+/// Generic over the reader so a fuzz harness can drive it with arbitrary bytes. This
+/// parses attacker-influenced input — the length byte of an `ATYP_DOMAIN` bound address
+/// is supplied by the proxy — so it is the most security-relevant parser in the crate.
+pub fn read_reply<R: Read>(s: &mut R) -> std::io::Result<u8> {
     let mut head = [0u8; 4];
     read_exact(s, &mut head)?;
     if head[0] != VERSION {

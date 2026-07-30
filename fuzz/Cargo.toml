@@ -1,0 +1,42 @@
+[package]
+name = "scanr-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+scanr = { path = ".." }
+tempfile = "3"
+toml = "0.9"
+
+[[bin]]
+name = "socks5_reply"
+path = "fuzz_targets/socks5_reply.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config"
+path = "fuzz_targets/config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "specs"
+path = "fuzz_targets/specs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "record"
+path = "fuzz_targets/record.rs"
+test = false
+doc = false
+bench = false

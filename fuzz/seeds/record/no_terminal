@@ -1,0 +1,2 @@
+{"type":"scan_started","seq":0,"scan_id":"a"}
+{"type":"probe_result","seq":1,"scan_id":"a","target":"10.0.0.1","port":80,"state":"open"}

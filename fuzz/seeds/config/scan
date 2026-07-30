@@ -1,0 +1,5 @@
+version = 1
+[scans.s]
+targets = ["10.0.0.1"]
+ports = ["80"]
+fidelity = "full"
