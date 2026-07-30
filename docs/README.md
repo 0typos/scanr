@@ -1,11 +1,13 @@
 # scanr documentation
 
-Start with the [README](../README.md) for what the tool is and a quick start.
+The [README](../README.md) covers what the tool is and why. For a first session from
+install to a verified record, start with **[getting-started.md](getting-started.md)**.
 
 ## Guides
 
 | | |
 |---|---|
+| [getting-started.md](getting-started.md) | Install, first scan, and checking the result |
 | [configuration.md](configuration.md) | File discovery, precedence, profiles, target and port sets, DNS modes |
 | [transports.md](transports.md) | Direct and SOCKS5, what your proxy can actually tell you, concurrency it will take |
 | [output-schema.md](output-schema.md) | The scan record, its guarantees, and `jq` recipes |

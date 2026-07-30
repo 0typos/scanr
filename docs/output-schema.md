@@ -78,12 +78,47 @@ The one you will mostly consume.
 | `attempt_states` | per-attempt states, so the merge loses nothing |
 | `timing_ms` | `proxy_connect` and `handshake` absent on the direct path |
 
+`scan_config.transport.fidelity_source` says where the fidelity claim came from:
+`builtin` (direct, where the local stack separates states inherently), `config` (declared
+from a `transport test` measurement), or `unmeasured`.
+
 **Read `source` before trusting a non-open `state`.** Through a proxy that cannot
 distinguish refused from filtered, non-open results are `error` with
 `source: "proxy_reply"` rather than a fabricated verdict. `transport.measured_fidelity` in
 `scan_config` tells you which situation you are in.
 
 Row count equals probe count, so `wc -l` on `probe_result` lines is meaningful.
+
+## `scan_warning`
+
+Non-fatal conditions, each with a stable `code`. Worth filtering on: several of them mean
+the results are less trustworthy than they look.
+
+Emitted before probing, from plan resolution:
+
+| code | meaning |
+|---|---|
+| `dns_failure` | a hostname did not resolve and will not be probed |
+| `dns_mode_auto` | `auto` resolved to a specific mode; switching transports would change it |
+| `fidelity_unknown` | proxy fidelity has not been measured |
+| `fidelity_open_only` | the proxy cannot distinguish closed from filtered |
+| `ephemeral_budget` | configured rate exceeds the sustainable ephemeral-port ceiling |
+| `fd_budget` | concurrency exceeds `RLIMIT_NOFILE` |
+
+Emitted during the scan, at most once each, with `detail.remediation`:
+
+| code | meaning |
+|---|---|
+| `ephemeral_pressure` | source ports actually ran out mid-scan |
+| `fd_pressure` | descriptors actually ran out mid-scan |
+| `proxy_saturation` | the proxy stopped accepting connections |
+
+```console
+jq -r 'select(.type=="scan_warning") | "\(.code)\t\(.message)"' scan-*.jsonl
+```
+
+Seeing `fidelity_open_only`, `proxy_saturation`, or either `*_pressure` code means some
+non-open results describe the scanning environment rather than the target.
 
 ## Terminal event
 

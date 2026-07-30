@@ -60,8 +60,16 @@ Three destinations are probed: one that should be open, one that should be refus
 For the known-open target, a loopback proxy gets a listener `scanr` binds itself, which
 it is guaranteed to be able to reach. This matters: the obvious choice of "the proxy's own
 listening socket" fails on **half** the proxies measured — dante refuses it by ruleset
-(`0x02`) and 3proxy answers `0x09`, which is not even a defined reply code. For a remote
-proxy, pass `--known-open HOST:PORT` naming something you know it can reach.
+(`0x02`) and 3proxy answers `0x09`, which is not even a defined reply code.
+
+For a remote proxy, name destinations it can reach:
+
+```console
+scanr transport test lab --known-open 10.1.1.5:443 --known-closed 10.1.1.5:1
+```
+
+`--known-closed` defaults to port 1 on the proxy host, which is reliably refused in most
+deployments but not all.
 
 ### Recording it
 
