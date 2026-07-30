@@ -10,7 +10,8 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::net::{parse_ports, parse_target, target::TargetSet};
+use crate::net::target::{TargetSet, format_pair, parse_pair};
+use crate::net::{parse_ports, parse_target};
 use crate::units::{HumanElapsed, commas};
 
 struct Record {
@@ -391,7 +392,12 @@ pub fn summarize(path: &Path) -> Result<String, String> {
     Ok(s)
 }
 
-/// Targets that were not fully probed, suitable for `scanr run --targets -`.
+/// Endpoints that were not probed, suitable for `scanr run --pairs -`.
+///
+/// This is what replaces a `resume` feature (D12). It used to emit whole targets, which
+/// re-probed ports that had already completed — a weakness that undermined the argument
+/// for dropping resume in the first place. The record contains every probed pair, so the
+/// exact remainder was always derivable; only a way to express it was missing.
 pub fn remainder(path: &Path) -> Result<(Vec<String>, String), String> {
     let rec = read(path)?;
     let config = rec
@@ -400,73 +406,97 @@ pub fn remainder(path: &Path) -> Result<(Vec<String>, String), String> {
         .find(|e| kind(e) == "scan_config")
         .ok_or_else(|| format!("{} has no scan_config event", path.display()))?;
 
-    let specs: Vec<String> = config["targets"]["spec"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    let excludes: Vec<String> = config["targets"]["exclude"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    let port_spec = config["ports"]["spec"].as_str().unwrap_or("");
-
-    let ports =
-        parse_ports(port_spec).map_err(|e| format!("recorded port spec is invalid: {e}"))?;
-    let mut set = TargetSet::default();
-    for s in &specs {
-        if s.starts_with("file:") {
+    // Every endpoint the scan intended to probe.
+    let expected: Vec<(String, u16)> = if config["targets"]["mode"] == "pairs" {
+        if config["targets"]["pairs_truncated"] == true {
             return Err(format!(
-                "this scan's targets came from {s}, which is not reproducible from the \
-                 record alone; re-run with the same file"
+                "{} recorded too many explicit pairs to embed, so its remainder cannot be \
+                 derived from the record alone",
+                path.display()
             ));
         }
-        set.include
-            .push(parse_target(s).map_err(|e| format!("recorded target spec is invalid: {e}"))?);
-    }
-    for s in &excludes {
-        set.exclude
-            .push(parse_target(s).map_err(|e| format!("recorded exclude spec is invalid: {e}"))?);
-    }
-    let all = set
-        .expand(true, u64::MAX)
-        .map_err(|e| format!("cannot re-expand targets: {e}"))?;
+        let pairs = config["targets"]["pairs"]
+            .as_array()
+            .ok_or("pair-mode record has no embedded pair list")?;
+        let mut out = Vec::with_capacity(pairs.len());
+        for v in pairs {
+            let line = v.as_str().ok_or("malformed embedded pair")?;
+            let (spec, port) =
+                parse_pair(line).map_err(|e| format!("recorded pair `{line}` is invalid: {e}"))?;
+            out.push((spec.to_string(), port));
+        }
+        out
+    } else {
+        let specs: Vec<String> = config["targets"]["spec"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let excludes: Vec<String> = config["targets"]["exclude"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let port_spec = config["ports"]["spec"].as_str().unwrap_or("");
+        let ports =
+            parse_ports(port_spec).map_err(|e| format!("recorded port spec is invalid: {e}"))?;
 
-    // Count probes seen per target.
-    let mut probed: std::collections::HashMap<String, BTreeSet<u16>> =
-        std::collections::HashMap::new();
+        let mut set = TargetSet::default();
+        for s in &specs {
+            if s.starts_with("file:") {
+                return Err(format!(
+                    "this scan's targets came from {s}, which is not reproducible from the \
+                     record alone; re-run with the same file"
+                ));
+            }
+            set.include.push(
+                parse_target(s).map_err(|e| format!("recorded target spec is invalid: {e}"))?,
+            );
+        }
+        for s in &excludes {
+            set.exclude.push(
+                parse_target(s).map_err(|e| format!("recorded exclude spec is invalid: {e}"))?,
+            );
+        }
+        let targets = set
+            .expand(true, u64::MAX)
+            .map_err(|e| format!("cannot re-expand targets: {e}"))?;
+
+        let mut out = Vec::with_capacity(targets.len() * ports.len());
+        for t in &targets {
+            for p in &ports {
+                out.push((t.to_string(), *p));
+            }
+        }
+        out
+    };
+
+    // Exactly what was reported, pair by pair.
+    let mut probed: BTreeSet<(String, u16)> = BTreeSet::new();
     for e in rec.events.iter().filter(|e| kind(e) == "probe_result") {
         if let (Some(t), Some(p)) = (e["target"].as_str(), e["port"].as_u64()) {
-            probed.entry(t.to_string()).or_default().insert(p as u16);
+            probed.insert((t.to_string(), p as u16));
         }
     }
 
-    let expected: BTreeSet<u16> = ports.iter().copied().collect();
-    let mut remaining = Vec::new();
-    for t in &all {
-        let key = t.to_string();
-        let done = probed.get(&key).map(|s| s.len()).unwrap_or(0);
-        if done < expected.len() {
-            remaining.push(key);
-        }
-    }
+    let remaining: Vec<String> = expected
+        .iter()
+        .filter(|pair| !probed.contains(*pair))
+        .map(|(t, p)| format_pair(t, *p))
+        .collect();
 
     let note = format!(
-        "{} of {} targets were not fully probed; re-run with:\n  \
-         scanr output remainder {} | scanr run --targets - --ports '{}'\n\
-         note: partially probed targets are listed whole, so their completed ports \
-         will be probed again.",
+        "{} of {} endpoints were not probed; re-run exactly those with:\n  \
+         scanr output remainder {} | scanr run --pairs -",
         commas(remaining.len() as u64),
-        commas(all.len() as u64),
-        path.display(),
-        port_spec
+        commas(expected.len() as u64),
+        path.display()
     );
     Ok((remaining, note))
 }
@@ -681,12 +711,13 @@ mod tests {
                       "counts":{"planned":4,"started":4,"completed":2,"not_started":2,
                                 "open":1,"closed":1,"filtered":0,"error":0,"retried":0}});
         let p = write(d.path(), "part.jsonl", &e);
-        let (targets, note) = remainder(&p).unwrap();
-        assert_eq!(targets, ["10.0.0.2", "10.0.0.3"]);
-        assert!(note.contains("2 of 4 targets"), "{note}");
+        let (endpoints, note) = remainder(&p).unwrap();
+        // Exact endpoints now, not whole targets: the port is part of the answer.
+        assert_eq!(endpoints, ["10.0.0.2:80", "10.0.0.3:80"]);
+        assert!(note.contains("2 of 4 endpoints"), "{note}");
         assert!(
-            note.contains("probed again"),
-            "the caveat must be stated: {note}"
+            note.contains("--pairs -"),
+            "the round trip must be shown: {note}"
         );
     }
 
@@ -696,6 +727,91 @@ mod tests {
         let p = write(d.path(), "full.jsonl", &good_events());
         let (targets, _) = remainder(&p).unwrap();
         assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn remainder_is_exact_when_a_target_is_only_partly_probed() {
+        // The whole point of the change: a target with some ports done must yield only
+        // the ports that are outstanding, not the target as a whole.
+        let d = tempfile::tempdir().unwrap();
+        let mut e = vec![
+            json!({"type":"scan_started","seq":0,"scan_id":"a1","schema_version":1}),
+            json!({"type":"scan_config","seq":1,"scan_id":"a1","scan_name":"s",
+                   "targets":{"spec":["10.0.0.0/31"],"exclude":[],"count":2,"mode":"matrix"},
+                   "ports":{"spec":"80,443,8080","count":3},"probes_planned":6,
+                   "transport":{"name":"direct","type":"direct","password":null}}),
+        ];
+        // 10.0.0.0 fully probed; 10.0.0.1 only port 80.
+        let mut seq = 2;
+        for (t, p) in [
+            ("10.0.0.0", 80),
+            ("10.0.0.0", 443),
+            ("10.0.0.0", 8080),
+            ("10.0.0.1", 80),
+        ] {
+            e.push(json!({"type":"probe_result","seq":seq,"scan_id":"a1",
+                          "target":t,"port":p,"state":"closed"}));
+            seq += 1;
+        }
+        e.push(json!({"type":"scan_interrupted","seq":seq,"scan_id":"a1",
+                      "termination":"signal",
+                      "counts":{"planned":6,"started":6,"completed":4,"abandoned":2,
+                                "not_started":0,"open":0,"closed":4,"filtered":0,
+                                "error":0,"retried":0}}));
+        let p = write(d.path(), "partial.jsonl", &e);
+
+        let (rem, _) = remainder(&p).unwrap();
+        assert_eq!(
+            rem,
+            ["10.0.0.1:443", "10.0.0.1:8080"],
+            "only the outstanding ports of a partly-probed target should remain"
+        );
+    }
+
+    #[test]
+    fn remainder_of_a_pair_scan_round_trips() {
+        // A pair scan has no compact spec, so the record embeds the list. Its remainder
+        // must still be derivable, or resuming twice would be impossible.
+        let d = tempfile::tempdir().unwrap();
+        let e = vec![
+            json!({"type":"scan_started","seq":0,"scan_id":"b1","schema_version":1}),
+            json!({"type":"scan_config","seq":1,"scan_id":"b1","scan_name":"s",
+                   "targets":{"spec":["3 explicit host:port pairs"],"exclude":[],"count":2,
+                              "mode":"pairs","pairs_truncated":false,
+                              "pairs":["10.0.0.1:443","10.0.0.1:8080","[::1]:22"]},
+                   "ports":{"spec":"(explicit pairs)","count":3},"probes_planned":3,
+                   "transport":{"name":"direct","type":"direct","password":null}}),
+            json!({"type":"probe_result","seq":2,"scan_id":"b1","target":"10.0.0.1",
+                   "port":443,"state":"closed"}),
+            json!({"type":"scan_interrupted","seq":3,"scan_id":"b1","termination":"signal",
+                   "counts":{"planned":3,"started":3,"completed":1,"abandoned":2,
+                             "not_started":0,"open":0,"closed":1,"filtered":0,
+                             "error":0,"retried":0}}),
+        ];
+        let p = write(d.path(), "pairs.jsonl", &e);
+        let (rem, _) = remainder(&p).unwrap();
+        // IPv6 stays bracketed so the output can be parsed back.
+        assert_eq!(rem, ["10.0.0.1:8080", "[::1]:22"]);
+    }
+
+    #[test]
+    fn remainder_refuses_a_pair_scan_that_was_too_large_to_embed() {
+        let d = tempfile::tempdir().unwrap();
+        let e = vec![
+            json!({"type":"scan_started","seq":0,"scan_id":"c1","schema_version":1}),
+            json!({"type":"scan_config","seq":1,"scan_id":"c1","scan_name":"s",
+                   "targets":{"spec":["999999 explicit host:port pairs"],"exclude":[],
+                              "count":1,"mode":"pairs","pairs_truncated":true,"pairs":null},
+                   "ports":{"spec":"(explicit pairs)","count":1},"probes_planned":999999,
+                   "transport":{"name":"direct","type":"direct","password":null}}),
+            json!({"type":"scan_completed","seq":2,"scan_id":"c1","termination":"natural",
+                   "counts":{"planned":0,"started":0,"completed":0,"abandoned":0,
+                             "not_started":0,"open":0,"closed":0,"filtered":0,
+                             "error":0,"retried":0}}),
+        ];
+        let p = write(d.path(), "big.jsonl", &e);
+        let err = remainder(&p).unwrap_err();
+        assert!(err.contains("too many explicit pairs"), "{err}");
     }
 
     #[test]

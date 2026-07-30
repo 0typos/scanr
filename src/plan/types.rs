@@ -225,6 +225,14 @@ pub struct ScanPlan {
     pub dns_effective: DnsMode,
     pub targets: Vec<Target>,
     pub ports: Vec<u16>,
+    /// An explicit list of host:port pairs, when the scan was built from one rather than
+    /// from a target x port matrix.
+    ///
+    /// This exists so `output remainder` can be exact. Resuming an interrupted scan as a
+    /// target list re-probes ports that already completed, because a target list cannot
+    /// say "this host, only these ports". The record already contains every probed pair,
+    /// so the information is there; only a way to express it was missing.
+    pub pairs: Option<Vec<(Target, u16)>>,
     /// Canonical unexpanded specs, for the record. The expanded matrix is never
     /// embedded — a /16 x 1000 is 65M probes.
     pub target_specs: Vec<String>,
@@ -247,11 +255,23 @@ pub struct PlanWarning {
 impl ScanPlan {
     /// Total probes. `u64` because a large scan genuinely exceeds `u32`.
     pub fn probe_count(&self) -> u64 {
-        self.targets.len() as u64 * self.ports.len() as u64
+        match &self.pairs {
+            Some(p) => p.len() as u64,
+            None => self.targets.len() as u64 * self.ports.len() as u64,
+        }
+    }
+
+    /// Whether this scan came from an explicit pair list rather than a matrix.
+    pub fn is_pair_scan(&self) -> bool {
+        self.pairs.is_some()
     }
 
     /// Decompose a permuted index into (target, port).
     pub fn probe_at(&self, index: u64) -> (&Target, u16) {
+        if let Some(pairs) = &self.pairs {
+            let (t, p) = &pairs[index as usize];
+            return (t, *p);
+        }
         let per_target = self.ports.len() as u64;
         let t = (index / per_target) as usize;
         let p = (index % per_target) as usize;

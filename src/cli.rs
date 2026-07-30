@@ -193,6 +193,16 @@ struct OverrideArgs {
     #[arg(long, value_name = "SPEC", action = clap::ArgAction::Append)]
     ports: Option<Vec<String>>,
 
+    /// Exact `host:port` endpoints from `scanr output remainder`; a file, or `-` for
+    /// stdin. IPv6 must be bracketed. Cannot be combined with --targets or --ports.
+    #[arg(
+        long,
+        value_name = "FILE|-",
+        action = clap::ArgAction::Append,
+        conflicts_with_all = ["targets", "ports"]
+    )]
+    pairs: Option<Vec<String>>,
+
     /// Targets to exclude after expansion (repeatable)
     #[arg(long, value_name = "SPEC|FILE", action = clap::ArgAction::Append)]
     exclude: Option<Vec<String>>,
@@ -260,6 +270,7 @@ impl OverrideArgs {
             transport: self.transport.clone(),
             targets: self.targets.clone(),
             ports: self.ports.clone(),
+            pairs: self.pairs.clone(),
             exclude: self.exclude.clone(),
             concurrency: self.concurrency,
             rate: self.rate,

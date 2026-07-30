@@ -4,7 +4,7 @@
 .SH NAME
 scanr\-plan \- Resolve a scan and show the plan without touching the network
 .SH SYNOPSIS
-\fBscanr\-plan\fR [\fB\-\-profile\fR] [\fB\-\-transport\fR] [\fB\-\-targets\fR] [\fB\-\-ports\fR] [\fB\-\-exclude\fR] [\fB\-\-concurrency\fR] [\fB\-\-rate\fR] [\fB\-\-connect\-timeout\fR] [\fB\-\-retries\fR] [\fB\-\-dns\fR] [\fB\-\-output\-dir\fR] [\fB\-\-seed\fR] [\fB\-\-open\-only\fR] [\fB\-\-all\fR] [\fB\-\-allow\-large\-range\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fISCAN\fR] 
+\fBscanr\-plan\fR [\fB\-\-profile\fR] [\fB\-\-transport\fR] [\fB\-\-targets\fR] [\fB\-\-ports\fR] [\fB\-\-pairs\fR] [\fB\-\-exclude\fR] [\fB\-\-concurrency\fR] [\fB\-\-rate\fR] [\fB\-\-connect\-timeout\fR] [\fB\-\-retries\fR] [\fB\-\-dns\fR] [\fB\-\-output\-dir\fR] [\fB\-\-seed\fR] [\fB\-\-open\-only\fR] [\fB\-\-all\fR] [\fB\-\-allow\-large\-range\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fISCAN\fR] 
 .SH DESCRIPTION
 Resolve a scan and show the plan without touching the network
 .SH OPTIONS
@@ -20,6 +20,9 @@ Targets: specs, a named set, a file path, or `\-` for stdin (repeatable)
 .TP
 \fB\-\-ports\fR \fI<SPEC>\fR
 Ports: `80`, `1\-1024`, `all`, or a named set (repeatable)
+.TP
+\fB\-\-pairs\fR \fI<FILE|\->\fR
+Exact `host:port` endpoints from `scanr output remainder`; a file, or `\-` for stdin. IPv6 must be bracketed. Cannot be combined with \-\-targets or \-\-ports
 .TP
 \fB\-\-exclude\fR \fI<SPEC|FILE>\fR
 Targets to exclude after expansion (repeatable)

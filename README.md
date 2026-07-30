@@ -248,7 +248,7 @@ $ scanr output verify scanr-results/scan-1785294704201-a3f19c02.jsonl
 ok — record is complete and internally consistent
 
 $ scanr output summarize scanr-results/scan-*.jsonl
-$ scanr output remainder scanr-results/scan-*.jsonl | scanr run --targets - --ports web
+$ scanr output remainder scanr-results/scan-*.jsonl | scanr run --pairs -
 ```
 
 The config event embeds the **canonical unexpanded** target spec plus counts, never the

@@ -161,6 +161,19 @@ Resume is semantically murky under DNS churn and changed profiles. "The set of p
 that never ran" is just a target list, so emitting it and piping it back gives
 resume-by-composition with zero schema commitment.
 
+**Amended.** The original implementation emitted whole targets, so resuming re-probed
+ports that had already completed — which meant the claim above was not quite true, and
+the argument for dropping `resume` was weaker than it read. The record contains every
+probed pair, so the exact remainder was always derivable; only a way to express it was
+missing. `remainder` now emits `host:port` endpoints and `run --pairs` consumes them.
+
+A pair scan is the one case where an expanded list *is* embedded in the record, because
+an explicit endpoint list has no compact spec. Bounded at 50,000, beyond which
+`pairs_truncated` is set and `remainder` refuses rather than answering wrongly.
+
+`abandoned` probes are included in the remainder: they were issued but never reported, so
+whether they reached the network is unknown, and re-probing is the safe default.
+
 ### D13 — Config: user-level + project-local, project wins
 **Status:** accepted
 

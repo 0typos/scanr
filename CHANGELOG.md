@@ -30,6 +30,9 @@ invited before then.
   `.jsonl.partial` and renamed only once finalized.
 - `scanr output verify` to check a record for integrity, count consistency, and
   accidentally recorded credentials; `summarize` and `remainder` alongside it.
+- Exact resumption: `output remainder` emits the endpoints that were never reported and
+  `run --pairs` consumes them, so an interrupted scan resumes without re-probing ports
+  that already completed.
 - Randomized probe order via a seeded Feistel permutation: O(1) memory, and exactly
   reproducible from the recorded seed via `--seed`.
 - Graceful interruption. First SIGINT stops scheduling and drains in-flight probes
@@ -59,5 +62,4 @@ invited before then.
 - Through a proxy that does not report refused connections distinctly, `closed` and
   `filtered` are indistinguishable and non-open results are recorded as `error` rather
   than guessed. `transport test` tells you whether yours is such a proxy.
-- `output remainder` lists partially probed targets whole, so re-running re-probes their
-  completed ports.
+
