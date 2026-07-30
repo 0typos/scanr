@@ -83,6 +83,15 @@ convey it. Some proxies instead answer `0x01 general failure` for everything, wh
 equally unusable. Through any of these, **a closed port and a filtered port are
 indistinguishable**.
 
+Measured against four real proxies:
+
+| proxy | refused destination | fidelity |
+|---|---|---|
+| microsocks | `0x05` | full |
+| dante (sockd 1.4.3) | `0x05` | full |
+| 3proxy | `0x05` | full |
+| OpenSSH `ssh -D` | **no reply**, channel closed | open_only |
+
 `scanr` measures this rather than assuming it:
 
 ```console
@@ -138,6 +147,31 @@ version control rather than a hidden cache. `transport test` prints the exact li
 Once declared, `plan` shows `declared in config` and the warning becomes specific:
 *"proxy `pool` is recorded as open_only: it cannot distinguish a closed port from a
 filtered one, so non-open results will be `error`"*.
+
+### How much concurrency will your proxy take?
+
+Also measurable, and worth knowing: the proxy's own connection cap is usually what
+decides whether a scan succeeds, not scanr's `concurrency` setting.
+
+```console
+$ scanr transport test lab --calibrate
+  concurrency
+    at 8              32 probes,   0 refused      0%
+    at 16             64 probes,   0 refused      0%
+    at 32            128 probes, 125 refused     98%
+  Concurrency 16 was clean; it began refusing above that. [...] This proxy has a
+  connection cap, and raising it there (for example 3proxy's `maxconn`) is usually
+  the better fix.
+```
+
+That sweep is opt-in — it generates real traffic and takes about a minute. It is also
+deliberately conservative: it uses a harsher connection-churn profile than a real scan,
+so the level it clears is a floor rather than a maximum.
+
+A 3proxy left at its default `maxconn 100` loses 7% of probes at concurrency 32 and 48%
+at 64, while the same binary with `maxconn 2000` loses nothing at 512. microsocks and
+`ssh -D` both handled 512 cleanly. When a proxy does saturate mid-scan, `scanr` says so
+once, with remediation, rather than silently filling the record with `error`.
 
 ## Configuration
 

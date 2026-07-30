@@ -88,6 +88,17 @@ impl Socks5Transport {
         self.address
     }
 
+    /// A second handle on the same proxy, for issuing concurrent probes.
+    pub fn clone_for_probe(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            address: self.address,
+            username: self.username.clone(),
+            password: self.password.clone(),
+            fidelity: self.fidelity,
+        }
+    }
+
     pub fn probe_detailed(&self, dest: &Destination, timing: &Timing) -> DetailedOutcome {
         let started = Instant::now();
 

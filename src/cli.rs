@@ -145,6 +145,10 @@ enum TransportCmd {
         /// Destination expected to be closed; defaults to port 1 on the proxy host
         #[arg(long, value_name = "HOST:PORT")]
         known_closed: Option<String>,
+        /// Also sweep concurrency to find where this proxy starts refusing connections.
+        /// Generates real traffic and takes about a minute.
+        #[arg(long)]
+        calibrate: bool,
     },
 }
 
@@ -794,7 +798,14 @@ fn cmd_transport(cli: &Cli, cmd: &TransportCmd) -> Result<u8, ConfigError> {
             name,
             known_open,
             known_closed,
-        } => cmd_transport_test(&files, name, known_open.as_deref(), known_closed.as_deref()),
+            calibrate,
+        } => cmd_transport_test(
+            &files,
+            name,
+            known_open.as_deref(),
+            known_closed.as_deref(),
+            *calibrate,
+        ),
     }
 }
 
@@ -803,6 +814,7 @@ fn cmd_transport_test(
     name: &str,
     known_open: Option<&str>,
     known_closed: Option<&str>,
+    calibrate: bool,
 ) -> Result<u8, ConfigError> {
     let facts = HostFacts::probe();
     let ov = Overrides {
@@ -812,8 +824,14 @@ fn cmd_transport_test(
         ..Default::default()
     };
     let plan = resolve(files, None, &ov, &facts)?;
-    let report = crate::fidelity::measure(&plan.transport, &plan.timing, known_open, known_closed)
-        .map_err(ConfigError::new)?;
+    let report = crate::fidelity::measure(
+        &plan.transport,
+        &plan.timing,
+        known_open,
+        known_closed,
+        calibrate,
+    )
+    .map_err(ConfigError::new)?;
     let mut out = std::io::stdout();
     let _ = write!(out, "{}", report.render());
     Ok(if report.reachable {

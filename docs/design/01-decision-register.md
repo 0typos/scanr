@@ -291,3 +291,69 @@ match across rows with and without colour and with labels of every length.
 
 **Lesson worth keeping:** a formatter that is only ever exercised through a pipe is an
 untested formatter. The `is_terminal()` branch needs a pty to reach.
+
+### D23 — Proxy fidelity measured against four real implementations
+**Status:** accepted · supersedes the assumptions in D8
+
+Built and measured against real software rather than fixtures, capturing raw bytes.
+
+| proxy | refused destination | blackholed | fidelity |
+|---|---|---|---|
+| microsocks | `0x05` | no reply, timeout | **full** |
+| dante (sockd 1.4.3) | `0x05` | `0x01` | **full** |
+| 3proxy | `0x05` | no reply, timeout | **full** |
+| OpenSSH `ssh -D` | **no reply**, channel closed | no reply, timeout | **open_only** |
+
+**Three assumptions were wrong.**
+
+1. The `Collapsing` fixture models a proxy answering `0x01` for everything. **No real
+   proxy tested does this.** The genuinely awkward case is OpenSSH answering *nothing*.
+   dante uses `0x01` only for an unreachable destination, which is defensible.
+2. Using the proxy's own listening socket as the known-open calibration target fails on
+   **half** the proxies tested: dante refuses it by ruleset (`0x02`) and 3proxy answers
+   `0x09`, which is not even a defined RFC 1928 code. Both are in fact `full`, and a
+   naive calibration reported `unknown` for both. Fixed by binding our own listener when
+   the proxy is on loopback.
+3. `ssh -D` was expected to be the weakest under load. It handled concurrency 512 with
+   zero loss, as did microsocks.
+
+### D24 — Default concurrency stays at 512; the proxy's cap is the real constraint
+**Status:** accepted · **Alternative rejected:** lowering the `proxy` default
+
+Measured loss against 64 blackholed targets × 4 ports, sockets held ~2s:
+
+| proxy | c=16 | c=24 | c=32 | c=48 | c=64 | c=256 | c=512 |
+|---|---|---|---|---|---|---|---|
+| microsocks | 0% | — | 0% | — | 0% | 0% | 0% |
+| `ssh -D` | 0% | — | 0% | — | 0% | 0% | 0% |
+| 3proxy, default `maxconn 100` | 0% | 0% | 7% | 37% | 48% | 95% | 80% |
+| 3proxy, `maxconn 2000` | 0% | — | 0% | — | 0% | 0% | 0% |
+
+The binding constraint is the proxy's own configured cap, not scanr's concurrency. The
+same 3proxy binary loses nothing at 512 once `maxconn` is raised. Lowering scanr's default
+cannot rescue a proxy capped at 100 — that configuration fails from concurrency 32 — while
+it would slow the three proxies that handle 512 cleanly.
+
+So no default is defensible as "the safe number". Instead the cap is made **visible**
+(the `proxy_saturation` warning now fires, D-register/Phase 1) and **measurable**
+(`transport test --calibrate`).
+
+**Revisit trigger.** Evidence that a common proxy deployment fails at 512 for reasons
+*other* than an explicit connection cap.
+
+### D25 — Proxy capacity is measured by churn, not by a burst
+**Status:** accepted · **Alternative rejected:** counting a simultaneous connection burst
+
+The first implementation opened 64 simultaneous connections and counted acceptances. It
+reported **64/64 for every proxy**, including the 3proxy configuration measured above as
+losing 48% at concurrency 64. Useless, and worse than useless: it was false reassurance
+of exactly the kind this project keeps trying to avoid.
+
+The failure is churn-driven. 3proxy accepts 64 connections held open without complaint,
+but holds *closed* connections in its table long enough that a scanner continuously
+opening new ones exceeds the cap. Reproducing that needs repeated rounds, not one burst.
+
+`--calibrate` now sweeps concurrency with four rounds per worker against a hanging
+destination. It is deliberately conservative — it clears 16 where a real scan tolerated
+24 — and worded as "what this test observed", not "the maximum safe value". Opt-in,
+because it generates real traffic.

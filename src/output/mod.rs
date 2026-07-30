@@ -82,6 +82,7 @@ mod tests {
                     connect: Some(Duration::from_micros(21400)),
                     total: Duration::from_micros(35600),
                 },
+                pressure: None,
             },
             attempts: 2,
             attempt_states: vec![State::Filtered, State::Open],

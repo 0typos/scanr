@@ -1,8 +1,20 @@
 //! Measuring what a transport can actually tell us (D8).
 //!
 //! SOCKS5 defines distinct reply codes for refused (`0x05`), unreachable (`0x03`/`0x04`)
-//! and policy denial (`0x02`), but many implementations collapse everything into
-//! `0x01 general failure`. `ssh -D` and most commercial pools appear to behave this way.
+//! and policy denial (`0x02`), but implementations vary in whether they use them.
+//!
+//! Measured against four real proxies rather than assumed:
+//!
+//! | proxy | refused destination | fidelity |
+//! |---|---|---|
+//! | microsocks | `0x05` | full |
+//! | dante (sockd 1.4.3) | `0x05` | full |
+//! | 3proxy | `0x05` | full |
+//! | OpenSSH `ssh -D` | no reply; channel closed | open_only |
+//!
+//! So the awkward real case is not a proxy answering `0x01` for everything — none of the
+//! four did that — it is OpenSSH answering *nothing at all*, which is unusable in the
+//! same way and needs the same handling.
 //!
 //! Rather than assume, we probe three destinations whose expected outcomes we know and
 //! report what came back. The user learns the fidelity of their results *before*
@@ -29,6 +41,50 @@ pub struct Check {
     pub expectation: &'static str,
 }
 
+/// Loss measured at one concurrency level.
+#[derive(Debug, Clone, Copy)]
+pub struct Level {
+    pub concurrency: u32,
+    pub probes: u32,
+    /// Probes the proxy refused or ignored, i.e. that never completed a handshake.
+    pub refused: u32,
+}
+
+impl Level {
+    pub fn loss_pct(&self) -> f64 {
+        100.0 * self.refused as f64 / self.probes.max(1) as f64
+    }
+}
+
+/// What concurrency a proxy tolerates, measured by reproducing a scan's churn.
+///
+/// This is worth measuring because the proxy's limit, not scanr's setting, decides
+/// whether a scan succeeds — and it cannot be predicted from a burst. A 3proxy at its
+/// default `maxconn 100` accepted 64 *simultaneous* connections happily while losing 48%
+/// of probes in a churning scan at concurrency 64, because it holds closed connections in
+/// its table long enough for a continuously-reconnecting scanner to exceed the cap. An
+/// earlier burst-based probe here reported "64/64 accepted" for exactly that proxy, which
+/// would have been false reassurance, so it was removed in favour of this.
+#[derive(Debug, Clone)]
+pub struct Calibration {
+    pub levels: Vec<Level>,
+}
+
+impl Calibration {
+    /// Highest tested concurrency that lost nothing.
+    pub fn recommended(&self) -> Option<u32> {
+        self.levels
+            .iter()
+            .take_while(|l| l.refused == 0)
+            .last()
+            .map(|l| l.concurrency)
+    }
+
+    pub fn degrades(&self) -> bool {
+        self.levels.iter().any(|l| l.refused > 0)
+    }
+}
+
 #[derive(Debug)]
 pub struct FidelityReport {
     pub transport: String,
@@ -39,18 +95,24 @@ pub struct FidelityReport {
     pub checks: Vec<Check>,
     pub fidelity: Fidelity,
     pub explanation: String,
+    pub calibration: Option<Calibration>,
 }
 
 /// Probe a transport with destinations of known character.
 ///
-/// Defaults need no user input: the proxy's own listening socket is reliably open from
-/// the proxy's perspective, port 1 on the proxy host is reliably closed, and
+/// Defaults need no user input. Port 1 on the proxy host is reliably closed, and
 /// 192.0.2.1 (RFC 5737 TEST-NET-1) is guaranteed unroutable.
+///
+/// The known-open destination is the awkward one. Using the proxy's own listening socket
+/// looked obvious and turned out to fail against half the proxies tested — dante refuses
+/// it by ruleset (`0x02`) and 3proxy answers `0x09` — so for a loopback proxy we bind a
+/// listener ourselves instead, which it is guaranteed to be able to reach.
 pub fn measure(
     transport: &ResolvedTransport,
     timing: &Timing,
     known_open: Option<&str>,
     known_closed: Option<&str>,
+    calibrate: bool,
 ) -> Result<FidelityReport, String> {
     let (address, username, password) = match &transport.kind {
         TransportKind::Direct => {
@@ -66,6 +128,7 @@ pub fn measure(
                               which distinguishes refused, unreachable, and timed out. \
                               No measurement is required."
                     .into(),
+                calibration: None,
             });
         }
         TransportKind::Socks5 {
@@ -87,7 +150,38 @@ pub fn measure(
         Fidelity::Unknown,
     );
 
-    let open_dest = parse_dest(known_open, address)?;
+    // Calibration needs a destination the proxy can definitely reach. Using the proxy's
+    // own listening socket seemed obvious and fails against real software: dante refuses
+    // it by ruleset (reply 0x02) and 3proxy answers 0x09. Two of four proxies tested.
+    //
+    // When the proxy is on loopback we can do better than guessing — bind a listener
+    // ourselves, which the proxy is guaranteed to be able to reach.
+    let _own_listener: Option<std::net::TcpListener>;
+    let open_dest = match known_open {
+        Some(s) => parse_dest(Some(s), address)?,
+        None if address.ip().is_loopback() => {
+            let l = std::net::TcpListener::bind("127.0.0.1:0")
+                .map_err(|e| format!("cannot bind a calibration listener: {e}"))?;
+            let a = l
+                .local_addr()
+                .map_err(|e| format!("cannot read calibration listener address: {e}"))?;
+            // Accept and drop, so the proxy's connection completes.
+            let acceptor = l.try_clone().map_err(|e| e.to_string())?;
+            std::thread::spawn(move || {
+                for s in acceptor.incoming() {
+                    drop(s);
+                }
+            });
+            _own_listener = Some(l);
+            a
+        }
+        // A remote proxy cannot reach our loopback, so fall back to its own address and
+        // say plainly what to do when that fails.
+        None => {
+            _own_listener = None;
+            address
+        }
+    };
     let closed_dest = parse_dest(known_closed, SocketAddr::new(address.ip(), 1))?;
     let blackhole: SocketAddr = "192.0.2.1:80".parse().expect("valid literal");
 
@@ -149,6 +243,14 @@ pub fn measure(
 
     let (fidelity, explanation) = judge(reachable, open_ok, closed_reply);
 
+    // Opt-in: this generates real traffic and takes time, so it is not part of the
+    // default check.
+    let calibration = if calibrate && reachable && open_ok {
+        Some(calibrate_concurrency(&client, timing, blackhole))
+    } else {
+        None
+    };
+
     Ok(FidelityReport {
         transport: transport.name.clone(),
         kind: "socks5".into(),
@@ -158,6 +260,7 @@ pub fn measure(
         checks,
         fidelity,
         explanation,
+        calibration,
     })
 }
 
@@ -172,12 +275,24 @@ pub fn judge(reachable: bool, open_ok: bool, closed_reply: Option<u8>) -> (Fidel
         );
     }
     if !open_ok {
+        // Say what the closed probe implied rather than discarding it. dante and 3proxy
+        // both answer 0x05 for a refused destination and are in fact `full`, but both
+        // refuse to connect to their own listening port, so a naive calibration reports
+        // Unknown and looks like the tool is broken.
+        let hint = match closed_reply {
+            Some(REP_CONNECTION_REFUSED) => {
+                " The known-closed probe did answer 0x05, which suggests full fidelity, \
+                 but that is unconfirmed without a working open probe."
+            }
+            _ => "",
+        };
         return (
             Fidelity::Unknown,
-            "The known-open destination did not report open, so this proxy's replies \
-             cannot be calibrated. Pass --known-open with a destination you are certain \
-             is reachable from the proxy."
-                .into(),
+            format!(
+                "The known-open destination did not report open, so this proxy's replies \
+                 cannot be calibrated.{hint} Pass --known-open with a destination you are \
+                 certain is reachable from the proxy."
+            ),
         );
     }
     match closed_reply {
@@ -211,6 +326,68 @@ pub fn judge(reachable: bool, open_ok: bool, closed_reply: Option<u8>) -> (Fidel
                 .into(),
         ),
     }
+}
+
+/// Concurrency levels tried, low to high. Stops early once loss appears.
+pub const CALIBRATION_LEVELS: &[u32] = &[8, 16, 32, 64, 128, 256];
+/// Probes each worker makes per level. More than one is essential: a single round holds
+/// connections without ever reconnecting, which is what made the burst probe useless.
+const ROUNDS_PER_WORKER: u32 = 4;
+
+/// Reproduce a scan's connection churn at increasing concurrency and report where the
+/// proxy starts refusing.
+fn calibrate_concurrency(
+    client: &Socks5Transport,
+    timing: &Timing,
+    dest: SocketAddr,
+) -> Calibration {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    // A destination that hangs is required, so connections are actually held while new
+    // ones are made. Kept short so the sweep finishes in reasonable time.
+    let mut t = timing.clone();
+    let hold = Duration::from_millis(500);
+    t.proxy_connect_timeout = timing.proxy_connect_timeout.min(hold);
+    t.handshake_timeout = timing.handshake_timeout.min(hold);
+    t.connect_timeout = hold;
+
+    let mut levels = Vec::new();
+    for &c in CALIBRATION_LEVELS {
+        let refused = Arc::new(AtomicU32::new(0));
+        let barrier = Arc::new(std::sync::Barrier::new(c as usize));
+        let mut handles = Vec::with_capacity(c as usize);
+        for _ in 0..c {
+            let (refused, barrier) = (refused.clone(), barrier.clone());
+            let cl = client.clone_for_probe();
+            let t = t.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..ROUNDS_PER_WORKER {
+                    let o = cl.probe_detailed(&Destination::Addr(dest), &t).outcome;
+                    // No handshake means the proxy never took the connection.
+                    if o.phases.handshake.is_none() {
+                        refused.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            let _ = h.join();
+        }
+        let level = Level {
+            concurrency: c,
+            probes: c * ROUNDS_PER_WORKER,
+            refused: refused.load(Ordering::Relaxed),
+        };
+        let degraded = level.refused > 0;
+        levels.push(level);
+        // Once it starts refusing, higher levels only refuse harder.
+        if degraded {
+            break;
+        }
+    }
+    Calibration { levels }
 }
 
 impl FidelityReport {
@@ -253,6 +430,45 @@ impl FidelityReport {
         for line in wrap(&self.explanation, 72) {
             s.push_str(&format!("  {line}\n"));
         }
+        if let Some(cal) = &self.calibration {
+            s.push_str(&format!("\n  {:<18}\n", "concurrency"));
+            for l in &cal.levels {
+                s.push_str(&format!(
+                    "  {:<18}{:>4} probes, {:>3} refused  {:>5.0}%\n",
+                    format!("  at {}", l.concurrency),
+                    l.probes,
+                    l.refused,
+                    l.loss_pct()
+                ));
+            }
+            // Worded as "what this test observed" rather than "the maximum safe value".
+            // The sweep holds connections for 500ms across four rounds, a harsher churn
+            // profile than most scans, so the level it clears is a conservative floor:
+            // a proxy measured clean to 8 here tolerated 24 in a real scan. Erring low is
+            // the right direction, since what this replaced was a probe that cheerfully
+            // reported 64/64 for a proxy that then lost half its probes.
+            let advice = match (cal.recommended(), cal.degrades()) {
+                (Some(r), true) => format!(
+                    "Concurrency {r} was clean; it began refusing above that. Treat {r} as \
+                     a conservative ceiling — a real scan may tolerate somewhat more, but \
+                     past the limit probes are recorded as `error` rather than as port \
+                     verdicts. This proxy has a connection cap, and raising it there (for \
+                     example 3proxy's `maxconn`) is usually the better fix."
+                ),
+                (Some(r), false) => format!(
+                    "No loss up to concurrency {r}, the highest level tested, so this \
+                     proxy is not the constraint at that level."
+                ),
+                (None, _) => "This proxy refused connections even at the lowest level \
+                              tested, which suggests a very low connection cap. Raise it \
+                              on the proxy, or use --profile proxy-careful."
+                    .into(),
+            };
+            for line in wrap(&advice, 72) {
+                s.push_str(&format!("  {line}\n"));
+            }
+        }
+
         // Measuring is only half the job — recording it in config is what silences the
         // per-scan warning and puts the fact in version control (D8).
         if self.kind == "socks5" && self.fidelity != Fidelity::Unknown {
@@ -330,7 +546,7 @@ mod tests {
             kind: TransportKind::Direct,
             fidelity: Fidelity::Full,
         };
-        let r = measure(&t, &timing(), None, None).unwrap();
+        let r = measure(&t, &timing(), None, None, false).unwrap();
         assert_eq!(r.fidelity, Fidelity::Full);
         assert!(r.checks.is_empty());
         assert!(r.reachable);
@@ -339,7 +555,7 @@ mod tests {
     #[test]
     fn faithful_proxy_measures_as_full() {
         let fx = Socks5Fixture::start(Behavior::Faithful);
-        let r = measure(&socks_transport(fx.addr()), &timing(), None, None).unwrap();
+        let r = measure(&socks_transport(fx.addr()), &timing(), None, None, false).unwrap();
         assert!(r.reachable);
         assert_eq!(r.fidelity, Fidelity::Full, "{}", r.explanation);
         assert!(r.explanation.contains("tell `closed` apart"));
@@ -349,7 +565,7 @@ mod tests {
     fn collapsing_proxy_measures_as_open_only() {
         // This is the ssh -D / commercial pool case.
         let fx = Socks5Fixture::start(Behavior::Collapsing);
-        let r = measure(&socks_transport(fx.addr()), &timing(), None, None).unwrap();
+        let r = measure(&socks_transport(fx.addr()), &timing(), None, None, false).unwrap();
         assert_eq!(r.fidelity, Fidelity::OpenOnly, "{}", r.explanation);
         assert!(r.explanation.contains("cannot distinguish"));
         assert!(r.explanation.contains("rather than guessed"));
@@ -358,7 +574,7 @@ mod tests {
     #[test]
     fn unreachable_proxy_yields_unknown_not_a_guess() {
         let dead = crate::testsupport::closed_port();
-        let r = measure(&socks_transport(dead), &timing(), None, None).unwrap();
+        let r = measure(&socks_transport(dead), &timing(), None, None, false).unwrap();
         assert!(!r.reachable);
         assert_eq!(r.fidelity, Fidelity::Unknown);
     }
@@ -366,7 +582,7 @@ mod tests {
     #[test]
     fn checks_cover_open_closed_and_blackhole() {
         let fx = Socks5Fixture::start(Behavior::Faithful);
-        let r = measure(&socks_transport(fx.addr()), &timing(), None, None).unwrap();
+        let r = measure(&socks_transport(fx.addr()), &timing(), None, None, false).unwrap();
         let labels: Vec<&str> = r.checks.iter().map(|c| c.label).collect();
         assert_eq!(labels, ["known-open", "known-closed", "blackholed"]);
     }
@@ -400,7 +616,7 @@ mod tests {
     #[test]
     fn report_renders_the_expectation_mismatch() {
         let fx = Socks5Fixture::start(Behavior::Collapsing);
-        let r = measure(&socks_transport(fx.addr()), &timing(), None, None).unwrap();
+        let r = measure(&socks_transport(fx.addr()), &timing(), None, None, false).unwrap();
         let out = r.render();
         assert!(out.contains("known-closed"), "{out}");
         assert!(out.contains("expected closed"), "{out}");
@@ -415,9 +631,78 @@ mod tests {
             &timing(),
             Some("nonsense"),
             None,
+            false,
         )
         .unwrap_err();
         assert!(e.contains("not a valid host:port"));
+    }
+
+    #[test]
+    fn calibration_is_absent_unless_requested() {
+        let fx = Socks5Fixture::start(Behavior::Faithful);
+        let r = measure(&socks_transport(fx.addr()), &timing(), None, None, false).unwrap();
+        assert!(r.calibration.is_none(), "sweeping should be opt-in");
+        assert!(!r.render().contains("concurrency"));
+    }
+
+    #[test]
+    fn calibration_recommends_the_highest_clean_level() {
+        let cal = Calibration {
+            levels: vec![
+                Level {
+                    concurrency: 8,
+                    probes: 32,
+                    refused: 0,
+                },
+                Level {
+                    concurrency: 16,
+                    probes: 64,
+                    refused: 0,
+                },
+                Level {
+                    concurrency: 32,
+                    probes: 128,
+                    refused: 9,
+                },
+            ],
+        };
+        assert_eq!(cal.recommended(), Some(16));
+        assert!(cal.degrades());
+        assert_eq!(cal.levels[2].loss_pct().round() as u32, 7);
+    }
+
+    #[test]
+    fn calibration_with_no_loss_recommends_the_top_level() {
+        let cal = Calibration {
+            levels: vec![
+                Level {
+                    concurrency: 8,
+                    probes: 32,
+                    refused: 0,
+                },
+                Level {
+                    concurrency: 16,
+                    probes: 64,
+                    refused: 0,
+                },
+            ],
+        };
+        assert_eq!(cal.recommended(), Some(16));
+        assert!(!cal.degrades());
+    }
+
+    #[test]
+    fn calibration_failing_at_the_lowest_level_recommends_nothing() {
+        // Distinguished from "no data": the proxy answered, and refused anyway.
+        let cal = Calibration {
+            levels: vec![Level {
+                concurrency: 8,
+                probes: 32,
+                refused: 4,
+            }],
+        };
+        assert_eq!(cal.recommended(), None);
+        assert!(cal.degrades());
     }
 
     #[test]
