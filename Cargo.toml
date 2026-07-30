@@ -51,6 +51,8 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+# Man page generation, exercised by a test that fails if man/scanr.1 is stale.
+clap_mangen = "0.2"
 
 [profile.release]
 opt-level = 3

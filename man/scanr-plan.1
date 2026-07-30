@@ -1,0 +1,61 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH scanr-plan 1  "scanr-plan " 
+.SH NAME
+scanr\-plan \- Resolve a scan and show the plan without touching the network
+.SH SYNOPSIS
+\fBscanr\-plan\fR [\fB\-\-profile\fR] [\fB\-\-transport\fR] [\fB\-\-targets\fR] [\fB\-\-ports\fR] [\fB\-\-exclude\fR] [\fB\-\-concurrency\fR] [\fB\-\-rate\fR] [\fB\-\-connect\-timeout\fR] [\fB\-\-retries\fR] [\fB\-\-dns\fR] [\fB\-\-output\-dir\fR] [\fB\-\-seed\fR] [\fB\-\-open\-only\fR] [\fB\-\-all\fR] [\fB\-\-allow\-large\-range\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fISCAN\fR] 
+.SH DESCRIPTION
+Resolve a scan and show the plan without touching the network
+.SH OPTIONS
+.TP
+\fB\-\-profile\fR \fI<PROFILE>\fR
+Timing profile: proxy\-careful, proxy, direct, direct\-fast, or one you defined
+.TP
+\fB\-\-transport\fR \fI<TRANSPORT>\fR
+Transport name
+.TP
+\fB\-\-targets\fR \fI<SPEC|FILE|\->\fR
+Targets: specs, a named set, a file path, or `\-` for stdin (repeatable)
+.TP
+\fB\-\-ports\fR \fI<SPEC>\fR
+Ports: `80`, `1\-1024`, `all`, or a named set (repeatable)
+.TP
+\fB\-\-exclude\fR \fI<SPEC|FILE>\fR
+Targets to exclude after expansion (repeatable)
+.TP
+\fB\-\-concurrency\fR \fI<N>\fR
+In\-flight probes; also the worker thread count
+.TP
+\fB\-\-rate\fR \fI<N>\fR
+Launch rate ceiling in probes/second, 0 for unlimited
+.TP
+\fB\-\-connect\-timeout\fR \fI<DURATION>\fR
+Destination connection timeout, e.g. 2s or 500ms
+.TP
+\fB\-\-retries\fR \fI<N>\fR
+Retries for probes that time out
+.TP
+\fB\-\-dns\fR \fI<MODE>\fR
+Who resolves hostnames
+.TP
+\fB\-\-output\-dir\fR \fI<DIR>\fR
+Directory for JSONL scan records
+.TP
+\fB\-\-seed\fR \fI<HEX>\fR
+Permutation seed, so a randomized scan can be replayed exactly
+.TP
+\fB\-\-open\-only\fR
+Print only open ports (default)
+.TP
+\fB\-\-all\fR
+Print every probe result, not just open ports
+.TP
+\fB\-\-allow\-large\-range\fR
+Permit target sets larger than 4,000,000 addresses
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+[\fISCAN\fR]
+Name of a scan defined in configuration; omit for an ad\-hoc scan

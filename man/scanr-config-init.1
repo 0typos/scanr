@@ -1,0 +1,19 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH scanr-config-init 1  "scanr-config-init " 
+.SH NAME
+scanr\-config\-init \- Write an annotated scanr.toml documenting every field
+.SH SYNOPSIS
+\fBscanr\-config\-init\fR [\fB\-\-force\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fIPATH\fR] 
+.SH DESCRIPTION
+Write an annotated scanr.toml documenting every field
+.SH OPTIONS
+.TP
+\fB\-\-force\fR
+Overwrite an existing file
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+[\fIPATH\fR] [default: scanr.toml]
+Where to write it
