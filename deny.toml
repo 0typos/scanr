@@ -1,0 +1,37 @@
+# cargo-deny configuration. Checked in CI so a dependency cannot quietly introduce an
+# advisory, an incompatible licence, or a second copy of something already vendored.
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+# Everything in the tree must be one of these. scanr itself is MIT OR Apache-2.0.
+# Exactly what the current tree uses, with nothing speculative: an unmatched allowance
+# is an invitation to accept a licence nobody reviewed. Adding one should be a decision.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "Unicode-3.0",
+    # memchr is dual MIT/Unlicense; both are acceptable.
+    "Unlicense",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# The dependency list is short and deliberate (see docs/design/03-architecture.md).
+# Anything arriving here that pulls in an async runtime contradicts D1 and should be a
+# conscious decision rather than a transitive surprise.
+deny = [
+    { name = "tokio", reason = "D1: scanr uses blocking sockets on a bounded thread pool" },
+    { name = "async-std", reason = "D1: no async runtime" },
+    { name = "mio", reason = "D2: rejected in the runtime evaluation" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

@@ -1,0 +1,114 @@
+# NOTE: written without a remote to run it against, so this file is UNVERIFIED.
+# Expect to iterate on it during the first tagged release.
+#
+# Distribution is prebuilt static binaries attached to a GitHub release; the crate is
+# marked `publish = false` and is not pushed to crates.io.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # Allows a dry run against a branch before trusting a real tag.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+        # build.rs stamps the commit into every scan record, so the tag must resolve to
+        # real history rather than a shallow clone.
+        with: { fetch-depth: 0 }
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Verify the binary reports the tagged version
+        run: |
+          BIN=target/${{ matrix.target }}/release/scanr
+          "$BIN" --version
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            want="${GITHUB_REF_NAME#v}"
+            got="$("$BIN" --version | head -1 | awk '{print $2}')"
+            if [ "$want" != "$got" ]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match binary version $got"
+              exit 1
+            fi
+          fi
+          # A release build must not advertise a dirty tree.
+          if "$BIN" --version | grep -q dirty; then
+            echo "::error::built from a dirty working tree"; exit 1
+          fi
+
+      - name: Package
+        run: |
+          name="scanr-${GITHUB_REF_NAME:-dev}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp target/${{ matrix.target }}/release/scanr "dist/$name/"
+          cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
+          # Ship completions so installation does not require running the binary first.
+          mkdir -p "dist/$name/completions"
+          for sh in bash zsh fish elvish power-shell; do
+            target/${{ matrix.target }}/release/scanr completion "$sh" \
+              > "dist/$name/completions/$sh" || true
+          done
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          ( cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+
+  publish:
+    name: Attach to the release
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Extract this version's changelog section
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # Everything between this version's heading and the next one.
+          awk -v v="$version" '
+            $0 ~ "^## \\[?" v "\\]?" { grab=1; next }
+            grab && /^## / { exit }
+            grab { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::warning::no CHANGELOG section for $version"
+            echo "See CHANGELOG.md." > notes.md
+          fi
+          cat notes.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
+          body_path: notes.md
+          fail_on_unmatched_files: true
