@@ -238,14 +238,27 @@ fn mask(addr: IpAddr, prefix: u8) -> IpAddr {
 
 impl TargetSpec {
     /// Number of addresses this spec covers. Hostnames count as one until resolved.
+    ///
+    /// Saturates at `u128::MAX`, which is one short of the true count for `::/0`. That is
+    /// the right trade: the value exists to be compared against an expansion limit, and
+    /// no limit is anywhere near `2^128`.
+    ///
+    /// Both arms previously overflowed, found by fuzzing. `::/0` computed
+    /// `1u128 << 128`, which panics in debug and — worse — silently wraps in release, so
+    /// a release build reported that `::/0` "covers 1 addresses" and would have let it
+    /// past a count-based limit check. The range arm had the same flaw for a range
+    /// spanning the whole address space.
     pub fn count(&self) -> u128 {
         match self {
             TargetSpec::Addr(_) | TargetSpec::Host(_) => 1,
             TargetSpec::Cidr { base, prefix } => {
-                let width = if base.is_ipv4() { 32 } else { 128 };
-                1u128 << (width - *prefix as u32)
+                let width: u32 = if base.is_ipv4() { 32 } else { 128 };
+                let host_bits = width - *prefix as u32;
+                1u128.checked_shl(host_bits).unwrap_or(u128::MAX)
             }
-            TargetSpec::Range { start, end } => to_u128(*end) - to_u128(*start) + 1,
+            TargetSpec::Range { start, end } => to_u128(*end)
+                .saturating_sub(to_u128(*start))
+                .saturating_add(1),
         }
     }
 
@@ -466,6 +479,37 @@ mod tests {
             v,
             ["10.0.0.0", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5"]
         );
+    }
+
+    #[test]
+    fn counts_do_not_overflow_at_the_extremes() {
+        // Found by fuzzing: `::/0` computed 1u128 << 128, which panics in debug and
+        // silently wraps to 1 in release. A count of 1 for the entire address space
+        // would sail past any limit check.
+        assert_eq!(t("::/0").count(), u128::MAX);
+        assert_eq!(t("::/1").count(), 1u128 << 127);
+        assert_eq!(t("0.0.0.0/0").count(), 1u128 << 32);
+        // Whole-space range, the same flaw in the other arm.
+        assert_eq!(
+            t("::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff").count(),
+            u128::MAX
+        );
+        assert_eq!(t("0.0.0.0-255.255.255.255").count(), 1u128 << 32);
+    }
+
+    #[test]
+    fn absurd_ranges_are_refused_not_iterated() {
+        // The count must be truthful enough for the limit check to reject these.
+        for spec in ["::/0", "::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"] {
+            let set = TargetSet {
+                include: vec![t(spec)],
+                exclude: vec![],
+            };
+            assert!(
+                set.expand(false, DEFAULT_MAX_TARGETS).is_err(),
+                "{spec} should be refused"
+            );
+        }
     }
 
     #[test]
