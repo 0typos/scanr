@@ -110,7 +110,7 @@ jobs:
       # it must stay fast, and it pins the two crashes fuzzing already found.
       - name: Replay seeds
         run: |
-          for target in socks5_reply config specs record; do
+          for target in socks5_reply socks5_handshake config specs record; do
             echo "--- $target ---"
             for seed in fuzz/seeds/"$target"/*; do
               cargo fuzz run "$target" "$seed"

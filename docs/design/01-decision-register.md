@@ -401,3 +401,22 @@ streaming durability and post-hoc inspection, and `gzip` after the fact costs on
 
 **Revisit trigger,** now concrete rather than vague: someone routinely scanning above
 ~10M probes, where records reach multiple gigabytes.
+
+### D27 — The SOCKS5 handshake is fuzzed as a unit, not just its reply parser
+**Status:** accepted
+
+The reply parser was fuzzed from the start, but everything before it was not: the
+greeting, method selection, and the RFC 1929 authentication exchange. Those carry more
+state and are equally peer-controlled — the proxy picks the auth method, supplies the
+status byte we act on, and may close or stall at any point.
+
+Required making the handshake generic over its stream rather than tied to `TcpStream`,
+which is a better shape regardless: it is now drivable from a test without a socket.
+
+The harness varies whether credentials are configured, so the no-auth, username/password,
+and username-without-password paths are all reachable from one corpus, and it refuses
+writes past a bound so the "peer stopped reading" path is exercised too. It asserts more
+than absence of panics: a failed handshake must never report `open`, and must always
+carry a reason a human can read.
+
+66 million executions, clean.
