@@ -1,0 +1,25 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH scanr-transport-test 1  "scanr-transport-test " 
+.SH NAME
+scanr\-transport\-test \- Measure a proxy\*(Aqs reachability, authentication, and result fidelity
+.SH SYNOPSIS
+\fBscanr\-transport\-test\fR [\fB\-\-known\-open\fR] [\fB\-\-known\-closed\fR] [\fB\-\-calibrate\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fINAME\fR> 
+.SH DESCRIPTION
+Measure a proxy\*(Aqs reachability, authentication, and result fidelity
+.SH OPTIONS
+.TP
+\fB\-\-known\-open\fR \fI<HOST:PORT>\fR
+Destination expected to be open; defaults to the proxy\*(Aqs own address
+.TP
+\fB\-\-known\-closed\fR \fI<HOST:PORT>\fR
+Destination expected to be closed; defaults to port 1 on the proxy host
+.TP
+\fB\-\-calibrate\fR
+Also sweep concurrency to find where this proxy starts refusing connections. Generates real traffic and takes about a minute
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+<\fINAME\fR>
+

@@ -314,9 +314,20 @@ mechanical.
 
 ## Documentation
 
-`docs/design/` holds the decision register, runtime evaluation, architecture, and the
-configuration, JSONL, and CLI specifications. Every significant decision is recorded
-there with its alternatives, rationale, and revisit trigger.
+| | |
+|---|---|
+| [docs/configuration.md](docs/configuration.md) | precedence, profiles, target and port sets, DNS modes |
+| [docs/transports.md](docs/transports.md) | what your proxy can tell you, and how much concurrency it takes |
+| [docs/output-schema.md](docs/output-schema.md) | the record, its guarantees, `jq` recipes |
+| [docs/tuning.md](docs/tuning.md) | where the real limits are, with measured numbers |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | keyed to the diagnostics the tool emits |
+| [docs/security.md](docs/security.md) | trust boundaries, credentials, DNS leakage |
+
+Man pages are in `man/`, one per command, generated from the CLI definition.
+
+`docs/design/` holds the decision register and the specifications. Every significant
+decision is recorded there with its alternatives, rationale, and revisit trigger —
+including the assumptions that turned out to be wrong.
 
 ## Development
 

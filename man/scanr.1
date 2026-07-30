@@ -1,0 +1,60 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH scanr 1  "scanr 0.1.0" 
+.SH NAME
+scanr \- Proxy\-aware TCP connect scanner with reproducible, durable scan records
+.SH SYNOPSIS
+\fBscanr\fR [\fB\-\-config\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-no\-color\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIsubcommands\fR>
+.SH DESCRIPTION
+scanr performs unprivileged TCP connect() probes directly or through a SOCKS5 proxy, streams open ports to stdout as they are found, and always writes a JSONL record containing the fully resolved configuration and a single terminal event stating whether the run completed, was interrupted, or failed.
+.SH OPTIONS
+.TP
+\fB\-\-config\fR \fI<PATH>\fR
+Use this config file instead of the discovered user and project files
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress the header, progress, and summary on stderr
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Show additional detail
+.TP
+\fB\-\-no\-color\fR
+Disable coloured output (also honours NO_COLOR)
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.SH SUBCOMMANDS
+.TP
+scanr\-run(1)
+Execute a scan
+.TP
+scanr\-plan(1)
+Resolve a scan and show the plan without touching the network
+.TP
+scanr\-config(1)
+Inspect and manage configuration
+.TP
+scanr\-transport(1)
+Inspect and test transports
+.TP
+scanr\-output(1)
+Inspect prior scan records
+.TP
+scanr\-completion(1)
+Generate a shell completion script
+.SH EXTRA
+EXAMPLES:
+  scanr config init
+  scanr plan internal\-web
+  scanr run internal\-web
+  scanr run internal\-web \-\-profile proxy\-careful
+  scanr run \-\-targets 10.20.30.0/24 \-\-ports 22,80,443
+  subfinder \-d example.com | scanr run \-\-targets \- \-\-ports web
+  scanr transport test lab
+  scanr output verify scanr\-results/scan\-*.jsonl
+.SH VERSION
+v0.1.0 (77a478253\-dirty x86_64\-unknown\-linux\-gnu)
+rustc 1.97.1 (8bab26f4f 2026\-07\-14)
