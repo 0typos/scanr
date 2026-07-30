@@ -742,6 +742,85 @@ fn writer_failure_exits_three_and_leaves_a_partial_file() {
     assert!(so.contains("no terminal event"), "{so}");
 }
 
+/// Resource-pressure diagnostics were dead code: classified, tested, and never
+/// surfaced, so the most likely real failure of a proxied scan produced only a reason
+/// string. Force descriptor exhaustion and assert the operator actually gets told.
+#[test]
+fn resource_pressure_is_reported_once_with_remediation() {
+    use std::os::unix::process::CommandExt;
+
+    let d = tempfile::tempdir().unwrap();
+    let mut cmd = Command::new(BIN);
+    cmd.args([
+        "run",
+        "--transport",
+        "direct",
+        // Blackholed targets hold a socket for the whole timeout, so descriptors
+        // accumulate. Loopback refusals release instantly and never pile up.
+        "--targets",
+        "192.0.2.0/26",
+        "--ports",
+        "80",
+        "--concurrency",
+        "64",
+        "--connect-timeout",
+        "2s",
+        "--output-dir",
+        "out",
+        "--all",
+    ])
+    .current_dir(d.path())
+    .env("XDG_CONFIG_HOME", d.path().join("xdg"))
+    .env("NO_COLOR", "1");
+
+    // SAFETY: setrlimit is async-signal-safe and runs between fork and exec.
+    unsafe {
+        cmd.pre_exec(|| {
+            let lim = libc::rlimit {
+                rlim_cur: 24,
+                rlim_max: 24,
+            };
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &lim) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let out = cmd.output().expect("scanr should run");
+    let se = stderr(&out);
+
+    assert!(
+        se.contains("out of file descriptors"),
+        "the operator must be told what went wrong, got:\n{se}"
+    );
+    assert!(
+        se.contains("ulimit -n"),
+        "the warning must carry actionable remediation, got:\n{se}"
+    );
+    assert!(
+        se.contains("returned `error`"),
+        "a scan that mostly errored must say so rather than just 'completed':\n{se}"
+    );
+
+    let events = read_events(d.path());
+    let warnings: Vec<&Value> = events
+        .iter()
+        .filter(|e| e["type"] == "scan_warning" && e["code"] == "fd_pressure")
+        .collect();
+    assert_eq!(
+        warnings.len(),
+        1,
+        "pressure must be reported exactly once, not once per failing probe"
+    );
+    assert!(
+        warnings[0]["detail"]["remediation"]
+            .as_str()
+            .is_some_and(|r| r.contains("RLIMIT_NOFILE")),
+        "remediation should name the actual limit: {}",
+        warnings[0]
+    );
+}
+
 #[test]
 fn help_lists_the_documented_command_tree() {
     let d = tempfile::tempdir().unwrap();
