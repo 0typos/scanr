@@ -566,6 +566,10 @@ fn completions_generate_for_every_supported_shell() {
 fn output_remainder_round_trips_into_a_rescan() {
     let d = tempfile::tempdir().unwrap();
     let (_l, open) = open_port();
+    let closed = closed_port();
+    let ports = format!("{},{}", open.port(), closed.port());
+
+    // A complete scan leaves nothing outstanding.
     let out = scanr(
         d.path(),
         &[
@@ -573,7 +577,7 @@ fn output_remainder_round_trips_into_a_rescan() {
             "--targets",
             "127.0.0.1,127.0.0.2",
             "--ports",
-            &open.port().to_string(),
+            &ports,
             "--output-dir",
             "out",
             "--all",
@@ -590,9 +594,101 @@ fn output_remainder_round_trips_into_a_rescan() {
         .unwrap();
     let rem = scanr(d.path(), &["output", "remainder", file.to_str().unwrap()]);
     assert_eq!(code(&rem), 0, "{}", stderr(&rem));
-    // A complete scan leaves nothing behind.
     assert!(stdout(&rem).trim().is_empty(), "{}", stdout(&rem));
-    assert!(stderr(&rem).contains("0 of 2 targets"), "{}", stderr(&rem));
+    assert!(
+        stderr(&rem).contains("0 of 4 endpoints"),
+        "{}",
+        stderr(&rem)
+    );
+
+    // Now simulate an interrupted scan by dropping two probe_result lines, and check the
+    // round trip re-probes exactly those endpoints and nothing else. This is the property
+    // that justifies not having a `resume` command at all.
+    let text = std::fs::read_to_string(&file).unwrap();
+    let mut kept = Vec::new();
+    let mut dropped = Vec::new();
+    for line in text.lines() {
+        let v: Value = serde_json::from_str(line).unwrap();
+        if v["type"] == "probe_result" && dropped.len() < 2 {
+            dropped.push((
+                v["target"].as_str().unwrap().to_string(),
+                v["port"].as_u64().unwrap() as u16,
+            ));
+        } else {
+            kept.push(line.to_string());
+        }
+    }
+    assert_eq!(dropped.len(), 2);
+    let partial = d.path().join("out").join("partial.jsonl");
+    std::fs::write(&partial, kept.join("\n") + "\n").unwrap();
+
+    let rem = scanr(
+        d.path(),
+        &["output", "remainder", partial.to_str().unwrap()],
+    );
+    assert_eq!(code(&rem), 0, "{}", stderr(&rem));
+    let listed: Vec<String> = stdout(&rem).lines().map(|l| l.trim().to_string()).collect();
+    assert_eq!(
+        listed.len(),
+        2,
+        "expected exactly the dropped endpoints: {listed:?}"
+    );
+    for (t, p) in &dropped {
+        assert!(
+            listed.contains(&format!("{t}:{p}")),
+            "remainder omitted {t}:{p}, got {listed:?}"
+        );
+    }
+
+    // Feed it back. Exactly two probes should run — not two whole targets.
+    std::fs::write(d.path().join("resume.txt"), listed.join("\n") + "\n").unwrap();
+    let again = scanr(
+        d.path(),
+        &[
+            "run",
+            "--pairs",
+            "resume.txt",
+            "--output-dir",
+            "out2",
+            "--all",
+            "-q",
+        ],
+    );
+    assert_eq!(code(&again), 0, "{}", stderr(&again));
+
+    let file2 = std::fs::read_dir(d.path().join("out2"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|x| x == "jsonl"))
+        .unwrap();
+    let events: Vec<Value> = std::fs::read_to_string(file2)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let results: Vec<&Value> = events
+        .iter()
+        .filter(|e| e["type"] == "probe_result")
+        .collect();
+    assert_eq!(
+        results.len(),
+        2,
+        "resuming should probe exactly the outstanding endpoints, not re-probe whole targets"
+    );
+    for r in &results {
+        let pair = (
+            r["target"].as_str().unwrap().to_string(),
+            r["port"].as_u64().unwrap() as u16,
+        );
+        assert!(
+            dropped.contains(&pair),
+            "unexpected endpoint probed: {pair:?}"
+        );
+    }
+    // And the record says it was a pair scan, so its own remainder works too.
+    let config = events.iter().find(|e| e["type"] == "scan_config").unwrap();
+    assert_eq!(config["targets"]["mode"], "pairs");
 }
 
 #[test]

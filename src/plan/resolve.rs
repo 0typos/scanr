@@ -32,6 +32,9 @@ pub struct Overrides {
     pub transport: Option<String>,
     pub targets: Option<Vec<String>>,
     pub ports: Option<Vec<String>>,
+    /// Explicit `host:port` pairs, from `scanr output remainder`. Mutually exclusive
+    /// with targets/ports, which describe a matrix.
+    pub pairs: Option<Vec<String>>,
     pub exclude: Option<Vec<String>>,
     pub concurrency: Option<u32>,
     pub rate: Option<u32>,
@@ -233,22 +236,50 @@ pub fn resolve(
     };
 
     // ── targets and ports ───────────────────────────────────────────────────
-    let (target_set, target_specs) = resolve_targets(files, scan_name, ov)?;
-    let exclude_specs: Vec<String> = target_set.exclude.iter().map(|s| s.to_string()).collect();
+    // A pair scan names exact endpoints and bypasses matrix expansion. Targets and ports
+    // are still derived from it, so everything downstream — DNS, the record, the plan
+    // display — works unchanged.
+    let explicit_pairs = resolve_pairs(ov)?;
 
-    let limit = if ov.allow_large_range {
-        u64::MAX
-    } else {
-        DEFAULT_MAX_TARGETS
-    };
-    let raw_targets = target_set
-        .expand(ov.allow_large_range, limit)
-        .map_err(|e| ConfigError::new(e.to_string()))?;
-
-    let ports = resolve_ports(files, scan_name, ov)?;
-    if ports.is_empty() {
-        return Err(ConfigError::new("no ports selected"));
-    }
+    let (raw_targets, ports, target_specs, exclude_specs, port_spec_override) =
+        match &explicit_pairs {
+            Some(pairs) => {
+                let mut seen = BTreeSet::new();
+                let targets: Vec<Target> = pairs
+                    .iter()
+                    .filter(|(t, _)| seen.insert(t.to_string()))
+                    .map(|(t, _)| t.clone())
+                    .collect();
+                let mut ports: Vec<u16> = pairs.iter().map(|(_, p)| *p).collect();
+                ports.sort_unstable();
+                ports.dedup();
+                (
+                    targets,
+                    ports,
+                    vec![format!("{} explicit host:port pairs", pairs.len())],
+                    Vec::new(),
+                    Some("(explicit pairs)".to_string()),
+                )
+            }
+            None => {
+                let (target_set, target_specs) = resolve_targets(files, scan_name, ov)?;
+                let exclude_specs: Vec<String> =
+                    target_set.exclude.iter().map(|s| s.to_string()).collect();
+                let limit = if ov.allow_large_range {
+                    u64::MAX
+                } else {
+                    DEFAULT_MAX_TARGETS
+                };
+                let raw_targets = target_set
+                    .expand(ov.allow_large_range, limit)
+                    .map_err(|e| ConfigError::new(e.to_string()))?;
+                let ports = resolve_ports(files, scan_name, ov)?;
+                if ports.is_empty() {
+                    return Err(ConfigError::new("no ports selected"));
+                }
+                (raw_targets, ports, target_specs, exclude_specs, None)
+            }
+        };
 
     // ── hostname handling ───────────────────────────────────────────────────
     let (targets, resolved_hosts) = apply_dns(raw_targets, dns_effective, &mut warnings)?;
@@ -311,7 +342,7 @@ pub fn resolve(
         }
     };
 
-    let port_spec = PortSummary(&ports).to_string();
+    let port_spec = port_spec_override.unwrap_or_else(|| PortSummary(&ports).to_string());
 
     let mut plan = ScanPlan {
         scan_name: scan_name.unwrap_or(ADHOC_SCAN_NAME).to_string(),
@@ -323,6 +354,7 @@ pub fn resolve(
         dns_effective,
         targets,
         ports,
+        pairs: explicit_pairs,
         target_specs,
         exclude_specs,
         port_spec,
@@ -647,6 +679,50 @@ fn resolve_targets(
     }
 
     Ok((set, specs))
+}
+
+/// Read explicit `host:port` pairs, if any were supplied.
+fn resolve_pairs(ov: &Overrides) -> Result<Option<Vec<(Target, u16)>>, ConfigError> {
+    let Some(args) = &ov.pairs else {
+        return Ok(None);
+    };
+    if ov.targets.is_some() || ov.ports.is_some() {
+        return Err(
+            ConfigError::new("--pairs cannot be combined with --targets or --ports").help(
+                "--pairs names exact endpoints; --targets and --ports describe a matrix.\n\
+                 Use one or the other.",
+            ),
+        );
+    }
+
+    let mut lines = Vec::new();
+    for arg in args {
+        lines.extend(expand_target_argument(arg)?);
+    }
+    let mut out = Vec::with_capacity(lines.len());
+    for line in &lines {
+        let (spec, port) =
+            crate::net::target::parse_pair(line).map_err(|e| ConfigError::new(e.to_string()))?;
+        let target = match spec {
+            TargetSpec::Addr(a) => Target::Addr(a),
+            TargetSpec::Host(h) => Target::Host(h),
+            // parse_pair rejects ranges and CIDRs, so this cannot be reached.
+            other => {
+                return Err(ConfigError::new(format!(
+                    "`{other}` names more than one host; a pair must name exactly one"
+                )));
+            }
+        };
+        out.push((target, port));
+    }
+    if out.is_empty() {
+        return Err(ConfigError::new("--pairs produced no endpoints")
+            .help("the input was empty — a scan that completed leaves no remainder"));
+    }
+    // Deduplicate while preserving order, so concatenated inputs are harmless.
+    let mut seen = BTreeSet::new();
+    out.retain(|(t, p)| seen.insert((t.to_string(), *p)));
+    Ok(Some(out))
 }
 
 fn parse_spec(s: &str) -> Result<TargetSpec, ConfigError> {

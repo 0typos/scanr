@@ -370,6 +370,49 @@ impl TargetSet {
     }
 }
 
+/// Render a `host:port` pair, bracketing IPv6 so it can be parsed back.
+pub fn format_pair(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+/// Parse a `host:port` pair as emitted by `scanr output remainder`.
+///
+/// IPv6 must be bracketed, because `::1:443` is itself a valid IPv6 address and cannot be
+/// split unambiguously. That is the same reason result lines bracket them on output.
+pub fn parse_pair(input: &str) -> Result<(TargetSpec, u16), TargetParseError> {
+    let s = input.trim();
+    let (host, port) = if let Some(rest) = s.strip_prefix('[') {
+        let (h, p) = rest
+            .split_once("]:")
+            .ok_or_else(|| TargetParseError::Malformed(s.to_string()))?;
+        (h, p)
+    } else {
+        s.rsplit_once(':')
+            .ok_or_else(|| TargetParseError::Malformed(s.to_string()))?
+    };
+
+    let port: u32 = port
+        .trim()
+        .parse()
+        .map_err(|_| TargetParseError::Malformed(s.to_string()))?;
+    if port == 0 || port > 65535 {
+        return Err(TargetParseError::Malformed(s.to_string()));
+    }
+
+    let spec = parse_target(host.trim())?;
+    // A pair names one endpoint; a range or CIDR would silently mean many.
+    match spec {
+        TargetSpec::Addr(_) | TargetSpec::Host(_) => Ok((spec, port as u16)),
+        _ => Err(TargetParseError::Malformed(format!(
+            "{s} (a pair must name a single host, not a range or CIDR)"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

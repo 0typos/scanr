@@ -509,10 +509,17 @@ fn config_event(plan: &ScanPlan, facts: &HostFacts) -> serde_json::Value {
         "targets": {
             // The expanded matrix is deliberately not embedded: a /16 x 1000 ports is
             // 65M probes. The canonical spec plus the seed reproduces the scan exactly.
+            //
+            // A pair scan is the exception: an explicit endpoint list has no compact
+            // form, so the list *is* the spec and is embedded. Bounded because it can
+            // only have come from a prior scan's remainder.
             "spec": plan.target_specs,
             "exclude": plan.exclude_specs,
             "count": plan.targets.len(),
             "expanded": false,
+            "mode": if plan.is_pair_scan() { "pairs" } else { "matrix" },
+            "pairs": pair_list(plan),
+            "pairs_truncated": pairs_truncated(plan),
         },
         "ports": { "spec": plan.port_spec, "count": plan.ports.len() },
         "probes_planned": plan.probe_count(),
@@ -540,6 +547,29 @@ fn config_event(plan: &ScanPlan, facts: &HostFacts) -> serde_json::Value {
             "so_linger_zero": true,
         },
     })
+}
+
+/// Cap on embedding an explicit pair list in the record. Beyond this the list is a
+/// liability rather than an aid, and `output remainder` says so rather than lying.
+const MAX_EMBEDDED_PAIRS: usize = 50_000;
+
+fn pair_list(plan: &ScanPlan) -> Option<Vec<String>> {
+    let pairs = plan.pairs.as_ref()?;
+    if pairs.len() > MAX_EMBEDDED_PAIRS {
+        return None;
+    }
+    Some(
+        pairs
+            .iter()
+            .map(|(t, p)| crate::net::target::format_pair(&t.to_string(), *p))
+            .collect(),
+    )
+}
+
+fn pairs_truncated(plan: &ScanPlan) -> bool {
+    plan.pairs
+        .as_ref()
+        .is_some_and(|p| p.len() > MAX_EMBEDDED_PAIRS)
 }
 
 fn print_header(plan: &ScanPlan, scan_id: &str, partial: &std::path::Path) {

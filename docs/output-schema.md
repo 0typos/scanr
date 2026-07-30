@@ -164,3 +164,23 @@ scanr run --targets "$(jq -r 'select(.type=="scan_config")|.targets.spec[]' scan
 
 `provenance` records which configuration layer supplied each value, so a record explains
 not just what ran but why.
+
+## Resuming an interrupted scan
+
+`output remainder` emits the endpoints that were never reported, as exact `host:port`
+lines, which `run --pairs` consumes:
+
+```console
+scanr output remainder scan-*.jsonl | scanr run --pairs -
+```
+
+This probes precisely what is outstanding — not whole targets — so a target whose first
+two ports completed resumes with only its remaining ports.
+
+`abandoned` probes are included in the remainder. They were issued to a worker but never
+reported, so whether they reached the network is unknown and re-probing is the safe
+choice.
+
+A pair scan records `targets.mode = "pairs"` and embeds its endpoint list, since an
+explicit list has no compact spec. Above 50,000 pairs the list is omitted and
+`pairs_truncated` is set; `remainder` then refuses rather than returning a wrong answer.
