@@ -149,6 +149,23 @@ probe divided by concurrency.
 Also worth knowing: concurrency is not monotonically better. Measured throughput peaked
 near 512 threads and declined at 2048.
 
+## Scanning localhost shows unexpected open ports in the 32768-60999 range
+
+Expected, and not specific to `scanr`. That range is the local ephemeral port range, and
+a scanner running on the same host draws its own outbound source ports from it. A port can
+therefore be genuinely occupied *by the scan itself* at the moment it is probed, and both
+`scanr` and nmap will correctly report it open.
+
+Check the range in use:
+
+```console
+cat /proc/sys/net/ipv4/ip_local_port_range
+```
+
+If you are auditing what a machine listens on, prefer `ss -tlnp` over scanning its own
+loopback. This only affects scanning the host you are scanning *from*; for a remote target
+the source and destination ports are unrelated.
+
 ## Every port on every host looks open
 
 Something in the path is answering on your behalf — a transparent proxy, a captive
