@@ -48,6 +48,19 @@ impl Style {
     }
 }
 
+/// Bracket an IPv6 literal so `addr:port` is unambiguous.
+///
+/// Without this, `::1` and port 9601 render as `::1:9601`, which is itself a valid
+/// IPv6 address — so the line cannot be parsed back apart. A hostname can never contain
+/// a colon, which makes this test sufficient.
+fn bracket_if_ipv6(target: &str) -> String {
+    if target.contains(':') && !target.starts_with('[') {
+        format!("[{target}]")
+    } else {
+        target.to_string()
+    }
+}
+
 pub struct ResultPrinter {
     style: Style,
     aligned: bool,
@@ -88,7 +101,7 @@ impl ResultPrinter {
     /// service label wider than its column shifted every following field. Both showed
     /// up only once the output was rendered on a real terminal.
     pub fn format(&self, target: &str, port: u16, outcome: &ProbeOutcome) -> String {
-        let endpoint = format!("{target}:{port}/tcp");
+        let endpoint = format!("{}:{port}/tcp", bracket_if_ipv6(target));
         let label = service_label(port).unwrap_or("");
         let ms = outcome.phases.total.as_secs_f64() * 1000.0;
         let latency = format!("{ms:.1}ms");
@@ -208,6 +221,7 @@ mod tests {
                 total: Duration::from_millis(ms),
                 ..Default::default()
             },
+            pressure: None,
         }
     }
 
@@ -247,6 +261,38 @@ mod tests {
 
         let all = plain_printer(false);
         assert!(all.should_print(&outcome(State::Closed, 1)));
+    }
+
+    #[test]
+    fn ipv6_endpoints_are_bracketed() {
+        // `::1` with port 9601 must not render as `::1:9601`, which is itself a valid
+        // IPv6 address and therefore unparseable back into address and port.
+        let p = plain_printer(false);
+        let line = p.format("::1", 9601, &outcome(State::Open, 1));
+        assert!(line.starts_with("[::1]:9601/tcp"), "{line}");
+
+        let long = p.format("2001:db8::5", 443, &outcome(State::Open, 1));
+        assert!(long.starts_with("[2001:db8::5]:443/tcp"), "{long}");
+
+        // The bracketed form round-trips through a socket address parser.
+        let endpoint = line.split('/').next().unwrap();
+        assert!(
+            endpoint.parse::<std::net::SocketAddr>().is_ok(),
+            "{endpoint} should parse as a socket address"
+        );
+    }
+
+    #[test]
+    fn ipv4_and_hostnames_are_left_alone() {
+        let p = plain_printer(false);
+        assert!(
+            p.format("10.0.0.1", 22, &outcome(State::Open, 1))
+                .starts_with("10.0.0.1:22/tcp")
+        );
+        assert!(
+            p.format("app.internal", 22, &outcome(State::Open, 1))
+                .starts_with("app.internal:22/tcp")
+        );
     }
 
     #[test]

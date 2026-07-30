@@ -11,6 +11,26 @@ use serde_json::Value;
 
 const BIN: &str = env!("CARGO_BIN_EXE_scanr");
 
+/// An IPv6 loopback listener, for the paths that only IPv6 reaches.
+fn open_port_v6() -> (TcpListener, SocketAddr) {
+    let l = TcpListener::bind("[::1]:0").expect("IPv6 loopback should be available");
+    let a = l.local_addr().unwrap();
+    let l2 = l.try_clone().unwrap();
+    std::thread::spawn(move || {
+        for s in l2.incoming() {
+            drop(s);
+        }
+    });
+    (l, a)
+}
+
+fn closed_port_v6() -> SocketAddr {
+    let l = TcpListener::bind("[::1]:0").unwrap();
+    let a = l.local_addr().unwrap();
+    drop(l);
+    a
+}
+
 fn scanr(dir: &Path, args: &[&str]) -> Output {
     Command::new(BIN)
         .args(args)
@@ -819,6 +839,161 @@ fn resource_pressure_is_reported_once_with_remediation() {
         "remediation should name the actual limit: {}",
         warnings[0]
     );
+}
+
+/// IPv6 was supported in code and had never once been executed: only the /112 prefix
+/// guard was tested. An entire untested address family is a real risk for a tool whose
+/// failure mode is silently misreporting reachability.
+#[test]
+fn ipv6_direct_scan_classifies_correctly() {
+    let d = tempfile::tempdir().unwrap();
+    let (_l, open) = open_port_v6();
+    let closed = closed_port_v6();
+
+    let ports = format!("{},{}", open.port(), closed.port());
+    let out = scanr(
+        d.path(),
+        &[
+            "run",
+            "--transport",
+            "direct",
+            "--targets",
+            "::1",
+            "--ports",
+            &ports,
+            "--output-dir",
+            "out",
+            "--all",
+            "-q",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+
+    let so = stdout(&out);
+    // Endpoints must be bracketed: `::1:9601` is itself a valid IPv6 address.
+    assert!(
+        so.contains(&format!("[::1]:{}/tcp open", open.port())),
+        "{so}"
+    );
+    assert!(
+        so.contains(&format!("[::1]:{}/tcp closed", closed.port())),
+        "{so}"
+    );
+
+    let events = read_events(d.path());
+    let states: Vec<&str> = events
+        .iter()
+        .filter(|e| e["type"] == "probe_result")
+        .filter_map(|e| e["state"].as_str())
+        .collect();
+    assert!(
+        states.contains(&"open") && states.contains(&"closed"),
+        "{states:?}"
+    );
+    // The record keeps address and port separate, so it is unambiguous regardless.
+    assert!(
+        events
+            .iter()
+            .any(|e| e["type"] == "probe_result" && e["target"] == "::1")
+    );
+}
+
+#[test]
+fn ipv6_through_socks5_uses_the_atyp_ipv6_request() {
+    use scanr::testsupport::socks5::{Behavior, Socks5Fixture};
+
+    let d = tempfile::tempdir().unwrap();
+    let (_l, open) = open_port_v6();
+    let closed = closed_port_v6();
+    // The fixture reads a 16-byte address for ATYP_IPV6 and connects for real, so a
+    // wrong request encoding shows up as a wrong verdict rather than passing silently.
+    let fx = Socks5Fixture::start(Behavior::Faithful);
+
+    std::fs::write(
+        d.path().join("scanr.toml"),
+        format!(
+            "version = 1\n[transports.fx]\ntype = \"socks5\"\naddress = \"{}\"\nfidelity = \"full\"\n",
+            fx.addr()
+        ),
+    )
+    .unwrap();
+
+    let ports = format!("{},{}", open.port(), closed.port());
+    let out = scanr(
+        d.path(),
+        &[
+            "run",
+            "--transport",
+            "fx",
+            "--targets",
+            "::1",
+            "--ports",
+            &ports,
+            "--output-dir",
+            "out",
+            "--all",
+            "-q",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+
+    let events = read_events(d.path());
+    let by_port = |p: u16| {
+        events
+            .iter()
+            .find(|e| e["type"] == "probe_result" && e["port"] == p)
+            .unwrap_or_else(|| panic!("no result for port {p}"))
+    };
+    assert_eq!(by_port(open.port())["state"], "open");
+    assert_eq!(by_port(open.port())["source"], "proxy_reply");
+    assert_eq!(by_port(closed.port())["state"], "closed");
+}
+
+#[test]
+fn ipv6_cidr_expands_and_scans() {
+    let d = tempfile::tempdir().unwrap();
+    let (_l, open) = open_port_v6();
+    // /125 is 8 addresses, comfortably inside the /112 guard.
+    let out = scanr(
+        d.path(),
+        &[
+            "run",
+            "--transport",
+            "direct",
+            "--targets",
+            "::1/125",
+            "--ports",
+            &open.port().to_string(),
+            "--connect-timeout",
+            "200ms",
+            "--output-dir",
+            "out",
+            "--all",
+            "-q",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+
+    let events = read_events(d.path());
+    let results: Vec<&Value> = events
+        .iter()
+        .filter(|e| e["type"] == "probe_result")
+        .collect();
+    assert_eq!(results.len(), 8, "a /125 should expand to 8 addresses");
+    assert!(
+        results
+            .iter()
+            .any(|r| r["target"] == "::1" && r["state"] == "open"),
+        "::1 should be open"
+    );
+    // Every emitted line must be bracketed and reparseable.
+    for line in stdout(&out).lines().filter(|l| l.contains("/tcp")) {
+        let endpoint = line.split('/').next().unwrap();
+        assert!(
+            endpoint.parse::<SocketAddr>().is_ok(),
+            "{endpoint:?} is not a parseable socket address"
+        );
+    }
 }
 
 #[test]
