@@ -5,6 +5,26 @@ edition = "2024"
 description = "Proxy-aware TCP connect scanner with reproducible, durable scan records"
 license = "MIT OR Apache-2.0"
 rust-version = "1.97"
+readme = "README.md"
+keywords = ["scanner", "socks5", "proxy", "network", "security"]
+categories = ["command-line-utilities", "network-programming"]
+authors = ["typo"]
+# TODO(release): set once the repository has a canonical URL. Left unset rather than
+# guessed, because a wrong URL in shipped metadata is worse than an absent one.
+# repository = "https://github.com/.../scanr"
+# homepage = "https://github.com/.../scanr"
+
+# Distribution is prebuilt static binaries from GitHub releases, not crates.io. This
+# guards against an accidental `cargo publish`; remove it if that changes.
+publish = false
+
+# Keep the packaged crate to what is needed to build and understand it.
+exclude = [
+    "/.github",
+    "/scanr-results",
+    "/fuzz/corpus",
+    "/fuzz/artifacts",
+]
 
 [dependencies]
 # CLI: subcommand tree, help rendering, shell completions. Hand-rolling this for a
