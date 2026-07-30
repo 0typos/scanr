@@ -169,9 +169,15 @@ impl Socks5Transport {
         }
     }
 
-    fn negotiate(
+    /// Greeting, method selection, and optional authentication.
+    ///
+    /// Generic over the stream so a fuzz harness can drive the whole exchange with
+    /// arbitrary peer bytes. Every byte read here comes from a proxy scanr does not
+    /// control, and the auth reply is acted on, so this is worth fuzzing as a unit
+    /// rather than only its final reply parser.
+    pub fn negotiate<S: Read + Write>(
         &self,
-        s: &mut TcpStream,
+        s: &mut S,
         phases: &mut Phases,
         started: Instant,
     ) -> Result<(), ProbeOutcome> {
@@ -241,9 +247,9 @@ impl Socks5Transport {
         }
     }
 
-    fn authenticate(
+    fn authenticate<S: Read + Write>(
         &self,
-        s: &mut TcpStream,
+        s: &mut S,
         user: &str,
         pass: &str,
         phases: &mut Phases,

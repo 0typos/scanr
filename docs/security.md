@@ -89,9 +89,17 @@ you switch transports. `plan` prints the effective mode and warns when this appl
 ## Untrusted input
 
 `scanr` parses bytes from a proxy it does not control, including a peer-supplied length
-field in the `ATYP_DOMAIN` bound address of a CONNECT reply. That parser is fuzzed, along
-with configuration loading, the spec parsers, and scan-record reading. See
-`fuzz/fuzz_targets/`.
+field in the `ATYP_DOMAIN` bound address of a CONNECT reply. Five fuzz targets cover it:
+
+| target | covers |
+|---|---|
+| `socks5_handshake` | greeting, method selection, RFC 1929 auth — the proxy chooses the method and supplies the status byte we act on |
+| `socks5_reply` | the CONNECT reply parser, including the peer-supplied address length |
+| `config` | loading, validation, and the caret renderer that slices source by byte offset |
+| `specs` | target, port and duration parsing |
+| `record` | reading a truncated or corrupted scan record |
+
+See `fuzz/fuzz_targets/`. Seeds are committed and replayed in CI as a regression check.
 
 Fuzzing found and fixed one real defect: an address-count overflow that panicked in debug
 builds and silently wrapped in release, so `::/0` reported covering one address.

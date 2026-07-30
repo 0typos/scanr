@@ -21,6 +21,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "socks5_handshake"
+path = "fuzz_targets/socks5_handshake.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "config"
 path = "fuzz_targets/config.rs"
 test = false
