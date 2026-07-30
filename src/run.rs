@@ -198,6 +198,9 @@ pub fn execute(
     let mut last_progress = Instant::now();
     let mut last_count = 0u64;
     let mut writer_error: Option<std::io::Error> = None;
+    // Pressure conditions are reported once each. A saturated host would otherwise
+    // produce one warning per failing probe, which is tens of thousands of them.
+    let mut pressure_seen: std::collections::BTreeSet<&'static str> = Default::default();
     let mut interrupt_requested_at: Option<u64> = None;
     let mut interrupt_at: Option<Instant> = None;
     // The real bound on drain is the connect timeout, since a blocking connect cannot
@@ -212,6 +215,39 @@ pub fn execute(
                     progress.clear();
                     printer.print(&mut stdout, &record.target, record.port, &record.outcome);
                 }
+                // Surface a degrading condition the first time it appears, with the
+                // remediation derived from this host. Before this was wired up the
+                // diagnostics in `diag` were unreachable, so the most likely real
+                // failure of a proxied scan produced only a reason string.
+                if let Some(p) = record.outcome.pressure
+                    && pressure_seen.insert(p.code())
+                {
+                    let remediation = p.remediation(&facts, plan.timing.concurrency);
+                    if writer_error.is_none() {
+                        let _ = writer.emit(
+                            "scan_warning",
+                            json!({
+                                "code": p.code(),
+                                "message": p.summary(),
+                                "detail": { "remediation": remediation },
+                            }),
+                        );
+                    }
+                    if !opts.quiet {
+                        progress.clear();
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "\nwarning: {}\n{}",
+                            p.summary(),
+                            remediation
+                                .lines()
+                                .map(|l| format!("  {l}"))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        );
+                    }
+                }
+
                 if writer_error.is_none()
                     && let Err(e) = writer.emit("probe_result", record.to_json())
                 {
@@ -391,19 +427,36 @@ fn started_event(epoch_ms: u64) -> serde_json::Value {
     json!({
         "schema_version": SCHEMA_VERSION,
         "tool_version": env!("CARGO_PKG_VERSION"),
-        "target_triple": current_triple(),
+        "git_commit": env!("SCANR_GIT_SHA"),
+        "rustc": env!("SCANR_RUSTC"),
+        "target_triple": env!("SCANR_TARGET"),
         "started_at_epoch_ms": epoch_ms,
+        "hostname": hostname(),
         "pid": std::process::id(),
     })
 }
 
-fn current_triple() -> &'static str {
-    // Enough to tell a glibc build from a static musl one in a result file.
-    if cfg!(target_env = "musl") {
-        "x86_64-unknown-linux-musl"
-    } else {
-        "x86_64-unknown-linux-gnu"
+/// The scanning host, so a record identifies where the connections originated.
+pub fn hostname() -> String {
+    let mut buf = [0u8; 256];
+    // SAFETY: gethostname writes at most buf.len() bytes into a buffer we own.
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+    if rc != 0 {
+        return "unknown".into();
     }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..end]).into_owned()
+}
+
+/// Build identity, for `--version` and diagnostics.
+pub fn build_info() -> String {
+    format!(
+        "{} ({} {})\n{}",
+        env!("CARGO_PKG_VERSION"),
+        env!("SCANR_GIT_SHA"),
+        env!("SCANR_TARGET"),
+        env!("SCANR_RUSTC"),
+    )
 }
 
 fn config_event(plan: &ScanPlan, facts: &HostFacts) -> serde_json::Value {
@@ -412,6 +465,10 @@ fn config_event(plan: &ScanPlan, facts: &HostFacts) -> serde_json::Value {
             "name": plan.transport.name,
             "type": "direct",
             "measured_fidelity": Fidelity::Full.to_string(),
+            // Direct needs no measurement: the local TCP stack distinguishes refused,
+            // unreachable, and timed out inherently. Emitted unconditionally so a
+            // consumer can rely on the field existing for every transport type.
+            "fidelity_source": "builtin",
         }),
         TransportKind::Socks5 {
             address,
@@ -429,6 +486,14 @@ fn config_event(plan: &ScanPlan, facts: &HostFacts) -> serde_json::Value {
                 .and_then(|s| s.origin.as_ref())
                 .map(|o| o.to_string()),
             "measured_fidelity": plan.transport.fidelity.to_string(),
+            // Where the fidelity came from. Replaces the specified-but-never-emitted
+            // `fidelity_measured_at`, which stopped meaning anything once fidelity
+            // became a declared config value rather than a scan-time measurement.
+            "fidelity_source": if plan.transport.fidelity == Fidelity::Unknown {
+                "unmeasured"
+            } else {
+                "config"
+            },
         }),
     };
 
@@ -547,6 +612,17 @@ pub fn print_summary(summary: &ScanSummary, quiet: bool) {
             err,
             "  {} probes were retried after a timeout",
             commas(c.retried)
+        );
+    }
+    // A run that "completed" while most probes errored is not a useful result, and the
+    // word `completed` on its own invites reading it as one.
+    if c.completed > 0 && c.error * 2 > c.completed {
+        let _ = writeln!(
+            err,
+            "  note: {} of {} probes returned `error`, so these results describe the \
+             scanner's environment more than the target",
+            commas(c.error),
+            commas(c.completed)
         );
     }
     let _ = writeln!(err, "  record: {}", summary.path.display());

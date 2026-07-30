@@ -80,6 +80,10 @@ pub struct ProbeOutcome {
     pub source: Source,
     pub reason: Option<String>,
     pub phases: Phases,
+    /// Set when this probe failed for a reason that will degrade the whole scan if it
+    /// continues. Typed rather than inferred from `reason`, so the scan-level warning
+    /// cannot drift from the condition that produced it.
+    pub pressure: Option<crate::diag::Pressure>,
 }
 
 impl ProbeOutcome {
@@ -89,6 +93,7 @@ impl ProbeOutcome {
             source,
             reason: None,
             phases,
+            pressure: None,
         }
     }
 
@@ -98,7 +103,14 @@ impl ProbeOutcome {
             source,
             reason: Some(reason.into()),
             phases,
+            pressure: None,
         }
+    }
+
+    /// Attach a scan-level pressure condition.
+    pub fn under_pressure(mut self, p: crate::diag::Pressure) -> Self {
+        self.pressure = Some(p);
+        self
     }
 
     pub fn is_open(&self) -> bool {
@@ -155,13 +167,15 @@ pub fn classify_os_error(err: &std::io::Error, phases: Phases) -> ProbeOutcome {
             Source::Internal,
             "local ephemeral port exhaustion",
             phases,
-        ),
+        )
+        .under_pressure(crate::diag::Pressure::EphemeralPortExhaustion),
         Some(libc::EMFILE) | Some(libc::ENFILE) => ProbeOutcome::new(
             State::Error,
             Source::Internal,
             "out of file descriptors",
             phases,
-        ),
+        )
+        .under_pressure(crate::diag::Pressure::FileDescriptorExhaustion),
         _ => match err.kind() {
             ErrorKind::TimedOut => ProbeOutcome::new(
                 State::Filtered,
@@ -287,6 +301,25 @@ mod tests {
             assert_eq!(o.state, State::Error, "code {code}");
             assert_eq!(o.source, Source::Internal, "code {code}");
         }
+    }
+
+    #[test]
+    fn resource_exhaustion_raises_a_scan_level_pressure_signal() {
+        // Without this the remediation text in `diag` is unreachable, which was the
+        // state of things before: classified, tested, and never surfaced.
+        let o = classify_os_error(&std::io::Error::from_raw_os_error(libc::EADDRNOTAVAIL), p());
+        assert_eq!(
+            o.pressure,
+            Some(crate::diag::Pressure::EphemeralPortExhaustion)
+        );
+        let o = classify_os_error(&std::io::Error::from_raw_os_error(libc::EMFILE), p());
+        assert_eq!(
+            o.pressure,
+            Some(crate::diag::Pressure::FileDescriptorExhaustion)
+        );
+        // An ordinary port verdict carries no pressure.
+        let o = classify_os_error(&std::io::Error::from_raw_os_error(libc::ECONNREFUSED), p());
+        assert_eq!(o.pressure, None);
     }
 
     #[test]

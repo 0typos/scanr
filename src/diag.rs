@@ -104,20 +104,43 @@ fn read_rlimit_nofile() -> Option<u64> {
     }
 }
 
-/// Classification of a probe-time OS error into something a human can act on.
+/// Every `scan_warning` code scanr can emit. Owned here so the JSONL specification can
+/// be checked against it rather than drifting from it.
+pub const WARNING_CODES: &[&str] = &[
+    // resolution and planning, emitted before probing starts
+    "dns_failure",
+    "dns_mode_auto",
+    "fidelity_unknown",
+    "fidelity_open_only",
+    "ephemeral_budget",
+    "fd_budget",
+    // runtime pressure, emitted at most once each per scan
+    "ephemeral_pressure",
+    "fd_pressure",
+    "proxy_saturation",
+];
+
+/// A condition that will degrade or invalidate a scan if it continues, detected while
+/// probing. Carried on the probe outcome so the warning is raised from a typed signal
+/// rather than by matching on message text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResourceProblem {
+pub enum Pressure {
     EphemeralPortExhaustion,
     FileDescriptorExhaustion,
-    Other,
+    /// The proxy itself stopped accepting connections. Unambiguous: this is a failure to
+    /// reach the proxy, not a statement about any destination.
+    ProxySaturation,
 }
 
-impl ResourceProblem {
-    pub fn classify(err: &std::io::Error) -> Self {
+impl Pressure {
+    /// Recognise the OS errors that mean "the host has run out of something".
+    pub fn from_os_error(err: &std::io::Error) -> Option<Self> {
         match err.raw_os_error() {
-            Some(libc::EADDRNOTAVAIL) | Some(libc::EADDRINUSE) => Self::EphemeralPortExhaustion,
-            Some(libc::EMFILE) | Some(libc::ENFILE) => Self::FileDescriptorExhaustion,
-            _ => Self::Other,
+            Some(libc::EADDRNOTAVAIL) | Some(libc::EADDRINUSE) => {
+                Some(Self::EphemeralPortExhaustion)
+            }
+            Some(libc::EMFILE) | Some(libc::ENFILE) => Some(Self::FileDescriptorExhaustion),
+            _ => None,
         }
     }
 
@@ -125,13 +148,31 @@ impl ResourceProblem {
         match self {
             Self::EphemeralPortExhaustion => "ephemeral_pressure",
             Self::FileDescriptorExhaustion => "fd_pressure",
-            Self::Other => "other",
+            Self::ProxySaturation => "proxy_saturation",
+        }
+    }
+
+    /// One-line summary for stderr.
+    pub fn summary(&self) -> &'static str {
+        match self {
+            Self::EphemeralPortExhaustion => "local ephemeral ports exhausted",
+            Self::FileDescriptorExhaustion => "out of file descriptors",
+            Self::ProxySaturation => "the proxy stopped accepting connections",
         }
     }
 
     /// Remediation text, tailored to the host we are actually running on.
-    pub fn remediation(&self, facts: &HostFacts, concurrency: u32) -> Option<String> {
+    pub fn remediation(&self, facts: &HostFacts, concurrency: u32) -> String {
         match self {
+            Self::ProxySaturation => format!(
+                "the proxy is refusing or timing out new connections, which means \
+                 concurrency {concurrency} is more than it will accept.\n\
+                 Results already recorded are still valid, but anything failing this way \
+                 is recorded as `error` rather than as a port verdict. Options:\n\
+                 \x20 - lower --concurrency (try halving it), or\n\
+                 \x20 - use --profile proxy-careful, or\n\
+                 \x20 - lower --rate if the proxy limits connection rate rather than count"
+            ),
             Self::EphemeralPortExhaustion => {
                 let ports = facts.ephemeral_ports().unwrap_or(28_232);
                 let mut s = format!(
@@ -147,9 +188,9 @@ impl ResourceProblem {
                          \x20   (currently 2, which exempts loopback only)",
                     );
                 }
-                Some(s)
+                s
             }
-            Self::FileDescriptorExhaustion => Some(format!(
+            Self::FileDescriptorExhaustion => format!(
                 "out of file descriptors at concurrency {concurrency}.\n\
                  The soft RLIMIT_NOFILE is {}. Either:\n\
                  \x20 - lower --concurrency below that limit, or\n\
@@ -159,8 +200,7 @@ impl ResourceProblem {
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| "unknown".into()),
                 concurrency.saturating_add(256).max(4096),
-            )),
-            Self::Other => None,
+            ),
         }
     }
 }
@@ -224,24 +264,60 @@ mod tests {
     fn classifies_resource_errors() {
         let e = std::io::Error::from_raw_os_error(libc::EADDRNOTAVAIL);
         assert_eq!(
-            ResourceProblem::classify(&e),
-            ResourceProblem::EphemeralPortExhaustion
+            Pressure::from_os_error(&e),
+            Some(Pressure::EphemeralPortExhaustion)
         );
         let e = std::io::Error::from_raw_os_error(libc::EMFILE);
         assert_eq!(
-            ResourceProblem::classify(&e),
-            ResourceProblem::FileDescriptorExhaustion
+            Pressure::from_os_error(&e),
+            Some(Pressure::FileDescriptorExhaustion)
         );
+        // An ordinary refusal is a port verdict, not host pressure.
         let e = std::io::Error::from_raw_os_error(libc::ECONNREFUSED);
-        assert_eq!(ResourceProblem::classify(&e), ResourceProblem::Other);
+        assert_eq!(Pressure::from_os_error(&e), None);
+    }
+
+    #[test]
+    fn every_pressure_has_a_code_and_remediation() {
+        let f = facts(Some((32768, 60999)), Some(0));
+        for p in [
+            Pressure::EphemeralPortExhaustion,
+            Pressure::FileDescriptorExhaustion,
+            Pressure::ProxySaturation,
+        ] {
+            assert!(
+                WARNING_CODES.contains(&p.code()),
+                "{:?} code not registered",
+                p
+            );
+            assert!(
+                !p.remediation(&f, 512).is_empty(),
+                "{:?} has no remediation",
+                p
+            );
+            assert!(!p.summary().is_empty());
+        }
+    }
+
+    #[test]
+    fn proxy_saturation_advice_names_the_actual_knobs() {
+        let r = Pressure::ProxySaturation.remediation(&facts(None, None), 512);
+        assert!(r.contains("concurrency 512"), "{r}");
+        assert!(r.contains("proxy-careful"), "{r}");
+    }
+
+    #[test]
+    fn warning_codes_are_unique() {
+        let mut v = WARNING_CODES.to_vec();
+        v.sort_unstable();
+        v.dedup();
+        assert_eq!(v.len(), WARNING_CODES.len(), "duplicate warning code");
     }
 
     #[test]
     fn remediation_mentions_the_actual_sysctl_state() {
         let f = facts(Some((32768, 60999)), Some(2));
-        let r = ResourceProblem::EphemeralPortExhaustion
-            .remediation(&f, 512)
-            .unwrap();
+        let r = Pressure::EphemeralPortExhaustion.remediation(&f, 512);
         assert!(r.contains("28232 ports"), "{r}");
         assert!(r.contains("tcp_tw_reuse=1"), "{r}");
         assert!(r.contains("currently 2"), "{r}");
@@ -249,19 +325,7 @@ mod tests {
 
     #[test]
     fn fd_remediation_suggests_a_workable_limit() {
-        let f = facts(None, None);
-        let r = ResourceProblem::FileDescriptorExhaustion
-            .remediation(&f, 8192)
-            .unwrap();
+        let r = Pressure::FileDescriptorExhaustion.remediation(&facts(None, None), 8192);
         assert!(r.contains("ulimit -n 8448"), "{r}");
-    }
-
-    #[test]
-    fn other_errors_have_no_canned_remediation() {
-        assert!(
-            ResourceProblem::Other
-                .remediation(&facts(None, None), 1)
-                .is_none()
-        );
     }
 }
