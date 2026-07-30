@@ -345,7 +345,23 @@ fn proxy_unreachable(e: &std::io::Error, addr: SocketAddr, phases: Phases) -> Pr
     } else {
         Source::LocalStack
     };
-    ProbeOutcome::new(State::Error, source, reason, phases)
+    let outcome = ProbeOutcome::new(State::Error, source, reason, phases);
+
+    // Local resource exhaustion outranks saturation: if we ran out of ephemeral ports
+    // the proxy never saw the attempt, and that is the condition worth reporting.
+    match crate::diag::Pressure::from_os_error(e) {
+        Some(p) => outcome.under_pressure(p),
+        // Otherwise a refusal or timeout reaching the proxy means it stopped accepting
+        // connections, which is unambiguous saturation rather than a destination verdict.
+        None if matches!(
+            e.raw_os_error(),
+            Some(libc::ECONNREFUSED) | Some(libc::ETIMEDOUT)
+        ) || e.kind() == std::io::ErrorKind::TimedOut =>
+        {
+            outcome.under_pressure(crate::diag::Pressure::ProxySaturation)
+        }
+        None => outcome,
+    }
 }
 
 fn io_failure(e: &std::io::Error, what: &str, phases: Phases) -> ProbeOutcome {
