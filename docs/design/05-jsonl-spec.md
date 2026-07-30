@@ -45,9 +45,14 @@ probe order — probes are randomized (D16) and complete concurrently.
 
 ## `scan_started`
 
+`git_commit` carries a `-dirty` suffix when the working tree had uncommitted changes,
+and is `unknown` when built from a source tree with no `.git` (a packaged release). The
+same information is available from `scanr --version`.
+
 ```json
 {"type":"scan_started","seq":0,"ts":"2026-07-29T14:31:44.201Z","scan_id":"a3f19c02",
- "schema_version":1,"tool_version":"0.1.0","git_commit":"e4a1b9c","rustc":"1.97.1",
+ "schema_version":1,"tool_version":"0.1.0","git_commit":"9e27d4cda",
+ "rustc":"rustc 1.97.1 (8bab26f4f 2026-07-14)",
  "target_triple":"x86_64-unknown-linux-musl","started_at_epoch_ms":1785294704201,
  "hostname":"scanner-01","pid":48812}
 ```
@@ -67,11 +72,12 @@ The fully resolved plan, credentials redacted, each field tagged with provenance
  "transport":{"name":"lab","type":"socks5","address":"127.0.0.1:1080",
               "username":"scanner","password":"[redacted]",
               "password_source":"env:SCANR_LAB_PASSWORD",
-              "measured_fidelity":"open_only","fidelity_measured_at":"..."},
+              "measured_fidelity":"open_only","fidelity_source":"config"},
  "dns":{"requested":"auto","effective":"transport"},
  "timing":{"concurrency":512,"rate":400,"proxy_connect_timeout_ms":3000,
            "handshake_timeout_ms":5000,"connect_timeout_ms":5000,
            "retries":1,"retry_delay_ms":250},
+ "output":{"dir":"./scanr-results","open_only":true},
  "provenance":{"concurrency":"profile.proxy","connect_timeout_ms":"cli",
                "transport":"scan.internal-web","rate":"builtin.proxy"},
  "host":{"ephemeral_range":[32768,60999],"tcp_tw_reuse":2,"rlimit_nofile":1048576,
@@ -81,6 +87,14 @@ The fully resolved plan, credentials redacted, each field tagged with provenance
 **The expanded target set is never embedded.** A /16 × 1000 ports is 65M probes; the
 canonical *spec* plus counts is what makes the scan reproducible, and the permutation
 seed makes the order reproducible too. `expanded: false` states this explicitly.
+
+`transport.fidelity_source` is present for every transport type and is one of:
+
+| value | meaning |
+|---|---|
+| `builtin` | direct transport; the local stack distinguishes states inherently |
+| `config` | declared in configuration from a `scanr transport test` measurement |
+| `unmeasured` | a proxy whose fidelity has not been measured — results may be degraded |
 
 The `host` block records the conditions that bound throughput (D9), so a slow scan can
 be explained months later.
@@ -133,12 +147,36 @@ Every `progress_interval` (default 5s), TTY or not — it is cheap and useful in
 
 ```json
 {"type":"scan_warning","seq":204,"ts":"...","scan_id":"a3f19c02",
- "code":"ephemeral_pressure","message":"source port allocation failures detected",
- "detail":{"failures":17,"remediation":"lower rate, or set net.ipv4.tcp_tw_reuse=1"}}
+ "code":"ephemeral_pressure","message":"local ephemeral ports exhausted",
+ "detail":{"remediation":"the local ephemeral port range (28232 ports) is exhausted.\n..."}}
 ```
 
-Codes: `ephemeral_pressure` · `fd_pressure` · `proxy_saturation` ·
-`fidelity_degraded` · `dns_mode_changed` · `slow_writer`.
+Codes are owned by `diag::WARNING_CODES` and a test asserts this list matches it, so
+the two cannot drift. An earlier version of this section listed `fidelity_degraded`,
+`dns_mode_changed`, and `slow_writer`, none of which the code could ever emit.
+
+Emitted before probing starts, from plan resolution:
+
+| code | meaning |
+|---|---|
+| `dns_failure` | a hostname target did not resolve and will not be probed |
+| `dns_mode_auto` | `auto` resolved to a specific mode; switching transports would change it |
+| `fidelity_unknown` | proxy fidelity has not been measured; run `transport test` |
+| `fidelity_open_only` | proxy cannot distinguish closed from filtered |
+| `ephemeral_budget` | configured rate exceeds the sustained ephemeral-port ceiling |
+| `fd_budget` | concurrency exceeds `RLIMIT_NOFILE` |
+
+Emitted during the scan, at most once each, carrying host-specific remediation under
+`detail.remediation`:
+
+| code | meaning |
+|---|---|
+| `ephemeral_pressure` | source ports actually ran out mid-scan |
+| `fd_pressure` | descriptors actually ran out mid-scan |
+| `proxy_saturation` | the proxy stopped accepting connections |
+
+The runtime three are rate-limited to one per code per scan: a saturated host would
+otherwise emit one warning per failing probe.
 
 ## Terminal events
 
@@ -152,8 +190,16 @@ Exactly one, last. Nothing may follow it.
  "duration_ms":641200,"exit_code":0}
 ```
 
-`scan_interrupted` adds `signal:"SIGINT"`, `requested_at`, `drain_ms`, and non-zero
-`not_started`. `scan_failed` adds `error` and `error_code`. All three flush immediately.
+`counts` places every planned probe in exactly one of three buckets, and
+`planned == completed + abandoned + not_started` is checked by `output verify`:
+
+* `completed` — reported a result
+* `abandoned` — a worker picked it up but an interrupt ended the drain first, so it may
+  have touched the network and must not be assumed untried
+* `not_started` — never issued to a worker
+
+`scan_interrupted` adds `signal:"SIGINT"`, `requested_at`, `forced`, and non-zero
+`abandoned`/`not_started`. `scan_failed` adds `error` and `error_code`. All three flush immediately.
 
 If the writer itself fails, one attempt is made to emit `scan_failed` with
 `error_code: "writer_failure"`; if that also fails the file stays `.partial`, which is
