@@ -166,6 +166,14 @@ If you are auditing what a machine listens on, prefer `ss -tlnp` over scanning i
 loopback. This only affects scanning the host you are scanning *from*; for a remote target
 the source and destination ports are unrelated.
 
+## Scanning 127.0.0.0/8 shows the same port open on every address
+
+All of `127.0.0.0/8` routes to loopback, so a service bound to `0.0.0.0` answers on every
+one of its 16,777,216 addresses. Scanning `127.16.0.0/16` for port 22 on a host running
+sshd returns 65,536 open results, all of them genuine.
+
+Useful for load-testing a scanner, misleading if you expected distinct hosts.
+
 ## Every port on every host looks open
 
 Something in the path is answering on your behalf — a transparent proxy, a captive

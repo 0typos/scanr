@@ -137,9 +137,21 @@ The writer is not usually a factor: results go through a bounded channel to a si
 buffered writer, flushed on lifecycle events and every 250 ms. If it ever were, workers
 block on the channel rather than dropping results.
 
-Records are larger than people expect because every probe outcome is kept — a 256×1000
-scan is ~256k lines, tens of MB. Compression is deferred; the lines are highly repetitive
-and gzip well if you need it.
+Records are larger than people expect, because every probe outcome is kept. Measured:
+
+| scan | probes | record | rate |
+|---|---|---|---|
+| 1 host × all 65,535 ports | 65,535 | 24 MB | ~156,000/s |
+| /16 × 16 ports | 1,048,576 | 377 MB | ~15,200/s |
+
+About 377 bytes per probe. Extrapolating, a 10M-probe scan is roughly 3.9 GB.
+
+The lines are highly repetitive and compress **16.8×** — that 377 MB record gzips to
+23.6 MB in 1.5 s. Built-in compression is deferred rather than rejected; if you are
+routinely scanning at this scale, piping through `gzip` afterwards is worth it.
+
+Memory is stable across a run: the million-probe scan held 17 MB resident from start to
+finish, the growth over the 5.8 MB baseline being the materialized target list.
 
 ## Things that will not help
 
