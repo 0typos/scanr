@@ -357,3 +357,34 @@ opening new ones exceeds the cap. Reproducing that needs repeated rounds, not on
 destination. It is deliberately conservative — it clears 16 where a real scan tolerated
 24 — and worded as "what this test observed", not "the maximum safe value". Opt-in,
 because it generates real traffic.
+
+### D26 — Scale validated at 10^6 probes; gzip remains deferred but now has numbers
+**Status:** accepted · gzip **deferred, revisit trigger tightened**
+
+Measured on loopback, which is the only place a million-probe scan can be run without
+authorization concerns — all of `127.0.0.0/8` is locally routable, giving 16.7M addresses.
+
+| scan | probes | wall | rate | peak RSS | record |
+|---|---|---|---|---|---|
+| 1 host × all 65,535 ports | 65,535 | 0.42 s | ~156,000/s | 8.3 MB | 24 MB |
+| /16 × 16 ports | 1,048,576 | 69 s | ~15,200/s | 17.0 MB | 377 MB |
+
+**Memory is stable.** Sampled every second across the 69-second run: 5.8 MB at start,
+17.0 MB peak, 17.0 MB at the end. The growth is the materialized target list (65,536
+entries), allocated once, not drift. `output verify` passes on the 1,048,576-probe record.
+
+Two things learned that are not about scanr:
+
+* A service bound to `0.0.0.0` answers on *every* address in `127.0.0.0/8`, so 56,427 of
+  the "open" results were port 22 on one sshd. Correct, and worth documenting because it
+  makes loopback a poor proxy for "many distinct hosts".
+* Hammering a real local service that hard produces genuine timeouts — 9,109 filtered and
+  20,835 retries came from sshd's accept backlog overflowing, not from scanr.
+
+**On gzip.** The record compresses **16.8×** (377 MB to 23.6 MB in 1.5 s), because the
+lines are near-identical. That is a strong ratio, and it makes built-in compression more
+attractive than when it was deferred with no numbers. Still deferred: it complicates
+streaming durability and post-hoc inspection, and `gzip` after the fact costs one command.
+
+**Revisit trigger,** now concrete rather than vague: someone routinely scanning above
+~10M probes, where records reach multiple gigabytes.
