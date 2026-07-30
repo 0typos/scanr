@@ -1,0 +1,118 @@
+# NOTE: written without a remote to run it against, so this file is UNVERIFIED.
+# Expect to iterate on it during the first push.
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Warnings are failures. An unused-variable warning slipped into two commits during
+  # development and was only caught by reading build output by hand.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: fmt, clippy, test (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # build.rs records the commit into the scan record, so it needs real history
+          # rather than a shallow clone.
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Formatting
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --target ${{ matrix.target }}
+
+      - name: Tests
+        # Tests bind loopback sockets and spawn in-process SOCKS5 fixtures; no external
+        # service is required.
+        run: cargo test --target ${{ matrix.target }}
+
+      - name: Static binary is actually static
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+          file target/${{ matrix.target }}/release/scanr
+          # The whole point of the musl build is needing nothing at runtime.
+          if ldd target/${{ matrix.target }}/release/scanr 2>&1 | grep -qv 'not a dynamic executable'; then
+            echo "::error::musl build is not static"; exit 1
+          fi
+
+  msrv:
+    name: Minimum supported Rust version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      # Must match rust-version in Cargo.toml.
+      - uses: dtolnay/rust-toolchain@1.97.0
+      - uses: Swatinem/rust-cache@v2
+        with: { key: msrv }
+      - run: cargo check --all-targets
+
+  install:
+    name: cargo install works
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { key: install }
+      # The documented install path. Verified because it was once broken and nobody knew.
+      - run: cargo install --path . --root "$RUNNER_TEMP/inst" --locked
+      - run: "$RUNNER_TEMP/inst/bin/scanr --version"
+
+  audit:
+    name: Advisories and licences
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources
+
+  fuzz:
+    name: Replay the fuzz corpus
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with: { key: fuzz }
+      - run: cargo install cargo-fuzz --locked
+      # Replay the committed seeds only. This is a regression check, not a fuzzing run:
+      # it must stay fast, and it pins the two crashes fuzzing already found.
+      - name: Replay seeds
+        run: |
+          for target in socks5_reply config specs record; do
+            echo "--- $target ---"
+            for seed in fuzz/seeds/"$target"/*; do
+              cargo fuzz run "$target" "$seed"
+            done
+          done
