@@ -316,6 +316,7 @@ mechanical.
 
 | | |
 |---|---|
+| [docs/getting-started.md](docs/getting-started.md) | **start here** — install to verified record, with real output |
 | [docs/configuration.md](docs/configuration.md) | precedence, profiles, target and port sets, DNS modes |
 | [docs/transports.md](docs/transports.md) | what your proxy can tell you, and how much concurrency it takes |
 | [docs/output-schema.md](docs/output-schema.md) | the record, its guarantees, `jq` recipes |
