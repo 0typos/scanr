@@ -100,6 +100,9 @@ struct Completed {
 pub(crate) struct Harness {
     pub transport: Option<Arc<dyn Transport>>,
     pub writer: Option<JsonlWriter>,
+    /// Shortens the 5s progress cadence so the progress path is reachable in a test
+    /// without a five-second test.
+    pub progress_interval: Option<Duration>,
 }
 
 pub fn execute(
@@ -242,6 +245,7 @@ pub(crate) fn execute_with(
     // The real bound on drain is the connect timeout, since a blocking connect cannot
     // be interrupted. MAX_DRAIN keeps a very long timeout from feeling hung.
     let drain_budget = plan.timing.connect_timeout.min(MAX_DRAIN);
+    let progress_interval = harness.progress_interval.unwrap_or(PROGRESS_INTERVAL);
 
     loop {
         match rx.recv_timeout(Duration::from_millis(100)) {
@@ -318,7 +322,7 @@ pub(crate) fn execute_with(
             break;
         }
 
-        if last_progress.elapsed() >= PROGRESS_INTERVAL {
+        if last_progress.elapsed() >= progress_interval {
             let elapsed = last_progress.elapsed().as_secs_f64();
             let rate = (counts.completed - last_count) as f64 / elapsed;
             let remaining = total.saturating_sub(counts.completed) as f64;
@@ -699,15 +703,22 @@ pub fn print_summary(summary: &ScanSummary, quiet: bool) {
     if quiet {
         return;
     }
+    let _ = write!(std::io::stderr(), "{}", render_summary(summary));
+}
+
+/// The summary text, separated from the act of writing it so that what the user is told
+/// at the end of a scan can be asserted on rather than merely executed.
+pub fn render_summary(summary: &ScanSummary) -> String {
+    use std::fmt::Write as _;
     let c = &summary.counts;
     let verb = match summary.termination {
         Termination::Completed => "completed",
         Termination::Interrupted => "interrupted",
         Termination::Failed => "failed",
     };
-    let mut err = std::io::stderr();
+    let mut s = String::new();
     let _ = writeln!(
-        err,
+        s,
         "\n{verb} in {} — {} open, {} closed, {} filtered, {} error ({} of {} probed)",
         HumanElapsed(summary.duration),
         c.open,
@@ -719,28 +730,24 @@ pub fn print_summary(summary: &ScanSummary, quiet: bool) {
     );
     if c.abandoned() > 0 {
         let _ = writeln!(
-            err,
+            s,
             "  {} probes were started but abandoned mid-flight",
             commas(c.abandoned())
         );
     }
     if c.not_started() > 0 {
-        let _ = writeln!(
-            err,
-            "  {} probes were never started",
-            commas(c.not_started())
-        );
+        let _ = writeln!(s, "  {} probes were never started", commas(c.not_started()));
     }
     if c.retried > 0 {
         let _ = writeln!(
-            err,
+            s,
             "  {} probes were retried after a timeout",
             commas(c.retried)
         );
     }
     if summary.worker_panics > 0 {
         let _ = writeln!(
-            err,
+            s,
             "  {} scan worker(s) crashed — this is a bug in scanr, and these results are \
              incomplete; the record's terminal event records it as `worker_panic`",
             summary.worker_panics
@@ -750,14 +757,15 @@ pub fn print_summary(summary: &ScanSummary, quiet: bool) {
     // word `completed` on its own invites reading it as one.
     if c.completed > 0 && c.error * 2 > c.completed {
         let _ = writeln!(
-            err,
+            s,
             "  note: {} of {} probes returned `error`, so these results describe the \
              scanner's environment more than the target",
             commas(c.error),
             commas(c.completed)
         );
     }
-    let _ = writeln!(err, "  record: {}", summary.path.display());
+    let _ = writeln!(s, "  record: {}", summary.path.display());
+    s
 }
 
 /// Distinct state counts, used by tests and the summary command.
@@ -874,6 +882,50 @@ mod tests {
         }
     }
 
+    /// Answers open, and trips cancellation once `after` probes have been served — the
+    /// only way to reach the mid-scan interrupt branches, which a pre-cancelled scan
+    /// skips entirely because no probe ever completes.
+    struct CancelsAfter {
+        seen: AtomicU32,
+        after: u32,
+        cancel: Cancel,
+        forced: bool,
+    }
+
+    impl Transport for CancelsAfter {
+        fn probe(&self, _dest: &Destination, _timing: &Timing) -> ProbeOutcome {
+            if self.seen.fetch_add(1, Ordering::SeqCst) + 1 == self.after {
+                if self.forced {
+                    self.cancel.request_graceful();
+                    self.cancel.request_forced();
+                } else {
+                    self.cancel.request_graceful();
+                }
+            }
+            ProbeOutcome::open(
+                Phases {
+                    proxy_connect: None,
+                    handshake: None,
+                    connect: Some(Duration::from_millis(1)),
+                    total: Duration::from_millis(1),
+                },
+                Source::LocalStack,
+            )
+        }
+        fn supports_remote_dns(&self) -> bool {
+            false
+        }
+        fn name(&self) -> &str {
+            "test"
+        }
+        fn type_name(&self) -> &'static str {
+            "direct"
+        }
+        fn fidelity(&self) -> Fidelity {
+            Fidelity::Full
+        }
+    }
+
     /// Always answers open, without touching the network.
     struct StubTransport;
 
@@ -937,6 +989,7 @@ mod tests {
                     panic_on: 3,
                 })),
                 writer: Some(JsonlWriter::with_sink(Box::new(sink.clone()), "s-panic")),
+                progress_interval: None,
             },
         )
         .expect("the scan itself still returns");
@@ -973,6 +1026,7 @@ mod tests {
             Harness {
                 transport: Some(Arc::new(StubTransport)),
                 writer: Some(JsonlWriter::with_sink(Box::new(sink.clone()), "s-clean")),
+                progress_interval: None,
             },
         )
         .unwrap();
@@ -1005,6 +1059,7 @@ mod tests {
             Harness {
                 transport: Some(Arc::new(StubTransport)),
                 writer: Some(JsonlWriter::with_sink(Box::new(failing), "s-writer")),
+                progress_interval: None,
             },
         )
         .unwrap();
@@ -1028,12 +1083,395 @@ mod tests {
             Harness {
                 transport: Some(Arc::new(StubTransport)),
                 writer: Some(JsonlWriter::with_sink(Box::new(failing), "s-writer2")),
+                progress_interval: None,
             },
         )
         .unwrap();
 
         assert!(summary.writer_failed);
         assert_eq!(summary.termination, Termination::Failed);
+    }
+
+    #[test]
+    fn an_interrupt_mid_scan_drains_and_reconciles() {
+        let sink = Captured::default();
+        let cancel = Cancel::new();
+        let summary = execute_with(
+            // A short connect timeout keeps the drain budget short.
+            Arc::new(ScanPlan::for_test((1..=400).collect(), 4)),
+            cancel.clone(),
+            &quiet(),
+            Harness {
+                transport: Some(Arc::new(CancelsAfter {
+                    seen: AtomicU32::new(0),
+                    after: 20,
+                    cancel,
+                    forced: false,
+                })),
+                writer: Some(JsonlWriter::with_sink(Box::new(sink.clone()), "s-mid")),
+                progress_interval: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.termination, Termination::Interrupted);
+        assert_eq!(summary.worker_panics, 0);
+        // It stopped early — the whole point of an interrupt.
+        assert!(
+            summary.counts.completed < 400,
+            "completed {}",
+            summary.counts.completed
+        );
+        let events = sink.events();
+        let t = terminal(&events);
+        assert_eq!(t["type"], "scan_interrupted");
+        assert!(t["requested_at"].is_string(), "{t}");
+        assert_eq!(t["forced"], false);
+        assert_eq!(t["graceful"], true);
+        let c = &t["counts"];
+        assert_eq!(
+            c["planned"].as_u64().unwrap(),
+            c["completed"].as_u64().unwrap()
+                + c["abandoned"].as_u64().unwrap()
+                + c["not_started"].as_u64().unwrap(),
+            "the three buckets must still account for every planned probe: {c}"
+        );
+    }
+
+    #[test]
+    fn a_forced_interrupt_is_recorded_as_not_graceful() {
+        let sink = Captured::default();
+        let cancel = Cancel::new();
+        let summary = execute_with(
+            Arc::new(ScanPlan::for_test((1..=400).collect(), 4)),
+            cancel.clone(),
+            &quiet(),
+            Harness {
+                transport: Some(Arc::new(CancelsAfter {
+                    seen: AtomicU32::new(0),
+                    after: 10,
+                    cancel,
+                    forced: true,
+                })),
+                writer: Some(JsonlWriter::with_sink(Box::new(sink.clone()), "s-forced")),
+                progress_interval: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.termination, Termination::Interrupted);
+        let events = sink.events();
+        let t = terminal(&events);
+        assert_eq!(t["forced"], true);
+        assert_eq!(t["graceful"], false);
+        // A forced stop skips the join, so nothing may be miscounted as a panic.
+        assert_eq!(summary.worker_panics, 0);
+    }
+
+    #[test]
+    fn progress_events_are_emitted_during_a_long_scan() {
+        let sink = Captured::default();
+        let summary = execute_with(
+            Arc::new(ScanPlan::for_test((1..=400).collect(), 2)),
+            Cancel::new(),
+            &quiet(),
+            Harness {
+                transport: Some(Arc::new(StubTransport)),
+                writer: Some(JsonlWriter::with_sink(Box::new(sink.clone()), "s-prog")),
+                // Zero, not "short": a wall-clock threshold makes whether the path is
+                // exercised at all depend on machine load, which is how a test comes to
+                // pass and fail on the same code.
+                progress_interval: Some(Duration::ZERO),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.termination, Termination::Completed);
+        let events = sink.events();
+        let progress: Vec<_> = events
+            .iter()
+            .filter(|e| e["type"] == "scan_progress")
+            .collect();
+        assert!(!progress.is_empty(), "expected at least one scan_progress");
+        for p in &progress {
+            assert_eq!(p["planned"], 400);
+            assert!(p["completed"].as_u64().unwrap() <= 400);
+        }
+    }
+
+    #[test]
+    fn resolved_hostnames_are_recorded() {
+        let sink = Captured::default();
+        let mut plan = ScanPlan::for_test(vec![80], 1);
+        plan.resolved_hosts = vec![crate::plan::types::ResolvedHost {
+            hostname: "app.internal".into(),
+            addresses: vec!["10.0.0.7".parse().unwrap()],
+        }];
+        execute_with(
+            Arc::new(plan),
+            Cancel::new(),
+            &quiet(),
+            Harness {
+                transport: Some(Arc::new(StubTransport)),
+                writer: Some(JsonlWriter::with_sink(Box::new(sink.clone()), "s-dns")),
+                progress_interval: None,
+            },
+        )
+        .unwrap();
+
+        let events = sink.events();
+        let r = events
+            .iter()
+            .find(|e| e["type"] == "target_resolved")
+            .expect("a resolved hostname is recorded");
+        assert_eq!(r["target"], "app.internal");
+        assert_eq!(r["addresses"][0], "10.0.0.7");
+        assert_eq!(r["expanded_to_probes"], true);
+    }
+
+    #[test]
+    fn a_writer_failure_on_target_resolved_is_not_swallowed() {
+        let sink = Captured::default();
+        let mut plan = ScanPlan::for_test(vec![80], 1);
+        plan.resolved_hosts = vec![crate::plan::types::ResolvedHost {
+            hostname: "app.internal".into(),
+            addresses: vec!["10.0.0.7".parse().unwrap()],
+        }];
+        let summary = execute_with(
+            Arc::new(plan),
+            Cancel::new(),
+            &quiet(),
+            Harness {
+                transport: Some(Arc::new(StubTransport)),
+                writer: Some(JsonlWriter::with_sink(
+                    Box::new(FailsOn::new(sink.clone(), "target_resolved")),
+                    "s-dnsfail",
+                )),
+                progress_interval: None,
+            },
+        )
+        .unwrap();
+
+        assert!(summary.writer_failed);
+        assert_eq!(summary.termination, Termination::Failed);
+    }
+
+    #[test]
+    fn a_writer_failure_on_progress_is_not_swallowed() {
+        let sink = Captured::default();
+        let summary = execute_with(
+            Arc::new(ScanPlan::for_test((1..=400).collect(), 2)),
+            Cancel::new(),
+            &quiet(),
+            Harness {
+                transport: Some(Arc::new(StubTransport)),
+                writer: Some(JsonlWriter::with_sink(
+                    Box::new(FailsOn::new(sink.clone(), "scan_progress")),
+                    "s-progfail",
+                )),
+                progress_interval: Some(Duration::ZERO),
+            },
+        )
+        .unwrap();
+
+        assert!(
+            summary.writer_failed,
+            "a failed progress write must be recorded like any other"
+        );
+        assert_eq!(summary.termination, Termination::Failed);
+    }
+
+    /// Times out `fail_first` times per probe, then answers open — the retry path (D10).
+    struct FlakyTransport {
+        seen: Mutex<std::collections::HashMap<u16, u32>>,
+        fail_first: u32,
+    }
+
+    impl Transport for FlakyTransport {
+        fn probe(&self, dest: &Destination, _timing: &Timing) -> ProbeOutcome {
+            let port = match dest {
+                Destination::Addr(a) => a.port(),
+                Destination::Host(_, p) => *p,
+            };
+            let mut seen = self.seen.lock().unwrap();
+            let n = seen.entry(port).or_insert(0);
+            *n += 1;
+            let phases = Phases {
+                proxy_connect: None,
+                handshake: None,
+                connect: Some(Duration::from_millis(1)),
+                total: Duration::from_millis(1),
+            };
+            if *n <= self.fail_first {
+                // Source::Timeout is what makes it retryable (D10).
+                ProbeOutcome::new(State::Filtered, Source::Timeout, "timed out", phases)
+            } else {
+                ProbeOutcome::open(phases, Source::LocalStack)
+            }
+        }
+        fn supports_remote_dns(&self) -> bool {
+            true
+        }
+        fn name(&self) -> &str {
+            "test"
+        }
+        fn type_name(&self) -> &'static str {
+            "socks5"
+        }
+        fn fidelity(&self) -> Fidelity {
+            Fidelity::Full
+        }
+    }
+
+    #[test]
+    fn a_retried_probe_is_one_row_carrying_both_attempts() {
+        // Retries are merged (D10): one row per endpoint, with the per-attempt detail
+        // kept so the forensic story survives the merge.
+        let sink = Captured::default();
+        let mut plan = ScanPlan::for_test(vec![80, 443], 2);
+        plan.timing.retries = 1;
+        let summary = execute_with(
+            Arc::new(plan),
+            Cancel::new(),
+            &quiet(),
+            Harness {
+                transport: Some(Arc::new(FlakyTransport {
+                    seen: Mutex::new(Default::default()),
+                    fail_first: 1,
+                })),
+                writer: Some(JsonlWriter::with_sink(Box::new(sink.clone()), "s-retry")),
+                progress_interval: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.counts.completed, 2, "one row per endpoint");
+        assert_eq!(summary.counts.open, 2, "the retry succeeded");
+        assert_eq!(summary.counts.retried, 2);
+        let events = sink.events();
+        for e in events.iter().filter(|e| e["type"] == "probe_result") {
+            assert_eq!(e["attempts"], 2);
+            assert_eq!(e["attempt_states"][0], "filtered");
+            assert_eq!(e["attempt_states"][1], "open");
+        }
+    }
+
+    #[test]
+    fn a_hostname_target_is_handed_over_unresolved() {
+        let sink = Captured::default();
+        let mut plan = ScanPlan::for_test(vec![80], 1);
+        plan.targets = vec![Target::Host("app.internal".into())];
+        let summary = execute_with(
+            Arc::new(plan),
+            Cancel::new(),
+            &quiet(),
+            Harness {
+                transport: Some(Arc::new(StubTransport)),
+                writer: Some(JsonlWriter::with_sink(Box::new(sink.clone()), "s-host")),
+                progress_interval: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.counts.completed, 1);
+        let events = sink.events();
+        let r = events
+            .iter()
+            .find(|e| e["type"] == "probe_result")
+            .expect("one result");
+        assert_eq!(r["target"], "app.internal");
+        // The proxy resolved it, so no address can honestly be recorded (D15).
+        assert!(r["resolved_address"].is_null(), "{r}");
+    }
+
+    fn summary_of(counts: Counts, termination: Termination, worker_panics: u32) -> ScanSummary {
+        ScanSummary {
+            scan_id: "abc".into(),
+            counts,
+            termination,
+            duration: Duration::from_secs(3),
+            path: PathBuf::from("/tmp/scan.jsonl"),
+            writer_failed: false,
+            worker_panics,
+        }
+    }
+
+    #[test]
+    fn the_closing_summary_states_every_incomplete_bucket() {
+        let counts = Counts {
+            planned: 100,
+            started: 90,
+            completed: 80,
+            open: 10,
+            closed: 60,
+            filtered: 5,
+            error: 5,
+            retried: 7,
+        };
+        let s = render_summary(&summary_of(counts, Termination::Interrupted, 2));
+        assert!(s.contains("interrupted in 3.00s"), "{s}");
+        assert!(s.contains("80 of 100 probed"), "{s}");
+        assert!(s.contains("10 probes were started but abandoned"), "{s}");
+        assert!(s.contains("10 probes were never started"), "{s}");
+        assert!(s.contains("7 probes were retried"), "{s}");
+        assert!(s.contains("2 scan worker(s) crashed"), "{s}");
+        assert!(s.contains("record: /tmp/scan.jsonl"), "{s}");
+    }
+
+    #[test]
+    fn a_mostly_errored_scan_says_so_rather_than_just_completed() {
+        // "completed" on its own invites reading a broken scan as a result.
+        let counts = Counts {
+            planned: 10,
+            started: 10,
+            completed: 10,
+            open: 0,
+            closed: 2,
+            filtered: 0,
+            error: 8,
+            retried: 0,
+        };
+        let s = render_summary(&summary_of(counts, Termination::Completed, 0));
+        assert!(s.contains("describe the scanner's environment"), "{s}");
+
+        // And a healthy scan does not carry the note.
+        let healthy = Counts {
+            error: 1,
+            closed: 9,
+            ..counts
+        };
+        let s = render_summary(&summary_of(healthy, Termination::Completed, 0));
+        assert!(!s.contains("describe the scanner's environment"), "{s}");
+        assert!(!s.contains("crashed"), "{s}");
+    }
+
+    #[test]
+    fn tally_counts_each_state_present() {
+        use crate::probe::Phases;
+        let mk = |state: State| ProbeRecord {
+            probe_index: 0,
+            target: "10.0.0.1".into(),
+            resolved_address: None,
+            port: 80,
+            outcome: ProbeOutcome {
+                state,
+                source: Source::LocalStack,
+                reason: None,
+                phases: Phases {
+                    proxy_connect: None,
+                    handshake: None,
+                    connect: None,
+                    total: Duration::from_millis(1),
+                },
+                pressure: None,
+            },
+            attempts: 1,
+            attempt_states: vec![state],
+        };
+        let records = vec![mk(State::Open), mk(State::Open), mk(State::Closed)];
+        assert_eq!(tally(&records), vec![(State::Open, 2), (State::Closed, 1)]);
+        // States that did not occur are omitted rather than reported as zero.
+        assert_eq!(tally(&[]), vec![]);
     }
 
     #[test]
@@ -1048,6 +1486,7 @@ mod tests {
             Harness {
                 transport: Some(Arc::new(StubTransport)),
                 writer: Some(JsonlWriter::with_sink(Box::new(sink.clone()), "s-cancel")),
+                progress_interval: None,
             },
         )
         .unwrap();
