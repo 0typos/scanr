@@ -35,6 +35,11 @@ invited before then.
   that already completed. The resumed scan records `resumed_from`, so a scan split across
   an interruption stays traceable as one thing; the link travels through the pipe on its
   own, and `--resumed-from` sets it by hand for an edited list.
+- **Records are gzip-compressed and span-collapsed by default.** `--no-compress` and
+  `--no-spans` restore the plain, one-row-per-probe form; `scanr plan` states which you
+  are getting. Note that `probe_result` no longer covers every probe by default, so a
+  `jq 'select(.type=="probe_result")'` recipe under-reports unless it also handles
+  `probe_span` — see `docs/output-schema.md`.
 - `--spans` collapses runs of identical `closed`/`filtered` outcomes into `probe_span`
   events instead of one row each. Measured on a million-probe scan: 391 MB and 1,048,580
   events become **2.6 KB and 5 events**, with the scan marginally faster for writing less

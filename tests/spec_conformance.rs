@@ -17,6 +17,24 @@ use serde_json::Value;
 
 const BIN: &str = env!("CARGO_BIN_EXE_scanr");
 
+/// Read a scan record, decompressing the default framed-gzip form.
+///
+/// Records are compressed unless a scan asks otherwise, so a test that reads one must
+/// cope with either shape — and reading the default shape is the point.
+fn record_text(path: &std::path::Path) -> String {
+    let bytes = std::fs::read(path).expect("record should be readable");
+    if bytes.starts_with(&[0x1f, 0x8b]) {
+        use std::io::Read as _;
+        let mut s = String::new();
+        flate2::read::MultiGzDecoder::new(&bytes[..])
+            .read_to_string(&mut s)
+            .expect("a finalized record decodes");
+        s
+    } else {
+        String::from_utf8(bytes).expect("record is UTF-8")
+    }
+}
+
 fn spec_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("docs/design")
@@ -66,10 +84,12 @@ fn record() -> Vec<Value> {
         .expect("output dir")
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .find(|p| p.extension().is_some_and(|x| x == "jsonl"))
+        .find(|p| {
+            let n = p.file_name().unwrap_or_default().to_string_lossy();
+            n.starts_with("scan-") && !n.ends_with(".partial")
+        })
         .expect("a finalized record");
-    std::fs::read_to_string(file)
-        .unwrap()
+    record_text(&file)
         .lines()
         .map(|l| serde_json::from_str(l).expect("valid JSON per line"))
         .collect()

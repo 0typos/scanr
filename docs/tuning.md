@@ -107,7 +107,7 @@ destination, so it needs to exceed the round trip to the proxy plus whatever the
 allows. Per-phase timings in the record show where the time actually went:
 
 ```console
-jq -r 'select(.type=="probe_result") | .timing_ms' scan-*.jsonl | head
+jq -r 'select(.type=="probe_result") | .timing_ms' scan-*.jsonl* | head
 ```
 
 Shortening `connect_timeout` is the most effective lever on a scan dominated by silent
@@ -175,9 +175,11 @@ row, as does anything that hit resource pressure or whose retry disagreed with i
 attempt. So the results you are likely to actually read are untouched; what collapses is
 the "nothing there" bulk.
 
+On by default. `--no-spans` keeps one row per probe:
+
 ```toml
 [defaults]
-spans = true
+spans = false
 ```
 
 The lines are also highly repetitive, which `--compress` exploits:
@@ -195,13 +197,12 @@ still decodes up to its last completed frame — the same guarantee the `.partia
 carries for an uncompressed record. A single-stream gzip would be unreadable past its
 start, which would mean paying for compression exactly when you could least afford to.
 
-Off by default: a scan record is a text file people grep, and switching that silently
-based on size is the kind of hidden behaviour this tool avoids. Turn it on per run with
-`--compress`, or for good:
+On by default. `--no-compress` writes plain JSONL when you want to grep the file
+directly, or:
 
 ```toml
 [defaults]
-compress = true
+compress = false
 ```
 
 The compressor is pure Rust — `flate2` on the `rust_backend` (`miniz_oxide`) — so the

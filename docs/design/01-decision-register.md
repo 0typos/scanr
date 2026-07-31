@@ -421,9 +421,10 @@ carry a reason a human can read.
 
 66 million executions, clean.
 
-### D28 — Record compression is opt-in framed gzip, pure Rust
+### D28 — Records are framed gzip by default, pure Rust
 
-**Status:** accepted · **Alternatives rejected:** zstd; a single gzip stream; on by default
+**Status:** accepted · **Alternatives rejected:** zstd; a single gzip stream
+· **amended:** shipped opt-in, then made the default
 
 D26 deferred compression with numbers. Reading a 374 MB record back turned out to cost
 4.2 GB, and fixing that exposed how much of the file is pure redundancy, so it was taken.
@@ -438,8 +439,11 @@ D26 deferred compression with numbers. Reading a 374 MB record back turned out t
   the static build (D19); pure-Rust zstd encoders exist but are young, and a compressor
   defect here means unreadable evidence. `flate2` on `rust_backend` keeps the tree free of
   C — verified: 0 `NEEDED` entries in the musl binary.
-* **Off by default.** A record is a text file people grep. Switching that silently on size
-  is the hidden behaviour this tool avoids.
+* **On by default (amended).** It shipped opt-in on the argument that a record is a text
+  file people grep. That argument lost: `zcat`, `zless` and every `scanr output` command
+  read a compressed record unchanged, so the default cost ~20x the disk for every user who
+  never read the flag. `--no-compress` restores the plain form, and `plan` says which you
+  are getting.
 
 **Revisit trigger:** a widely-deployed pure-Rust zstd encoder, or span encoding landing
 (which would beat any compressor on homogeneous scans by orders of magnitude).
@@ -473,10 +477,10 @@ needs more outstanding probes to stay busy, bounded by the cliff.
 network. The cliff location may move with ssh version or server; the profiles sit well
 below it for that reason.
 
-### D30 — Bulk outcomes collapse into spans, opt-in
+### D30 — Bulk outcomes collapse into spans, by default
 
-**Status:** accepted · **Alternatives rejected:** dropping derivable fields; collapsing by
-default; excluding every retried probe
+**Status:** accepted · **Alternatives rejected:** dropping derivable fields; excluding
+every retried probe · **amended:** shipped opt-in, then made the default
 
 Measured: the bulk rows of a large scan carry one distinct `(state, source, reason)`
 tuple with timings inside 0.2% of the timeout. ~360 bytes per row to say "the timeout
@@ -493,8 +497,15 @@ answers and the scan runs marginally faster for writing less.
   which sounded careful and collapsed *nothing*: `retries = 1` is the default and applies
   to timeouts, so in a scan of silent hosts every probe is retried. A probe whose attempts
   *disagreed* is a flapping host and keeps its row.
-* **Opt-in.** It trades per-probe timestamps for size. That is a real loss of forensic
-  detail and should be asked for.
+* **On by default (amended).** It trades per-probe timestamps for size, and that is a
+  real loss — but only for results that all said the same thing. `open`, `error`,
+  pressured and disagreeing-retry probes always keep their rows, so what a reader reaches
+  for is untouched while the default record goes from 391 MB to 2.6 KB. `--no-spans`
+  restores a row per probe.
+
+  The cost lands on consumers: `probe_result` no longer covers every probe, so a naive
+  `jq 'select(.type=="probe_result")'` under-reports. Documented in
+  `docs/output-schema.md` rather than left to be discovered.
 
 **Bounded:** one bitset per outcome class, 128 KB per class per million probes, and above
 64 classes it stops collapsing — a record that varied is not one spans can help.

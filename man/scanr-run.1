@@ -4,7 +4,7 @@
 .SH NAME
 scanr\-run \- Execute a scan
 .SH SYNOPSIS
-\fBscanr\-run\fR [\fB\-\-profile\fR] [\fB\-\-transport\fR] [\fB\-\-targets\fR] [\fB\-\-ports\fR] [\fB\-\-pairs\fR] [\fB\-\-resumed\-from\fR] [\fB\-\-exclude\fR] [\fB\-\-concurrency\fR] [\fB\-\-rate\fR] [\fB\-\-connect\-timeout\fR] [\fB\-\-retries\fR] [\fB\-\-dns\fR] [\fB\-\-output\-dir\fR] [\fB\-\-seed\fR] [\fB\-\-open\-only\fR] [\fB\-\-all\fR] [\fB\-\-compress\fR] [\fB\-\-spans\fR] [\fB\-\-allow\-large\-range\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fISCAN\fR] 
+\fBscanr\-run\fR [\fB\-\-profile\fR] [\fB\-\-transport\fR] [\fB\-\-targets\fR] [\fB\-\-ports\fR] [\fB\-\-pairs\fR] [\fB\-\-resumed\-from\fR] [\fB\-\-exclude\fR] [\fB\-\-concurrency\fR] [\fB\-\-rate\fR] [\fB\-\-connect\-timeout\fR] [\fB\-\-retries\fR] [\fB\-\-dns\fR] [\fB\-\-output\-dir\fR] [\fB\-\-seed\fR] [\fB\-\-open\-only\fR] [\fB\-\-all\fR] [\fB\-\-compress\fR] [\fB\-\-no\-compress\fR] [\fB\-\-spans\fR] [\fB\-\-no\-spans\fR] [\fB\-\-allow\-large\-range\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fISCAN\fR] 
 .SH DESCRIPTION
 Execute a scan
 .SH OPTIONS
@@ -58,10 +58,16 @@ Print only open ports (default)
 Print every probe result, not just open ports
 .TP
 \fB\-\-compress\fR
-Write the record as gzip. Roughly 20x smaller; `zcat`, `zless` and `scanr output` read it unchanged
+Write the record as gzip (default). Roughly 20x smaller; `zcat`, `zless` and `scanr output` read it unchanged
+.TP
+\fB\-\-no\-compress\fR
+Write the record as plain JSONL, so it can be grepped directly
 .TP
 \fB\-\-spans\fR
-Collapse repetitive closed/filtered results into span events instead of one row each. Much smaller records; drops per\-probe timestamps for those results
+Collapse repetitive closed/filtered results into span events instead of one row each (default). Much smaller records; drops per\-probe timestamps for those
+.TP
+\fB\-\-no\-spans\fR
+Write one row per probe, keeping every timestamp
 .TP
 \fB\-\-allow\-large\-range\fR
 Permit target sets larger than 4,000,000 addresses

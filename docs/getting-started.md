@@ -169,7 +169,7 @@ That checks the file is structurally sound, that the counts reconcile, and that 
 credential leaked into it.
 
 ```console
-$ scanr output summarize scanr-results/scan-*.jsonl
+$ scanr output summarize scanr-results/scan-*.jsonl*
   seed            950f58a8b869db32
   result          scan_completed (natural)
   duration        0.01s
@@ -186,7 +186,7 @@ in it are valid; `verify` will tell you it was truncated.
 ## 6. If it was interrupted
 
 ```console
-scanr output remainder scanr-results/scan-*.jsonl | scanr run --pairs -
+scanr output remainder scanr-results/scan-*.jsonl* | scanr run --pairs -
 ```
 
 That re-probes precisely the endpoints that were never reported — not whole targets — so a
@@ -195,7 +195,7 @@ host whose first two ports completed resumes with only the rest.
 The new record names the one it continues, so the two halves stay connected:
 
 ```console
-$ scanr output verify scanr-results/scan-*.jsonl | grep resumed
+$ scanr output verify scanr-results/scan-*.jsonl* | grep resumed
   resumed from scan a7b012c0
 ```
 

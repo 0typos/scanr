@@ -15,12 +15,17 @@ wanted before `1.0` hardens this into a semver commitment.
 ## File
 
 ```
-scanr-results/scan-<epoch_ms>-<scan_id>.jsonl
+scanr-results/scan-<epoch_ms>-<scan_id>.jsonl.gz     # default
+scanr-results/scan-<epoch_ms>-<scan_id>.jsonl        # with --no-compress
 ```
 
-`.jsonl.partial` while running, renamed once a terminal event is written. **A file still
-named `.partial` means the process died without finalizing** — the results in it are valid
-but incomplete.
+Records are gzip by default. It is written as concatenated gzip **members**, so `zcat`,
+`zless` and `gzip -d` read it normally and a killed scan still decodes up to its last
+completed frame. Every `scanr output` command reads either form without being told which.
+
+`.partial` is appended while running and dropped once a terminal event is written. **A
+file still named `.partial` means the process died without finalizing** — the results in
+it are valid but incomplete.
 
 One JSON object per line, UTF-8, LF-terminated. Every line carries `type`, `seq`, `ts`
 (RFC 3339, ms) and `scan_id`.
@@ -47,7 +52,8 @@ complete concurrently.
 | `scan_started` | 1, first | identity and build provenance |
 | `scan_config` | 1, second | fully resolved configuration |
 | `target_resolved` | 0..n | only when local DNS ran |
-| `probe_result` | 1 per host:port | the results |
+| `probe_result` | 1 per uncollapsed probe | the results |
+| `probe_span` | 0..n | many probes that shared one outcome |
 | `scan_progress` | 0..n | periodic counters |
 | `scan_warning` | 0..n | non-fatal conditions |
 | terminal | 1, last | outcome and counts |
@@ -87,7 +93,40 @@ distinguish refused from filtered, non-open results are `error` with
 `source: "proxy_reply"` rather than a fabricated verdict. `transport.measured_fidelity` in
 `scan_config` tells you which situation you are in.
 
-Row count equals probe count, so `wc -l` on `probe_result` lines is meaningful.
+**By default, `probe_result` does not cover every probe.** Runs of identical
+`closed`/`filtered` outcomes are collapsed into `probe_span` events, so counting
+`probe_result` lines under-reports. Either handle both event types, or scan with
+`--no-spans` for one row per probe.
+
+`open` and `error` results are never collapsed, nor is anything that hit resource
+pressure or whose retry disagreed with its first attempt — so if you only care about
+what was found, `probe_result` is still the whole answer.
+
+## `probe_span`
+
+Stands for many probes that shared an outcome.
+
+```json
+{"type":"probe_span","seq":41,"ts":"2026-07-31T12:42:16.049Z","scan_id":"a3f19c02",
+ "state":"filtered","source":"timeout","reason":"connect timed out","protocol":"tcp",
+ "attempts":2,"count":1047992,"probe_indices":[[0,523],[525,1048575]],
+ "timing_ms":{"min":300.1,"mean":300.4,"max":300.9}}
+```
+
+`probe_indices` are inclusive, sorted, disjoint ranges over `probe_index`, which is the
+target-major position in the planned matrix:
+
+```
+target = targets[probe_index / ports.count]
+port   = ports[probe_index % ports.count]
+```
+
+The permutation seed affects only the order probes were *visited*, never that mapping, so
+expanding a span needs nothing but `scan_config`.
+
+A collapsed probe still counts as `completed` in the terminal event, and
+`scanr output remainder` expands spans, so resuming works the same either way. What you
+lose is the per-probe `ts` and exact per-probe timing — the span keeps min/mean/max.
 
 ## `scan_warning`
 
@@ -114,7 +153,7 @@ Emitted during the scan, at most once each, with `detail.remediation`:
 | `proxy_saturation` | the proxy stopped accepting connections |
 
 ```console
-jq -r 'select(.type=="scan_warning") | "\(.code)\t\(.message)"' scan-*.jsonl
+zcat -f scan-*.jsonl* | jq -r 'select(.type=="scan_warning") | "\(.code)\t\(.message)"'
 ```
 
 Seeing `fidelity_open_only`, `proxy_saturation`, or either `*_pressure` code means some
@@ -145,44 +184,45 @@ Three buckets, summing to `planned`:
 Open ports, as `host:port`:
 
 ```console
-jq -r 'select(.type=="probe_result" and .state=="open") | "\(.target):\(.port)"' scan-*.jsonl
+zcat -f scan-*.jsonl* | jq -r 'select(.type=="probe_result" and .state=="open") | "\(.target):\(.port)"'
 ```
 
 Only verdicts you can trust as `closed`:
 
 ```console
-jq -r 'select(.type=="probe_result" and .state=="closed" and .source=="local_stack")
-       | "\(.target):\(.port)"' scan-*.jsonl
+zcat -f scan-*.jsonl* | jq -r 'select(.type=="probe_result" and .state=="closed" and .source=="local_stack")
+       | "\(.target):\(.port)"'
 ```
 
 Did it finish, and what settings produced it?
 
 ```console
-jq -r 'select(.type|startswith("scan_")) | select(.type|endswith("ed") or endswith("ted"))
-       | "\(.type) \(.termination) \(.counts.completed)/\(.counts.planned)"' scan-*.jsonl
-jq -r 'select(.type=="scan_config") | .timing, .transport, .permutation' scan-*.jsonl
+zcat -f scan-*.jsonl* | jq -r 'select(.counts)
+       | "\(.type) \(.termination) \(.counts.completed)/\(.counts.planned)"'
+zcat -f scan-*.jsonl* | jq -r 'select(.type=="scan_config") | .timing, .transport, .permutation'
 ```
 
 Diff two scans for ports that changed:
 
 ```console
-for f in old.jsonl new.jsonl; do
-  jq -r 'select(.type=="probe_result") | "\(.target):\(.port) \(.state)"' "$f" | sort > "$f.st"
+for f in old.jsonl.gz new.jsonl.gz; do
+  zcat -f "$f" | jq -r 'select(.type=="probe_result") | "\(.target):\(.port) \(.state)"' \
+    | sort > "$f.st"
 done
-diff old.jsonl.st new.jsonl.st
+diff old.jsonl.gz.st new.jsonl.gz.st
 ```
 
 Which build produced this record:
 
 ```console
-jq -r 'select(.type=="scan_started") | "\(.tool_version) \(.git_commit) \(.target_triple)"' scan-*.jsonl
+zcat -f scan-*.jsonl* | jq -r 'select(.type=="scan_started") | "\(.tool_version) \(.git_commit) \(.target_triple)"'
 ```
 
 Slowest responders:
 
 ```console
-jq -r 'select(.type=="probe_result" and .state=="open")
-       | [.timing_ms.total, "\(.target):\(.port)"] | @tsv' scan-*.jsonl | sort -rn | head
+zcat -f scan-*.jsonl* | jq -r 'select(.type=="probe_result" and .state=="open")
+       | [.timing_ms.total, "\(.target):\(.port)"] | @tsv' | sort -rn | head
 ```
 
 ## Reproducing a scan
@@ -192,9 +232,10 @@ expanded matrix — a /16 × 1000 ports is 65M probes. With the recorded permuta
 that is enough to reproduce the scan exactly:
 
 ```console
-scanr run --targets "$(jq -r 'select(.type=="scan_config")|.targets.spec[]' scan-*.jsonl)" \
-          --ports "$(jq -r 'select(.type=="scan_config")|.ports.spec' scan-*.jsonl)" \
-          --seed "$(jq -r 'select(.type=="scan_config")|.permutation.seed' scan-*.jsonl)"
+cfg() { zcat -f scan-*.jsonl* | jq -r "select(.type==\"scan_config\")|$1"; }
+scanr run --targets "$(cfg '.targets.spec[]')" \
+          --ports   "$(cfg '.ports.spec')" \
+          --seed    "$(cfg '.permutation.seed')"
 ```
 
 `provenance` records which configuration layer supplied each value, so a record explains
@@ -206,7 +247,7 @@ not just what ran but why.
 lines, which `run --pairs` consumes:
 
 ```console
-scanr output remainder scan-*.jsonl | scanr run --pairs -
+scanr output remainder scan-*.jsonl* | scanr run --pairs -
 ```
 
 This probes precisely what is outstanding — not whole targets — so a target whose first

@@ -404,9 +404,9 @@ fn resolve_output_dir(
     }
 }
 
-/// Framed gzip for the record. Defaults off: a scan record is a text file people grep,
-/// and turning that into a decision the tool makes for you is the kind of hidden
-/// behaviour this project avoids. `docs/tuning.md` says when to turn it on.
+/// Framed gzip for the record. On by default: a full-size record is ~11x its own
+/// information content, and `zcat`, `zless` and every `scanr output` command read a
+/// compressed one unchanged. `--no-compress` when you want to grep the file directly.
 fn resolve_compress(
     files: &Layered,
     scan_name: Option<&str>,
@@ -428,15 +428,16 @@ fn resolve_compress(
                 }
                 None => {
                     prov.set("compress", Origin::Default);
-                    false
+                    true
                 }
             }
         }
     }
 }
 
-/// Collapsing bulk outcomes into spans. Defaults off: it drops per-probe timestamps,
-/// which is a real loss of forensic detail and should be asked for rather than assumed.
+/// Collapsing bulk outcomes into spans. On by default: it takes a million-probe record
+/// from 391 MB to 2.6 KB, and what it drops is the per-probe timestamp and exact timing
+/// of results that all said the same thing. `--no-spans` keeps a row per probe.
 fn resolve_spans(
     files: &Layered,
     scan_name: Option<&str>,
@@ -458,7 +459,7 @@ fn resolve_spans(
                 }
                 None => {
                     prov.set("spans", Origin::Default);
-                    false
+                    true
                 }
             }
         }
