@@ -86,15 +86,15 @@ jobs:
       - uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Measure
-        # Two integration tests deliberately kill a process under a resource limit, which
-        # truncates its .profraw and makes llvm-profdata refuse the whole merge. They are
-        # covered by the run above in the `check` job; excluding them here costs coverage
-        # of code that the in-process failure tests reach anyway.
+        # The whole suite, with nothing excluded. The two tests that constrain a child
+        # with setrlimit send that child's profile to /dev/null, because those limits
+        # would otherwise truncate the .profraw and make llvm-profdata refuse the entire
+        # merge. Excluding the tests by name worked too and silently stopped matching the
+        # moment one was renamed.
         run: |
           set -euo pipefail
           cargo llvm-cov --summary-only --json --output-path coverage.json \
-            --ignore-filename-regex 'testsupport' -- \
-            --skip writer_failure_exits_three --skip resource_pressure_is_reported
+            --ignore-filename-regex 'testsupport'
 
       - name: Enforce the floor
         # A floor, not a target. It exists so the failure paths that carried three

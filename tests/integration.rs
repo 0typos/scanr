@@ -42,6 +42,25 @@ fn scanr(dir: &Path, args: &[&str]) -> Output {
         .expect("scanr should run")
 }
 
+/// Discard the child's coverage profile.
+///
+/// Two tests below constrain the child with `setrlimit` to force a failure. Those limits
+/// apply to everything the child does, including the `.profraw` the instrumented binary
+/// writes as it exits: `RLIMIT_FSIZE` truncates it, and `RLIMIT_NOFILE` can deny the
+/// descriptor to open it. Either way `llvm-profdata` then refuses to merge *any* profile
+/// and the whole coverage run fails.
+///
+/// Sending the profile to `/dev/null` costs these two children's coverage — a character
+/// device is exempt from `RLIMIT_FSIZE`, so nothing is truncated — and the paths they
+/// exercise are covered in-process by the `run::tests` harness anyway. The alternative
+/// was excluding the tests by name in CI, which silently stops matching the moment
+/// somebody renames one.
+///
+/// Harmless outside a coverage run: an uninstrumented binary ignores the variable.
+fn discard_coverage_profile(cmd: &mut Command) {
+    cmd.env("LLVM_PROFILE_FILE", "/dev/null");
+}
+
 fn code(o: &Output) -> i32 {
     o.status.code().unwrap_or(-1)
 }
@@ -859,6 +878,7 @@ fn writer_failure_exits_three_and_leaves_a_partial_file() {
     .current_dir(d.path())
     .env("XDG_CONFIG_HOME", d.path().join("xdg"))
     .env("NO_COLOR", "1");
+    discard_coverage_profile(&mut cmd);
 
     // SAFETY: setrlimit is async-signal-safe and this runs in the forked child
     // between fork and exec.
@@ -945,6 +965,7 @@ fn resource_pressure_is_reported_once_with_remediation() {
     .current_dir(d.path())
     .env("XDG_CONFIG_HOME", d.path().join("xdg"))
     .env("NO_COLOR", "1");
+    discard_coverage_profile(&mut cmd);
 
     // SAFETY: setrlimit is async-signal-safe and runs between fork and exec.
     unsafe {
