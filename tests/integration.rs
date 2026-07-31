@@ -719,6 +719,35 @@ fn output_remainder_round_trips_into_a_rescan() {
     );
 }
 
+/// `plan` is the "look before you scan" surface, so it must describe a pair scan as the
+/// endpoint list it is. It used to render the matrix fields regardless, producing
+/// `targets 2 (3 explicit host:port pairs)` and `ports 3 ((explicit pairs))`.
+#[test]
+fn plan_describes_a_pair_scan_as_endpoints_not_a_matrix() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(
+        d.path().join("pairs.txt"),
+        "# resumed-from: a7b012c0\n10.0.0.1:22\n10.0.0.1:443\n[::1]:80\n",
+    )
+    .unwrap();
+
+    let out = scanr(d.path(), &["plan", "--pairs", "pairs.txt"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let s = stdout(&out);
+
+    assert!(s.contains("mode            explicit endpoints"), "{s}");
+    assert!(s.contains("resumed from  scan a7b012c0"), "{s}");
+    assert!(
+        s.contains("3 across 2 host(s), 3 distinct port(s)"),
+        "endpoint counts should read as a sentence: {s}"
+    );
+    assert!(!s.contains("(("), "no doubled parentheses: {s}");
+    assert!(
+        !s.contains("explicit host:port pairs)"),
+        "the matrix rendering must not leak through: {s}"
+    );
+}
+
 #[test]
 fn declared_fidelity_is_honoured_end_to_end() {
     let d = tempfile::tempdir().unwrap();

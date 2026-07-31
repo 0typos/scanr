@@ -530,27 +530,48 @@ pub fn render_plan(plan: &ScanPlan, facts: &HostFacts, no_color: bool) -> String
         format!("{} -> {}", plan.dns_requested, plan.dns_effective),
         &plan.provenance.render("dns"),
     );
-    row(
-        "targets",
-        format!(
-            "{} ({})",
-            commas(plan.targets.len() as u64),
-            truncate(&plan.target_specs.join(", "), 34)
-        ),
-        "",
-    );
-    if !plan.exclude_specs.is_empty() {
+    // A pair scan is an explicit endpoint list, not a matrix, and describing it as one
+    // reads as nonsense: the old rendering produced `targets 2 (3 explicit host:port
+    // pairs)` and `ports 3 ((explicit pairs))`. `plan` is the "look before you scan"
+    // surface, so it should be the last place the tool is unclear about what it will do.
+    if plan.is_pair_scan() {
+        row("mode", "explicit endpoints".into(), "");
+        if let Some(id) = &plan.resumed_from {
+            row("  resumed from", format!("scan {id}"), "");
+        }
         row(
-            "  exclude",
-            truncate(&plan.exclude_specs.join(", "), 38),
+            "endpoints",
+            format!(
+                "{} across {} host(s), {} distinct port(s)",
+                commas(plan.probe_count()),
+                commas(plan.targets.len() as u64),
+                plan.ports.len()
+            ),
+            "",
+        );
+    } else {
+        row(
+            "targets",
+            format!(
+                "{} ({})",
+                commas(plan.targets.len() as u64),
+                truncate(&plan.target_specs.join(", "), 34)
+            ),
+            "",
+        );
+        if !plan.exclude_specs.is_empty() {
+            row(
+                "  exclude",
+                truncate(&plan.exclude_specs.join(", "), 38),
+                "",
+            );
+        }
+        row(
+            "ports",
+            format!("{} ({})", plan.ports.len(), truncate(&plan.port_spec, 30)),
             "",
         );
     }
-    row(
-        "ports",
-        format!("{} ({})", plan.ports.len(), truncate(&plan.port_spec, 30)),
-        "",
-    );
     row("probes", commas(plan.probe_count()), "");
     row(
         "order",

@@ -37,6 +37,17 @@ pub enum TargetParseError {
     LooksLikeBadIp(String),
     #[error("hostname `{0}` is not valid")]
     BadHostname(String),
+    // Endpoint parsing has its own variants because reusing `Malformed` produced
+    // sentences that said the wrong thing: a bad port was reported as "not a valid IP
+    // address", and the range case embedded its own explanation inside the quoted value,
+    // yielding "`10.0.0.0/24:80 (a pair must name a single host...)` is not a valid IP
+    // address, CIDR block, range, or hostname".
+    #[error("`{0}` is not a `host:port` endpoint")]
+    NotAnEndpoint(String),
+    #[error("`{spec}` has an invalid port `{port}` (expected 1-65535)")]
+    BadPort { spec: String, port: String },
+    #[error("`{0}` names more than one host; an endpoint must name exactly one")]
+    EndpointNotSingular(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -386,30 +397,27 @@ pub fn format_pair(host: &str, port: u16) -> String {
 pub fn parse_pair(input: &str) -> Result<(TargetSpec, u16), TargetParseError> {
     let s = input.trim();
     let (host, port) = if let Some(rest) = s.strip_prefix('[') {
-        let (h, p) = rest
-            .split_once("]:")
-            .ok_or_else(|| TargetParseError::Malformed(s.to_string()))?;
-        (h, p)
+        rest.split_once("]:")
+            .ok_or_else(|| TargetParseError::NotAnEndpoint(s.to_string()))?
     } else {
         s.rsplit_once(':')
-            .ok_or_else(|| TargetParseError::Malformed(s.to_string()))?
+            .ok_or_else(|| TargetParseError::NotAnEndpoint(s.to_string()))?
     };
 
-    let port: u32 = port
-        .trim()
-        .parse()
-        .map_err(|_| TargetParseError::Malformed(s.to_string()))?;
+    let bad_port = || TargetParseError::BadPort {
+        spec: s.to_string(),
+        port: port.trim().to_string(),
+    };
+    let port: u32 = port.trim().parse().map_err(|_| bad_port())?;
     if port == 0 || port > 65535 {
-        return Err(TargetParseError::Malformed(s.to_string()));
+        return Err(bad_port());
     }
 
     let spec = parse_target(host.trim())?;
-    // A pair names one endpoint; a range or CIDR would silently mean many.
+    // An endpoint names one host; a range or CIDR would silently mean many.
     match spec {
         TargetSpec::Addr(_) | TargetSpec::Host(_) => Ok((spec, port as u16)),
-        _ => Err(TargetParseError::Malformed(format!(
-            "{s} (a pair must name a single host, not a range or CIDR)"
-        ))),
+        _ => Err(TargetParseError::EndpointNotSingular(s.to_string())),
     }
 }
 
@@ -657,6 +665,57 @@ mod tests {
             "localhost",
         ] {
             assert!(matches!(parse_target(h), Ok(TargetSpec::Host(_))), "{h}");
+        }
+    }
+
+    #[test]
+    fn parses_endpoints_including_bracketed_ipv6() {
+        let cases = [
+            ("10.0.0.1:443", "10.0.0.1", 443u16),
+            ("[2001:db8::1]:80", "2001:db8::1", 80),
+            ("[::1]:22", "::1", 22),
+            ("app.internal:8080", "app.internal", 8080),
+            ("  10.0.0.1:1  ", "10.0.0.1", 1),
+        ];
+        for (input, host, port) in cases {
+            let (spec, p) = parse_pair(input).unwrap_or_else(|e| panic!("{input}: {e}"));
+            assert_eq!(spec.to_string(), host, "{input}");
+            assert_eq!(p, port, "{input}");
+        }
+    }
+
+    /// Each failure must name what is actually wrong.
+    ///
+    /// These all used to render through `Malformed`, so a bad port was reported as "not
+    /// a valid IP address, CIDR block, range, or hostname", and the range case produced
+    /// a sentence with its own explanation quoted inside the offending value.
+    #[test]
+    fn endpoint_errors_say_what_is_wrong() {
+        let msg = |s: &str| parse_pair(s).unwrap_err().to_string();
+
+        let m = msg("10.0.0.0/24:80");
+        assert!(m.contains("names more than one host"), "{m}");
+        assert!(!m.contains("is not a valid IP address"), "{m}");
+
+        for bad in ["127.0.0.1:99999", "127.0.0.1:0", "127.0.0.1:http"] {
+            let m = msg(bad);
+            assert!(m.contains("invalid port"), "{bad}: {m}");
+            assert!(m.contains("1-65535"), "{bad}: {m}");
+        }
+
+        let m = msg("nocolon");
+        assert!(m.contains("is not a `host:port` endpoint"), "{m}");
+
+        // A genuinely bad host still reports a host problem, not a port one.
+        let m = msg("not a host:80");
+        assert!(!m.contains("invalid port"), "{m}");
+    }
+
+    #[test]
+    fn endpoints_round_trip_through_format_pair() {
+        for s in ["10.0.0.1:443", "[2001:db8::1]:80", "app.internal:22"] {
+            let (spec, port) = parse_pair(s).unwrap();
+            assert_eq!(format_pair(&spec.to_string(), port), s, "{s}");
         }
     }
 }
