@@ -9,7 +9,7 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::mpsc::{RecvTimeoutError, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, sync_channel};
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -134,6 +134,8 @@ pub(crate) fn execute_with(
         })?,
     };
 
+    // The header is a hard failure: a record without it cannot be interpreted, so there
+    // is nothing to salvage by continuing.
     writer
         .emit("scan_started", started_event(started_ms))
         .map_err(ScanError::Writer)?;
@@ -146,11 +148,109 @@ pub(crate) fn execute_with(
     // filling during the warning phase produced a record missing events and still
     // labelled `scan_completed`.
     let mut writer_error: Option<std::io::Error> = None;
+    emit_plan_diagnostics(&mut writer, &mut writer_error, &plan);
 
-    for h in &plan.resolved_hosts {
+    if !opts.quiet {
+        print_header(&plan, &scan_id, writer.partial_path());
+    }
+
+    let total = plan.probe_count();
+    let transport: Arc<dyn Transport> = match harness.transport {
+        Some(t) => t,
+        None => Arc::from(crate::transport::build(&plan.transport)),
+    };
+    let counter = Arc::new(WorkCounter::new(total));
+    let n_workers = worker_count(plan.timing.concurrency, total);
+    let (handles, rx) = spawn_workers(&plan, &transport, &counter, &cancel, n_workers, total)?;
+
+    let collected = Collector {
+        plan: &plan,
+        facts: &facts,
+        opts,
+        cancel: &cancel,
+        printer: ResultPrinter::new(target_width(&plan), plan.open_only, opts.no_color),
+        progress: Progress::new(opts.quiet, opts.no_color),
+        // The real bound on drain is the connect timeout, since a blocking connect
+        // cannot be interrupted. MAX_DRAIN keeps a very long timeout from feeling hung.
+        drain_budget: plan.timing.connect_timeout.min(MAX_DRAIN),
+        progress_interval: harness.progress_interval.unwrap_or(PROGRESS_INTERVAL),
+        total,
+    }
+    .run(&rx, &mut writer, &mut writer_error);
+
+    let mut counts = collected.counts;
+    counts.started = counter.issued();
+
+    let worker_panics = join_workers(handles, &cancel);
+    if worker_panics > 0 {
         emit(
             &mut writer,
             &mut writer_error,
+            "scan_warning",
+            json!({
+                "code": "worker_panic",
+                "message": format!(
+                    "{worker_panics} of {n_workers} scan workers terminated abnormally; \
+                     the probes they held were abandoned and these results are incomplete"
+                ),
+            }),
+        );
+    }
+
+    let duration = started.elapsed();
+    // A crashed worker outranks an interrupt: the user asked for the interrupt and did
+    // not ask for the crash, and only one of the two needs investigating.
+    let termination = if writer_error.is_some() || worker_panics > 0 {
+        Termination::Failed
+    } else if cancel.is_cancelled() {
+        Termination::Interrupted
+    } else {
+        Termination::Completed
+    };
+
+    let body = terminal_body(&Terminal {
+        termination,
+        counts,
+        duration,
+        cancel: &cancel,
+        interrupt_requested_at: collected.interrupt_requested_at,
+        worker_panics,
+        writer_error: writer_error.as_ref(),
+    });
+
+    let terminal_ok = writer.emit_terminal(termination.event_name(), body).is_ok();
+    let path = writer.finalize().unwrap_or_else(|_| PathBuf::new());
+
+    Ok(ScanSummary {
+        scan_id,
+        counts,
+        termination,
+        duration,
+        path,
+        writer_failed: writer_error.is_some() || !terminal_ok,
+        worker_panics,
+    })
+}
+
+/// Widest target label, so result columns line up without a second pass.
+fn target_width(plan: &ScanPlan) -> usize {
+    plan.targets
+        .iter()
+        .map(|t| t.to_string().len())
+        .max()
+        .unwrap_or(15)
+}
+
+/// What resolution and planning found out before any probe ran.
+fn emit_plan_diagnostics(
+    writer: &mut JsonlWriter,
+    writer_error: &mut Option<std::io::Error>,
+    plan: &ScanPlan,
+) {
+    for h in &plan.resolved_hosts {
+        emit(
+            writer,
+            writer_error,
             "target_resolved",
             json!({
                 "target": h.hostname,
@@ -162,43 +262,32 @@ pub(crate) fn execute_with(
     }
     for w in &plan.warnings {
         emit(
-            &mut writer,
-            &mut writer_error,
+            writer,
+            writer_error,
             "scan_warning",
             json!({ "code": w.code, "message": w.message }),
         );
     }
+}
 
-    let total = plan.probe_count();
-    let mut counts = Counts {
-        planned: total,
-        ..Default::default()
-    };
-
-    let target_width = plan
-        .targets
-        .iter()
-        .map(|t| t.to_string().len())
-        .max()
-        .unwrap_or(15);
-    let printer = ResultPrinter::new(target_width, plan.open_only, opts.no_color);
-    let mut progress = Progress::new(opts.quiet, opts.no_color);
-
-    if !opts.quiet {
-        print_header(&plan, &scan_id, writer.partial_path());
-    }
-
-    // ── workers ─────────────────────────────────────────────────────────────
-    let transport: Arc<dyn Transport> = match harness.transport {
-        Some(t) => t,
-        None => Arc::from(crate::transport::build(&plan.transport)),
-    };
+/// Start the worker pool and hand back their handles and the result channel.
+///
+/// Concurrency *is* the thread count — there is no queue, so a probe is either in flight
+/// or not yet issued, which is what makes the three-bucket accounting exact.
+fn spawn_workers(
+    plan: &Arc<ScanPlan>,
+    transport: &Arc<dyn Transport>,
+    counter: &Arc<WorkCounter>,
+    cancel: &Cancel,
+    n_workers: usize,
+    total: u64,
+) -> Result<(Vec<std::thread::JoinHandle<()>>, Receiver<Completed>), ScanError> {
     let permutation = Arc::new(Permutation::new(total.max(1), plan.seed));
-    let counter = Arc::new(WorkCounter::new(total));
     let limiter = Arc::new(RateLimiter::new(plan.timing.rate));
     let (tx, rx) = sync_channel::<Completed>(CHANNEL_DEPTH);
 
-    let n_workers = worker_count(plan.timing.concurrency, total);
+    // Hoisted: the loop shadows `plan` with a clone that moves into the worker closure,
+    // so the error path cannot reach the outer one.
     let out_dir = plan.output_dir.clone();
     let mut handles = Vec::with_capacity(n_workers);
     for i in 0..n_workers {
@@ -231,209 +320,240 @@ pub(crate) fn execute_with(
             })?;
         handles.push(handle);
     }
+    // The collector's loop ends on channel disconnect, which cannot happen while this
+    // original sender is alive.
     drop(tx);
+    Ok((handles, rx))
+}
 
-    // ── collection ──────────────────────────────────────────────────────────
-    let mut stdout = std::io::stdout().lock();
-    let mut last_progress = Instant::now();
-    let mut last_count = 0u64;
-    // Pressure conditions are reported once each. A saturated host would otherwise
-    // produce one warning per failing probe, which is tens of thousands of them.
-    let mut pressure_seen: std::collections::BTreeSet<&'static str> = Default::default();
-    let mut interrupt_requested_at: Option<u64> = None;
-    let mut interrupt_at: Option<Instant> = None;
-    // The real bound on drain is the connect timeout, since a blocking connect cannot
-    // be interrupted. MAX_DRAIN keeps a very long timeout from feeling hung.
-    let drain_budget = plan.timing.connect_timeout.min(MAX_DRAIN);
-    let progress_interval = harness.progress_interval.unwrap_or(PROGRESS_INTERVAL);
+/// Wait for workers and count the ones that died.
+///
+/// The join result is not discarded. `panic = "unwind"` is deliberate (D1) so that a
+/// panicking worker cannot take the writer down with it — but that only helps if we
+/// then notice. Discarding it meant a crashed worker produced a short scan labelled
+/// `scan_completed` with `termination: natural` and exit 0, which is precisely the
+/// outcome this tool exists to make impossible.
+///
+/// A forced stop skips the join entirely: process exit will reap them.
+fn join_workers(handles: Vec<std::thread::JoinHandle<()>>, cancel: &Cancel) -> u32 {
+    if cancel.is_forced() {
+        return 0;
+    }
+    handles
+        .into_iter()
+        .fold(0, |n, h| n + u32::from(h.join().is_err()))
+}
 
-    loop {
-        match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(Completed { record }) => {
-                counts.record(record.outcome.state, record.attempts);
-                if printer.should_print(&record.outcome) {
-                    progress.clear();
-                    printer.print(&mut stdout, &record.target, record.port, &record.outcome);
-                }
-                // Surface a degrading condition the first time it appears, with the
-                // remediation derived from this host. Before this was wired up the
-                // diagnostics in `diag` were unreachable, so the most likely real
-                // failure of a proxied scan produced only a reason string.
-                if let Some(p) = record.outcome.pressure
-                    && pressure_seen.insert(p.code())
-                {
-                    let remediation = p.remediation(&facts, plan.timing.concurrency);
-                    emit(
-                        &mut writer,
-                        &mut writer_error,
-                        "scan_warning",
-                        json!({
-                            "code": p.code(),
-                            "message": p.summary(),
-                            "detail": { "remediation": remediation },
-                        }),
-                    );
-                    if !opts.quiet {
-                        progress.clear();
-                        let _ = writeln!(
-                            std::io::stderr(),
-                            "\nwarning: {}\n{}",
-                            p.summary(),
-                            remediation
-                                .lines()
-                                .map(|l| format!("  {l}"))
-                                .collect::<Vec<_>>()
-                                .join("\n")
+/// The collection loop's inputs. Bundled rather than passed individually because the
+/// loop is where a running scan's state lives, and a dozen parameters obscured that.
+struct Collector<'a> {
+    plan: &'a ScanPlan,
+    facts: &'a HostFacts,
+    opts: &'a RunOptions,
+    cancel: &'a Cancel,
+    printer: ResultPrinter,
+    progress: Progress,
+    drain_budget: Duration,
+    progress_interval: Duration,
+    total: u64,
+}
+
+/// What the collection loop produced.
+struct Collected {
+    counts: Counts,
+    interrupt_requested_at: Option<u64>,
+}
+
+impl Collector<'_> {
+    fn run(
+        mut self,
+        rx: &Receiver<Completed>,
+        writer: &mut JsonlWriter,
+        writer_error: &mut Option<std::io::Error>,
+    ) -> Collected {
+        let mut stdout = std::io::stdout().lock();
+        let mut counts = Counts {
+            planned: self.total,
+            ..Default::default()
+        };
+        let mut last_progress = Instant::now();
+        let mut last_count = 0u64;
+        // Pressure conditions are reported once each. A saturated host would otherwise
+        // produce one warning per failing probe, which is tens of thousands of them.
+        let mut pressure_seen: std::collections::BTreeSet<&'static str> = Default::default();
+        let mut interrupt_requested_at: Option<u64> = None;
+        let mut interrupt_at: Option<Instant> = None;
+
+        loop {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(Completed { record }) => {
+                    counts.record(record.outcome.state, record.attempts);
+                    if self.printer.should_print(&record.outcome) {
+                        self.progress.clear();
+                        self.printer.print(
+                            &mut stdout,
+                            &record.target,
+                            record.port,
+                            &record.outcome,
                         );
                     }
+                    if let Some(p) = record.outcome.pressure
+                        && pressure_seen.insert(p.code())
+                    {
+                        self.report_pressure(p, writer, writer_error);
+                    }
+                    emit(writer, writer_error, "probe_result", record.to_json());
                 }
-
-                emit(
-                    &mut writer,
-                    &mut writer_error,
-                    "probe_result",
-                    record.to_json(),
-                );
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
             }
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => break,
-        }
 
-        if cancel.is_cancelled() && interrupt_requested_at.is_none() {
-            interrupt_requested_at = Some(now_epoch_ms());
-            interrupt_at = Some(Instant::now());
-            progress.clear();
-            if !opts.quiet {
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "\ninterrupt: no new probes will start; draining in-flight work \
-                     (interrupt again to exit immediately)"
-                );
+            if self.cancel.is_cancelled() && interrupt_requested_at.is_none() {
+                interrupt_requested_at = Some(now_epoch_ms());
+                interrupt_at = Some(Instant::now());
+                self.progress.clear();
+                if !self.opts.quiet {
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "\ninterrupt: no new probes will start; draining in-flight work \
+                         (interrupt again to exit immediately)"
+                    );
+                }
+            }
+            if self.cancel.is_forced() {
+                break;
+            }
+            // Stop waiting on stragglers once the drain budget is spent; anything still
+            // outstanding is accounted for as not_started in the terminal event.
+            if let Some(t) = interrupt_at
+                && t.elapsed() >= self.drain_budget
+            {
+                break;
+            }
+
+            if last_progress.elapsed() >= self.progress_interval {
+                self.tick_progress(&counts, last_progress, last_count, writer, writer_error);
+                last_progress = Instant::now();
+                last_count = counts.completed;
             }
         }
-        if cancel.is_forced() {
-            break;
-        }
-        // Stop waiting on stragglers once the drain budget is spent; anything still
-        // outstanding is accounted for as not_started in the terminal event.
-        if let Some(t) = interrupt_at
-            && t.elapsed() >= drain_budget
-        {
-            break;
-        }
+        self.progress.clear();
 
-        if last_progress.elapsed() >= progress_interval {
-            let elapsed = last_progress.elapsed().as_secs_f64();
-            let rate = (counts.completed - last_count) as f64 / elapsed;
-            let remaining = total.saturating_sub(counts.completed) as f64;
-            let eta = (rate > 0.01).then(|| remaining / rate);
-            progress.render(counts.completed, total, counts.open, rate, eta);
-            emit(
-                &mut writer,
-                &mut writer_error,
-                "scan_progress",
-                json!({
-                    "completed": counts.completed,
-                    "planned": total,
-                    "open": counts.open,
-                    "rate_per_s": (rate * 10.0).round() / 10.0,
-                    "eta_s": eta.map(|e| e.round()),
-                }),
-            );
-            last_progress = Instant::now();
-            last_count = counts.completed;
+        Collected {
+            counts,
+            interrupt_requested_at,
         }
     }
-    progress.clear();
 
-    counts.started = counter.issued();
-
-    // Workers exit on their own once the counter is exhausted or cancellation is seen.
-    // A forced stop skips the join: process exit will reap them.
-    //
-    // The join result is not discarded. `panic = "unwind"` is deliberate (D1) so that a
-    // panicking worker cannot take the writer down with it — but that only helps if we
-    // then notice. Discarding it meant a crashed worker produced a short scan labelled
-    // `scan_completed` with `termination: natural` and exit 0, which is precisely the
-    // outcome this tool exists to make impossible.
-    let mut worker_panics = 0u32;
-    if !cancel.is_forced() {
-        for h in handles {
-            if h.join().is_err() {
-                worker_panics += 1;
-            }
-        }
-    }
-    if worker_panics > 0 {
+    /// Surface a degrading condition the first time it appears, with the remediation
+    /// derived from this host.
+    ///
+    /// Before this was wired up the diagnostics in `diag` were unreachable, so the most
+    /// likely real failure of a proxied scan produced only a reason string.
+    fn report_pressure(
+        &mut self,
+        p: crate::diag::Pressure,
+        writer: &mut JsonlWriter,
+        writer_error: &mut Option<std::io::Error>,
+    ) {
+        let remediation = p.remediation(self.facts, self.plan.timing.concurrency);
         emit(
-            &mut writer,
-            &mut writer_error,
+            writer,
+            writer_error,
             "scan_warning",
             json!({
-                "code": "worker_panic",
-                "message": format!(
-                    "{worker_panics} of {n_workers} scan workers terminated abnormally; \
-                     the probes they held were abandoned and these results are incomplete"
-                ),
+                "code": p.code(),
+                "message": p.summary(),
+                "detail": { "remediation": remediation },
+            }),
+        );
+        if !self.opts.quiet {
+            self.progress.clear();
+            let _ = writeln!(
+                std::io::stderr(),
+                "\nwarning: {}\n{}",
+                p.summary(),
+                remediation
+                    .lines()
+                    .map(|l| format!("  {l}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+        }
+    }
+
+    fn tick_progress(
+        &mut self,
+        counts: &Counts,
+        last_progress: Instant,
+        last_count: u64,
+        writer: &mut JsonlWriter,
+        writer_error: &mut Option<std::io::Error>,
+    ) {
+        let elapsed = last_progress.elapsed().as_secs_f64();
+        let rate = (counts.completed - last_count) as f64 / elapsed;
+        let remaining = self.total.saturating_sub(counts.completed) as f64;
+        let eta = (rate > 0.01).then(|| remaining / rate);
+        self.progress
+            .render(counts.completed, self.total, counts.open, rate, eta);
+        emit(
+            writer,
+            writer_error,
+            "scan_progress",
+            json!({
+                "completed": counts.completed,
+                "planned": self.total,
+                "open": counts.open,
+                "rate_per_s": (rate * 10.0).round() / 10.0,
+                "eta_s": eta.map(|e| e.round()),
             }),
         );
     }
+}
 
-    // ── terminal event ──────────────────────────────────────────────────────
-    let duration = started.elapsed();
-    // A crashed worker outranks an interrupt: the user asked for the interrupt and did
-    // not ask for the crash, and only one of the two needs investigating.
-    let termination = if writer_error.is_some() || worker_panics > 0 {
-        Termination::Failed
-    } else if cancel.is_cancelled() {
-        Termination::Interrupted
-    } else {
-        Termination::Completed
-    };
+/// Everything the terminal event reports.
+struct Terminal<'a> {
+    termination: Termination,
+    counts: Counts,
+    duration: Duration,
+    cancel: &'a Cancel,
+    interrupt_requested_at: Option<u64>,
+    worker_panics: u32,
+    writer_error: Option<&'a std::io::Error>,
+}
 
+fn terminal_body(t: &Terminal) -> serde_json::Value {
     let mut body = json!({
-        "termination": match termination {
+        "termination": match t.termination {
             Termination::Completed => "natural",
             Termination::Interrupted => "signal",
             Termination::Failed => "error",
         },
-        "graceful": !cancel.is_forced(),
-        "counts": counts.to_json(),
-        "duration_ms": duration.as_millis() as u64,
-        "exit_code": termination.exit_code(),
+        "graceful": !t.cancel.is_forced(),
+        "counts": t.counts.to_json(),
+        "duration_ms": t.duration.as_millis() as u64,
+        "exit_code": t.termination.exit_code(),
     });
-    if termination == Termination::Interrupted {
+    if t.termination == Termination::Interrupted {
         body["signal"] = json!("SIGINT");
-        body["forced"] = json!(cancel.is_forced());
-        if let Some(at) = interrupt_requested_at {
+        body["forced"] = json!(t.cancel.is_forced());
+        if let Some(at) = t.interrupt_requested_at {
             body["requested_at"] = json!(rfc3339_ms(at));
         }
     }
     // Recorded numerically as well as in the reason, so a consumer can detect it
     // without string-matching. A writer failure is the more fundamental fault, so it
     // takes the `error_code` when both happened; the panic count survives regardless.
-    if worker_panics > 0 {
-        body["worker_panics"] = json!(worker_panics);
-        body["error"] = json!(format!("{worker_panics} scan worker(s) panicked"));
+    if t.worker_panics > 0 {
+        body["worker_panics"] = json!(t.worker_panics);
+        body["error"] = json!(format!("{} scan worker(s) panicked", t.worker_panics));
         body["error_code"] = json!("worker_panic");
     }
-    if let Some(e) = &writer_error {
+    if let Some(e) = t.writer_error {
         body["error"] = json!(e.to_string());
         body["error_code"] = json!("writer_failure");
     }
-
-    let terminal_ok = writer.emit_terminal(termination.event_name(), body).is_ok();
-    let path = writer.finalize().unwrap_or_else(|_| PathBuf::new());
-
-    Ok(ScanSummary {
-        scan_id,
-        counts,
-        termination,
-        duration,
-        path,
-        writer_failed: writer_error.is_some() || !terminal_ok,
-        worker_panics,
-    })
+    body
 }
 
 /// Emit an event, remembering the first write failure and going quiet after it.

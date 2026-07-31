@@ -80,6 +80,10 @@ impl VerifyReport {
     }
 }
 
+/// Check a record against every rule the specification states.
+///
+/// Split into one function per rule family: each reports everything it finds rather than
+/// stopping at the first problem, so one pass tells the whole story about a record.
 pub fn verify(path: &Path) -> Result<VerifyReport, String> {
     let rec = read(path)?;
     let mut problems = Vec::new();
@@ -99,76 +103,9 @@ pub fn verify(path: &Path) -> Result<VerifyReport, String> {
         });
     }
 
-    // Header order.
-    if kind(&rec.events[0]) != "scan_started" {
-        problems.push(format!(
-            "first event is `{}`, expected `scan_started`",
-            kind(&rec.events[0])
-        ));
-    }
-    if rec.events.len() > 1 && kind(&rec.events[1]) != "scan_config" {
-        problems.push(format!(
-            "second event is `{}`, expected `scan_config`",
-            kind(&rec.events[1])
-        ));
-    }
-
-    // Schema version.
-    if let Some(v) = rec.events[0]["schema_version"].as_u64()
-        && v != crate::output::SCHEMA_VERSION as u64
-    {
-        problems.push(format!(
-            "schema_version {v} is not supported by this build ({})",
-            crate::output::SCHEMA_VERSION
-        ));
-    }
-
-    // Consistent scan id and strictly increasing sequence.
-    let scan_id = rec.events[0]["scan_id"].as_str().unwrap_or("").to_string();
-    let mut last_seq: Option<u64> = None;
-    for (i, e) in rec.events.iter().enumerate() {
-        if e["scan_id"].as_str().unwrap_or("") != scan_id {
-            problems.push(format!("event {i} has a different scan_id"));
-            break;
-        }
-        match (e["seq"].as_u64(), last_seq) {
-            (Some(s), Some(prev)) if s <= prev => {
-                problems.push(format!(
-                    "seq is not strictly increasing at event {i}: {prev} -> {s}"
-                ));
-                last_seq = Some(s);
-            }
-            (Some(s), _) => last_seq = Some(s),
-            (None, _) => problems.push(format!("event {i} has no seq")),
-        }
-    }
-
-    // Exactly one terminal event, and it must be last.
-    let terminal_positions: Vec<usize> = rec
-        .events
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| TERMINALS.contains(&kind(e)))
-        .map(|(i, _)| i)
-        .collect();
-
-    match terminal_positions.len() {
-        0 => {
-            problems
-                .push("no terminal event — the scan did not finish writing (process died?)".into());
-        }
-        1 => {
-            let pos = terminal_positions[0];
-            if pos != rec.events.len() - 1 {
-                problems.push(format!(
-                    "{} events follow the terminal event",
-                    rec.events.len() - 1 - pos
-                ));
-            }
-            notes.push(format!("terminal: {}", kind(&rec.events[pos])));
-        }
-        n => problems.push(format!("{n} terminal events; exactly one is allowed")),
-    }
+    check_header(&rec, &mut problems);
+    check_sequence(&rec, &mut problems);
+    let terminal_positions = check_terminal(&rec, &mut problems, &mut notes);
 
     if rec.partial {
         problems.push(
@@ -176,55 +113,13 @@ pub fn verify(path: &Path) -> Result<VerifyReport, String> {
         );
     }
 
-    // Counts must reconcile with the rows actually present.
     let observed = rec
         .events
         .iter()
         .filter(|e| kind(e) == "probe_result")
         .count() as u64;
-    if let Some(term) = terminal_positions.first().map(|&i| &rec.events[i])
-        && let Some(completed) = term["counts"]["completed"].as_u64()
-    {
-        if completed != observed {
-            problems.push(format!(
-                "terminal event claims {completed} completed probes but {observed} probe_result \
-                 events are present"
-            ));
-        }
-        let parts = ["open", "closed", "filtered", "error"]
-            .iter()
-            .filter_map(|k| term["counts"][k].as_u64())
-            .sum::<u64>();
-        if parts != completed {
-            problems.push(format!(
-                "state counts sum to {parts} but completed is {completed}"
-            ));
-        }
-        // Every planned probe must land in exactly one bucket.
-        if let (Some(planned), Some(not_started)) = (
-            term["counts"]["planned"].as_u64(),
-            term["counts"]["not_started"].as_u64(),
-        ) {
-            let abandoned = term["counts"]["abandoned"].as_u64().unwrap_or(0);
-            if planned != completed + abandoned + not_started {
-                problems.push(format!(
-                    "planned ({planned}) != completed ({completed}) + abandoned \
-                     ({abandoned}) + not_started ({not_started})"
-                ));
-            }
-        }
-    }
-
-    // Credentials must never appear.
-    for (i, e) in rec.events.iter().enumerate() {
-        if let Some(found) = find_exposed_secret(e) {
-            problems.push(format!(
-                "event {i} may contain an unredacted credential at `{found}`"
-            ));
-        }
-    }
-
-    // Field values, not just structure.
+    check_counts(&rec, &terminal_positions, observed, &mut problems);
+    check_credentials(&rec, &mut problems);
     check_values(&rec, &mut problems);
 
     if let Some(parent) = rec
@@ -247,6 +142,136 @@ pub fn verify(path: &Path) -> Result<VerifyReport, String> {
         problems,
         notes,
     })
+}
+
+/// `scan_started` first, `scan_config` second, and a schema this build understands.
+fn check_header(rec: &Record, problems: &mut Vec<String>) {
+    if kind(&rec.events[0]) != "scan_started" {
+        problems.push(format!(
+            "first event is `{}`, expected `scan_started`",
+            kind(&rec.events[0])
+        ));
+    }
+    if rec.events.len() > 1 && kind(&rec.events[1]) != "scan_config" {
+        problems.push(format!(
+            "second event is `{}`, expected `scan_config`",
+            kind(&rec.events[1])
+        ));
+    }
+    if let Some(v) = rec.events[0]["schema_version"].as_u64()
+        && v != crate::output::SCHEMA_VERSION as u64
+    {
+        problems.push(format!(
+            "schema_version {v} is not supported by this build ({})",
+            crate::output::SCHEMA_VERSION
+        ));
+    }
+}
+
+/// One scan id throughout, and `seq` strictly increasing.
+fn check_sequence(rec: &Record, problems: &mut Vec<String>) {
+    let scan_id = rec.events[0]["scan_id"].as_str().unwrap_or("").to_string();
+    let mut last_seq: Option<u64> = None;
+    for (i, e) in rec.events.iter().enumerate() {
+        if e["scan_id"].as_str().unwrap_or("") != scan_id {
+            problems.push(format!("event {i} has a different scan_id"));
+            break;
+        }
+        match (e["seq"].as_u64(), last_seq) {
+            (Some(s), Some(prev)) if s <= prev => {
+                problems.push(format!(
+                    "seq is not strictly increasing at event {i}: {prev} -> {s}"
+                ));
+                last_seq = Some(s);
+            }
+            (Some(s), _) => last_seq = Some(s),
+            (None, _) => problems.push(format!("event {i} has no seq")),
+        }
+    }
+}
+
+/// Exactly one terminal event, and it must be last. Returns where they were found.
+fn check_terminal(rec: &Record, problems: &mut Vec<String>, notes: &mut Vec<String>) -> Vec<usize> {
+    let positions: Vec<usize> = rec
+        .events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| TERMINALS.contains(&kind(e)))
+        .map(|(i, _)| i)
+        .collect();
+
+    match positions.len() {
+        0 => {
+            problems
+                .push("no terminal event — the scan did not finish writing (process died?)".into());
+        }
+        1 => {
+            let pos = positions[0];
+            if pos != rec.events.len() - 1 {
+                problems.push(format!(
+                    "{} events follow the terminal event",
+                    rec.events.len() - 1 - pos
+                ));
+            }
+            notes.push(format!("terminal: {}", kind(&rec.events[pos])));
+        }
+        n => problems.push(format!("{n} terminal events; exactly one is allowed")),
+    }
+    positions
+}
+
+/// The terminal counts must reconcile with the rows actually present, and every planned
+/// probe must land in exactly one of the three buckets.
+fn check_counts(
+    rec: &Record,
+    terminal_positions: &[usize],
+    observed: u64,
+    problems: &mut Vec<String>,
+) {
+    let Some(term) = terminal_positions.first().map(|&i| &rec.events[i]) else {
+        return;
+    };
+    let Some(completed) = term["counts"]["completed"].as_u64() else {
+        return;
+    };
+    if completed != observed {
+        problems.push(format!(
+            "terminal event claims {completed} completed probes but {observed} probe_result \
+             events are present"
+        ));
+    }
+    let parts = ["open", "closed", "filtered", "error"]
+        .iter()
+        .filter_map(|k| term["counts"][k].as_u64())
+        .sum::<u64>();
+    if parts != completed {
+        problems.push(format!(
+            "state counts sum to {parts} but completed is {completed}"
+        ));
+    }
+    if let (Some(planned), Some(not_started)) = (
+        term["counts"]["planned"].as_u64(),
+        term["counts"]["not_started"].as_u64(),
+    ) {
+        let abandoned = term["counts"]["abandoned"].as_u64().unwrap_or(0);
+        if planned != completed + abandoned + not_started {
+            problems.push(format!(
+                "planned ({planned}) != completed ({completed}) + abandoned \
+                 ({abandoned}) + not_started ({not_started})"
+            ));
+        }
+    }
+}
+
+/// Credentials must never appear in a record.
+fn check_credentials(rec: &Record, problems: &mut Vec<String>) {
+    for (i, e) in rec.events.iter().enumerate() {
+        if let Some(found) = find_exposed_secret(e) {
+            problems.push(format!(
+                "event {i} may contain an unredacted credential at `{found}`"
+            ));
+        }
+    }
 }
 
 /// Accumulates value problems by kind rather than by row.
@@ -286,22 +311,6 @@ impl ValueProblems {
 /// then truncated that port and silently dropped a real endpoint from the resume set.
 /// Structure being right is not the same as the record being true.
 fn check_values(rec: &Record, problems: &mut Vec<String>) {
-    use crate::probe::{Source, State};
-
-    let states: Vec<&str> = [State::Open, State::Closed, State::Filtered, State::Error]
-        .iter()
-        .map(State::as_str)
-        .collect();
-    let sources: Vec<&str> = [
-        Source::LocalStack,
-        Source::ProxyReply,
-        Source::Timeout,
-        Source::Internal,
-    ]
-    .iter()
-    .map(Source::as_str)
-    .collect();
-
     let planned = rec
         .events
         .iter()
@@ -309,7 +318,6 @@ fn check_values(rec: &Record, problems: &mut Vec<String>) {
         .and_then(|c| c["probes_planned"].as_u64());
 
     let mut found = ValueProblems::default();
-
     for (i, e) in rec.events.iter().enumerate() {
         // Every event carries a timestamp, and it must be readable.
         match e["ts"].as_str() {
@@ -319,103 +327,133 @@ fn check_values(rec: &Record, problems: &mut Vec<String>) {
             }
             Some(_) => {}
         }
-
-        if kind(e) != "probe_result" {
-            continue;
+        if kind(e) == "probe_result" {
+            check_probe_row(e, i, planned, &mut found);
         }
+    }
+    found.drain_into(problems);
+}
 
-        match e["port"].as_u64() {
-            None => found.note("have a missing or non-numeric `port`", i, &e["port"]),
-            Some(p) if p == 0 || p > u64::from(u16::MAX) => {
-                found.note("have a `port` outside 1-65535", i, p);
+/// The defined values of `state` and `source`, taken from the enums so the two cannot
+/// drift apart.
+fn defined_states() -> Vec<&'static str> {
+    use crate::probe::State;
+    [State::Open, State::Closed, State::Filtered, State::Error]
+        .iter()
+        .map(State::as_str)
+        .collect()
+}
+
+fn defined_sources() -> Vec<&'static str> {
+    use crate::probe::Source;
+    [
+        Source::LocalStack,
+        Source::ProxyReply,
+        Source::Timeout,
+        Source::Internal,
+    ]
+    .iter()
+    .map(Source::as_str)
+    .collect()
+}
+
+fn check_probe_row(e: &Value, i: usize, planned: Option<u64>, found: &mut ValueProblems) {
+    let states = defined_states();
+    let sources = defined_sources();
+
+    match e["port"].as_u64() {
+        None => found.note("have a missing or non-numeric `port`", i, &e["port"]),
+        Some(p) if p == 0 || p > u64::from(u16::MAX) => {
+            found.note("have a `port` outside 1-65535", i, p);
+        }
+        Some(_) => {}
+    }
+
+    match e["state"].as_str() {
+        Some(s) if states.contains(&s) => {}
+        other => found.note(
+            "have an unrecognised `state`",
+            i,
+            other.unwrap_or("(absent)"),
+        ),
+    }
+    match e["source"].as_str() {
+        Some(s) if sources.contains(&s) => {}
+        other => found.note(
+            "have an unrecognised `source`",
+            i,
+            other.unwrap_or("(absent)"),
+        ),
+    }
+    if e["protocol"].as_str() != Some("tcp") {
+        found.note("have a `protocol` other than `tcp`", i, &e["protocol"]);
+    }
+
+    // Retries are merged into one row (D10), so attempts is at least the one probe that
+    // produced it, and attempt_states holds exactly that many entries.
+    match e["attempts"].as_u64() {
+        None => found.note(
+            "have a missing or non-numeric `attempts`",
+            i,
+            &e["attempts"],
+        ),
+        Some(0) => found.note("have `attempts` of 0", i, 0),
+        Some(n) => {
+            if let Some(a) = e["attempt_states"].as_array()
+                && a.len() as u64 != n
+            {
+                found.note(
+                    "have an `attempt_states` length that disagrees with `attempts`",
+                    i,
+                    format!("attempts {n}, {} states", a.len()),
+                );
+            }
+        }
+    }
+    if let Some(a) = e["attempt_states"].as_array()
+        && let Some(bad) = a
+            .iter()
+            .find(|s| !s.as_str().is_some_and(|s| states.contains(&s)))
+    {
+        found.note("have an unrecognised entry in `attempt_states`", i, bad);
+    }
+
+    // probe_index addresses a slot in the planned matrix, so it cannot name one outside
+    // it.
+    if let (Some(idx), Some(planned)) = (e["probe_index"].as_u64(), planned)
+        && idx >= planned
+    {
+        found.note(
+            "have a `probe_index` at or beyond `probes_planned`",
+            i,
+            format!("{idx} >= {planned}"),
+        );
+    }
+
+    check_timings(e, i, found);
+}
+
+fn check_timings(e: &Value, i: usize, found: &mut ValueProblems) {
+    let Some(timing) = e["timing_ms"].as_object() else {
+        found.note(
+            "have a missing or malformed `timing_ms`",
+            i,
+            &e["timing_ms"],
+        );
+        return;
+    };
+    for (phase, v) in timing {
+        match v.as_f64() {
+            None => found.note("have a non-numeric timing", i, format!("{phase}={v}")),
+            Some(ms) if ms < 0.0 || !ms.is_finite() => {
+                found.note("have an impossible timing", i, format!("{phase}={ms}"));
             }
             Some(_) => {}
         }
-
-        match e["state"].as_str() {
-            Some(s) if states.contains(&s) => {}
-            other => found.note(
-                "have an unrecognised `state`",
-                i,
-                other.unwrap_or("(absent)"),
-            ),
-        }
-        match e["source"].as_str() {
-            Some(s) if sources.contains(&s) => {}
-            other => found.note(
-                "have an unrecognised `source`",
-                i,
-                other.unwrap_or("(absent)"),
-            ),
-        }
-        if e["protocol"].as_str() != Some("tcp") {
-            found.note("have a `protocol` other than `tcp`", i, &e["protocol"]);
-        }
-
-        // Retries are merged into one row (D10), so attempts is at least the one probe
-        // that produced it, and attempt_states holds exactly that many entries.
-        match e["attempts"].as_u64() {
-            None => found.note(
-                "have a missing or non-numeric `attempts`",
-                i,
-                &e["attempts"],
-            ),
-            Some(0) => found.note("have `attempts` of 0", i, 0),
-            Some(n) => {
-                if let Some(a) = e["attempt_states"].as_array()
-                    && a.len() as u64 != n
-                {
-                    found.note(
-                        "have an `attempt_states` length that disagrees with `attempts`",
-                        i,
-                        format!("attempts {n}, {} states", a.len()),
-                    );
-                }
-            }
-        }
-        if let Some(a) = e["attempt_states"].as_array()
-            && let Some(bad) = a
-                .iter()
-                .find(|s| !s.as_str().is_some_and(|s| states.contains(&s)))
-        {
-            found.note("have an unrecognised entry in `attempt_states`", i, bad);
-        }
-
-        // probe_index addresses a slot in the planned matrix, so it cannot name one
-        // outside it.
-        if let (Some(idx), Some(planned)) = (e["probe_index"].as_u64(), planned)
-            && idx >= planned
-        {
-            found.note(
-                "have a `probe_index` at or beyond `probes_planned`",
-                i,
-                format!("{idx} >= {planned}"),
-            );
-        }
-
-        if let Some(timing) = e["timing_ms"].as_object() {
-            for (phase, v) in timing {
-                match v.as_f64() {
-                    None => found.note("have a non-numeric timing", i, format!("{phase}={v}")),
-                    Some(ms) if ms < 0.0 || !ms.is_finite() => {
-                        found.note("have an impossible timing", i, format!("{phase}={ms}"));
-                    }
-                    Some(_) => {}
-                }
-            }
-            if !timing.contains_key("total") {
-                found.note("have no `timing_ms.total`", i, kind(e));
-            }
-        } else {
-            found.note(
-                "have a missing or malformed `timing_ms`",
-                i,
-                &e["timing_ms"],
-            );
-        }
     }
-
-    found.drain_into(problems);
+    if !timing.contains_key("total") {
+        found.note("have no `timing_ms.total`", i, kind(e));
+    }
 }
 
 /// Walk a JSON value looking for a credential-shaped key with a real value.
@@ -587,97 +625,8 @@ pub fn remainder(path: &Path) -> Result<Remainder, String> {
         .find(|e| kind(e) == "scan_config")
         .ok_or_else(|| format!("{} has no scan_config event", path.display()))?;
 
-    // Every endpoint the scan intended to probe.
-    let expected: Vec<(String, u16)> = if config["targets"]["mode"] == "pairs" {
-        if config["targets"]["pairs_truncated"] == true {
-            return Err(format!(
-                "{} recorded too many explicit pairs to embed, so its remainder cannot be \
-                 derived from the record alone",
-                path.display()
-            ));
-        }
-        let pairs = config["targets"]["pairs"]
-            .as_array()
-            .ok_or("pair-mode record has no embedded pair list")?;
-        let mut out = Vec::with_capacity(pairs.len());
-        for v in pairs {
-            let line = v.as_str().ok_or("malformed embedded pair")?;
-            let (spec, port) =
-                parse_pair(line).map_err(|e| format!("recorded pair `{line}` is invalid: {e}"))?;
-            out.push((spec.to_string(), port));
-        }
-        out
-    } else {
-        let specs: Vec<String> = config["targets"]["spec"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let excludes: Vec<String> = config["targets"]["exclude"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let port_spec = config["ports"]["spec"].as_str().unwrap_or("");
-        let ports =
-            parse_ports(port_spec).map_err(|e| format!("recorded port spec is invalid: {e}"))?;
-
-        let mut set = TargetSet::default();
-        for s in &specs {
-            if s.starts_with("file:") {
-                return Err(format!(
-                    "this scan's targets came from {s}, which is not reproducible from the \
-                     record alone; re-run with the same file"
-                ));
-            }
-            set.include.push(
-                parse_target(s).map_err(|e| format!("recorded target spec is invalid: {e}"))?,
-            );
-        }
-        for s in &excludes {
-            set.exclude.push(
-                parse_target(s).map_err(|e| format!("recorded exclude spec is invalid: {e}"))?,
-            );
-        }
-        let targets = set
-            .expand(true, u64::MAX)
-            .map_err(|e| format!("cannot re-expand targets: {e}"))?;
-
-        let mut out = Vec::with_capacity(targets.len() * ports.len());
-        for t in &targets {
-            for p in &ports {
-                out.push((t.to_string(), *p));
-            }
-        }
-        out
-    };
-
-    // Exactly what was reported, pair by pair.
-    //
-    // An out-of-range port means the record is corrupt, and it must be refused rather
-    // than narrowed: `p as u16` silently wrapped 65616 to 80, which both marked an
-    // endpoint as probed that never was and dropped the real one from the remainder.
-    // A resume driven by that output skipped endpoints with no indication.
-    let mut probed: BTreeSet<(String, u16)> = BTreeSet::new();
-    for e in rec.events.iter().filter(|e| kind(e) == "probe_result") {
-        if let (Some(t), Some(p)) = (e["target"].as_str(), e["port"].as_u64()) {
-            let port = u16::try_from(p).map_err(|_| {
-                format!(
-                    "{} records a probe of `{t}` on port {p}, which is not a valid TCP port; \
-                     the record is corrupt and its remainder cannot be derived safely \
-                     (run `scanr output verify` for the full picture)",
-                    path.display()
-                )
-            })?;
-            probed.insert((t.to_string(), port));
-        }
-    }
+    let expected = expected_endpoints(config, path)?;
+    let probed = probed_endpoints(&rec, path)?;
 
     let remaining: Vec<String> = expected
         .iter()
@@ -702,6 +651,106 @@ pub fn remainder(path: &Path) -> Result<Remainder, String> {
             .map(str::to_string),
         note,
     })
+}
+
+/// Every endpoint the scan intended to probe, reconstructed from its recorded spec.
+fn expected_endpoints(config: &Value, path: &Path) -> Result<Vec<(String, u16)>, String> {
+    if config["targets"]["mode"] == "pairs" {
+        return expected_from_pairs(config, path);
+    }
+    expected_from_matrix(config)
+}
+
+/// A pair scan has no compact spec, so the record embeds the list and it *is* the spec.
+fn expected_from_pairs(config: &Value, path: &Path) -> Result<Vec<(String, u16)>, String> {
+    if config["targets"]["pairs_truncated"] == true {
+        return Err(format!(
+            "{} recorded too many explicit pairs to embed, so its remainder cannot be \
+             derived from the record alone",
+            path.display()
+        ));
+    }
+    let pairs = config["targets"]["pairs"]
+        .as_array()
+        .ok_or("pair-mode record has no embedded pair list")?;
+    let mut out = Vec::with_capacity(pairs.len());
+    for v in pairs {
+        let line = v.as_str().ok_or("malformed embedded pair")?;
+        let (spec, port) =
+            parse_pair(line).map_err(|e| format!("recorded pair `{line}` is invalid: {e}"))?;
+        out.push((spec.to_string(), port));
+    }
+    Ok(out)
+}
+
+/// Re-expand the target x port matrix from the canonical specs plus the seed.
+fn expected_from_matrix(config: &Value) -> Result<Vec<(String, u16)>, String> {
+    let list = |key: &str| -> Vec<String> {
+        config["targets"][key]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let specs = list("spec");
+    let excludes = list("exclude");
+    let port_spec = config["ports"]["spec"].as_str().unwrap_or("");
+    let ports =
+        parse_ports(port_spec).map_err(|e| format!("recorded port spec is invalid: {e}"))?;
+
+    let mut set = TargetSet::default();
+    for s in &specs {
+        if s.starts_with("file:") {
+            return Err(format!(
+                "this scan's targets came from {s}, which is not reproducible from the \
+                 record alone; re-run with the same file"
+            ));
+        }
+        set.include
+            .push(parse_target(s).map_err(|e| format!("recorded target spec is invalid: {e}"))?);
+    }
+    for s in &excludes {
+        set.exclude
+            .push(parse_target(s).map_err(|e| format!("recorded exclude spec is invalid: {e}"))?);
+    }
+    let targets = set
+        .expand(true, u64::MAX)
+        .map_err(|e| format!("cannot re-expand targets: {e}"))?;
+
+    let mut out = Vec::with_capacity(targets.len() * ports.len());
+    for t in &targets {
+        for p in &ports {
+            out.push((t.to_string(), *p));
+        }
+    }
+    Ok(out)
+}
+
+/// Exactly what was reported, pair by pair.
+///
+/// An out-of-range port means the record is corrupt, and it must be refused rather than
+/// narrowed: `p as u16` silently wrapped 65616 to 80, which both marked an endpoint as
+/// probed that never was and dropped the real one from the remainder. A resume driven by
+/// that output skipped endpoints with no indication.
+fn probed_endpoints(rec: &Record, path: &Path) -> Result<BTreeSet<(String, u16)>, String> {
+    let mut probed = BTreeSet::new();
+    for e in rec.events.iter().filter(|e| kind(e) == "probe_result") {
+        if let (Some(t), Some(p)) = (e["target"].as_str(), e["port"].as_u64()) {
+            let port = u16::try_from(p).map_err(|_| {
+                format!(
+                    "{} records a probe of `{t}` on port {p}, which is not a valid TCP port; \
+                     the record is corrupt and its remainder cannot be derived safely \
+                     (run `scanr output verify` for the full picture)",
+                    path.display()
+                )
+            })?;
+            probed.insert((t.to_string(), port));
+        }
+    }
+    Ok(probed)
 }
 
 /// What `scanr output remainder` produces.

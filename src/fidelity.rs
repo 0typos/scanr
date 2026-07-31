@@ -156,32 +156,7 @@ pub fn measure(
     //
     // When the proxy is on loopback we can do better than guessing — bind a listener
     // ourselves, which the proxy is guaranteed to be able to reach.
-    let _own_listener: Option<std::net::TcpListener>;
-    let open_dest = match known_open {
-        Some(s) => parse_dest(Some(s), address)?,
-        None if address.ip().is_loopback() => {
-            let l = std::net::TcpListener::bind("127.0.0.1:0")
-                .map_err(|e| format!("cannot bind a calibration listener: {e}"))?;
-            let a = l
-                .local_addr()
-                .map_err(|e| format!("cannot read calibration listener address: {e}"))?;
-            // Accept and drop, so the proxy's connection completes.
-            let acceptor = l.try_clone().map_err(|e| e.to_string())?;
-            std::thread::spawn(move || {
-                for s in acceptor.incoming() {
-                    drop(s);
-                }
-            });
-            _own_listener = Some(l);
-            a
-        }
-        // A remote proxy cannot reach our loopback, so fall back to its own address and
-        // say plainly what to do when that fails.
-        None => {
-            _own_listener = None;
-            address
-        }
-    };
+    let (open_dest, _own_listener) = known_open_destination(known_open, address)?;
     let closed_dest = parse_dest(known_closed, SocketAddr::new(address.ip(), 1))?;
     let blackhole: SocketAddr = "192.0.2.1:80".parse().expect("valid literal");
 
@@ -190,47 +165,19 @@ pub fn measure(
     let mut short = timing.clone();
     short.connect_timeout = timing.connect_timeout.min(Duration::from_secs(3));
 
-    let mut checks = Vec::new();
-    let mut reachable = true;
-    let mut auth = None;
-
-    for (label, dest, expectation, t) in [
-        ("known-open", open_dest, "open", timing),
-        ("known-closed", closed_dest, "closed", timing),
-        ("blackholed", blackhole, "filtered", &short),
-    ] {
-        let d = client.probe_detailed(&Destination::Addr(dest), t);
-        let o = &d.outcome;
-
-        // A failure to reach the proxy itself invalidates every later conclusion.
-        //
-        // This is decided structurally rather than by matching on message text: if the
-        // handshake never completed, we never got a usable channel to the proxy. An
-        // earlier string-matching version wrongly treated a *destination* result of
-        // "host unreachable (proxy reply 0x04)" as a proxy failure, because the message
-        // happens to contain both "proxy" and "unreachable".
-        if o.phases.handshake.is_none() {
-            reachable = false;
-        }
-        if let Some(r) = &o.reason
-            && r.contains("credentials")
-        {
-            auth = Some(format!("rejected — {r}"));
-            reachable = false;
-        }
-        if auth.is_none() && username.is_some() && o.phases.handshake.is_some() {
-            auth = Some("accepted (username/password)".into());
-        }
-
-        checks.push(Check {
-            label,
-            dest: dest.to_string(),
-            state: o.state,
-            reply: d.reply_code,
-            ms: o.phases.total.as_secs_f64() * 1000.0,
-            expectation,
-        });
-    }
+    let Probes {
+        checks,
+        reachable,
+        auth,
+    } = run_checks(
+        &client,
+        [
+            ("known-open", open_dest, "open", timing),
+            ("known-closed", closed_dest, "closed", timing),
+            ("blackholed", blackhole, "filtered", &short),
+        ],
+        username.is_some(),
+    );
 
     let closed_reply = checks
         .iter()
@@ -262,6 +209,98 @@ pub fn measure(
         explanation,
         calibration,
     })
+}
+
+/// What the three calibration probes established.
+struct Probes {
+    checks: Vec<Check>,
+    reachable: bool,
+    auth: Option<String>,
+}
+
+/// Probe each calibration destination once and record what came back.
+fn run_checks(
+    client: &Socks5Transport,
+    destinations: [(&'static str, SocketAddr, &'static str, &Timing); 3],
+    authenticating: bool,
+) -> Probes {
+    let mut checks = Vec::new();
+    let mut reachable = true;
+    let mut auth = None;
+
+    for (label, dest, expectation, t) in destinations {
+        let d = client.probe_detailed(&Destination::Addr(dest), t);
+        let o = &d.outcome;
+
+        // A failure to reach the proxy itself invalidates every later conclusion.
+        //
+        // This is decided structurally rather than by matching on message text: if the
+        // handshake never completed, we never got a usable channel to the proxy. An
+        // earlier string-matching version wrongly treated a *destination* result of
+        // "host unreachable (proxy reply 0x04)" as a proxy failure, because the message
+        // happens to contain both "proxy" and "unreachable".
+        if o.phases.handshake.is_none() {
+            reachable = false;
+        }
+        if let Some(r) = &o.reason
+            && r.contains("credentials")
+        {
+            auth = Some(format!("rejected — {r}"));
+            reachable = false;
+        }
+        if auth.is_none() && authenticating && o.phases.handshake.is_some() {
+            auth = Some("accepted (username/password)".into());
+        }
+
+        checks.push(Check {
+            label,
+            dest: dest.to_string(),
+            state: o.state,
+            reply: d.reply_code,
+            ms: o.phases.total.as_secs_f64() * 1000.0,
+            expectation,
+        });
+    }
+    Probes {
+        checks,
+        reachable,
+        auth,
+    }
+}
+
+/// A destination the proxy can definitely reach, plus the listener keeping it alive.
+///
+/// Using the proxy's own listening socket seemed obvious and fails against real
+/// software: dante refuses it by ruleset (reply 0x02) and 3proxy answers 0x09. Two of
+/// four proxies tested.
+///
+/// When the proxy is on loopback we can do better than guessing — bind a listener
+/// ourselves, which the proxy is guaranteed to be able to reach. A remote proxy cannot
+/// reach our loopback, so there we fall back to its own address and say plainly what to
+/// do when that fails.
+fn known_open_destination(
+    known_open: Option<&str>,
+    address: SocketAddr,
+) -> Result<(SocketAddr, Option<std::net::TcpListener>), String> {
+    if let Some(s) = known_open {
+        return Ok((parse_dest(Some(s), address)?, None));
+    }
+    if !address.ip().is_loopback() {
+        return Ok((address, None));
+    }
+    let l = std::net::TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("cannot bind a calibration listener: {e}"))?;
+    let a = l
+        .local_addr()
+        .map_err(|e| format!("cannot read calibration listener address: {e}"))?;
+    // Accept and drop, so the proxy's connection completes.
+    let acceptor = l.try_clone().map_err(|e| e.to_string())?;
+    std::thread::spawn(move || {
+        for s in acceptor.incoming() {
+            drop(s);
+        }
+    });
+    Ok((a, Some(l)))
 }
 
 /// Decide fidelity from the reply to a destination we know is closed.

@@ -256,267 +256,313 @@ fn err_at(
 
 /// Validate everything we can without touching the network. Returns every problem
 /// found rather than stopping at the first, so one pass fixes the whole file.
+///
+/// Split by config section rather than done inline: the transport rules alone are half
+/// of this, and a single function made it hard to see that every section reports all of
+/// its problems rather than the first.
 pub fn validate(files: &Layered) -> Vec<ConfigError> {
     let mut errors = Vec::new();
-
     for file in &files.files {
-        let c = &file.config;
-        let p = file.path.as_path();
-
-        match c.version {
-            Some(v) if v == SUPPORTED_VERSION => {}
-            Some(v) => errors.push(
-                err_at(
-                    files,
-                    p,
-                    None,
-                    "version",
-                    format!(
-                        "unsupported config version {v} (this build supports {SUPPORTED_VERSION})"
-                    ),
-                )
-                .help("a newer scanr may be required to read this file"),
-            ),
-            None => errors.push(
-                err_at(files, p, None, "version", "missing `version` key".into()).help(format!(
-                    "add `version = {SUPPORTED_VERSION}` at the top of the file"
-                )),
-            ),
-        }
-
+        let (c, p) = (&file.config, file.path.as_path());
+        validate_version(files, p, c, &mut errors);
         for (name, prof) in &c.profiles {
             validate_timing(files, p, &format!("profiles.{name}"), prof, &mut errors);
         }
+        validate_transports(files, p, c, &mut errors);
+        validate_target_sets(files, p, c, &mut errors);
+        validate_port_sets(files, p, c, &mut errors);
+        validate_scans(files, p, c, &mut errors);
+    }
+    errors.extend(validate_references(files));
+    errors
+}
 
-        for (name, t) in &c.transports {
-            let table = format!("transports.{name}");
-            let kind = t.kind.as_deref().unwrap_or("");
-            match kind {
-                "direct" => {
-                    if t.address.is_some() {
-                        errors.push(err_at(
-                            files,
-                            p,
-                            Some(&table),
-                            "address",
-                            format!("transport `{name}` is direct but sets `address`"),
-                        ));
-                    }
-                }
-                "socks5" => match &t.address {
-                    None => errors.push(
+fn validate_version(files: &Layered, p: &Path, c: &RawConfig, errors: &mut Vec<ConfigError>) {
+    match c.version {
+        Some(v) if v == SUPPORTED_VERSION => {}
+        Some(v) => errors.push(
+            err_at(
+                files,
+                p,
+                None,
+                "version",
+                format!("unsupported config version {v} (this build supports {SUPPORTED_VERSION})"),
+            )
+            .help("a newer scanr may be required to read this file"),
+        ),
+        None => errors.push(
+            err_at(files, p, None, "version", "missing `version` key".into()).help(format!(
+                "add `version = {SUPPORTED_VERSION}` at the top of the file"
+            )),
+        ),
+    }
+}
+
+fn validate_transports(files: &Layered, p: &Path, c: &RawConfig, errors: &mut Vec<ConfigError>) {
+    for (name, t) in &c.transports {
+        let table = format!("transports.{name}");
+        validate_transport_kind(files, p, &table, name, t, errors);
+        validate_transport_credentials(files, p, &table, name, t, errors);
+        validate_transport_modes(files, p, &table, name, t, errors);
+    }
+}
+
+fn validate_transport_kind(
+    files: &Layered,
+    p: &Path,
+    table: &str,
+    name: &str,
+    t: &raw::RawTransport,
+    errors: &mut Vec<ConfigError>,
+) {
+    let kind = t.kind.as_deref().unwrap_or("");
+    match kind {
+        "direct" => {
+            if t.address.is_some() {
+                errors.push(err_at(
+                    files,
+                    p,
+                    Some(table),
+                    "address",
+                    format!("transport `{name}` is direct but sets `address`"),
+                ));
+            }
+        }
+        "socks5" => match &t.address {
+            None => errors.push(
+                err_at(
+                    files,
+                    p,
+                    Some(table),
+                    "type",
+                    format!("socks5 transport `{name}` is missing `address`"),
+                )
+                .help("add `address = \"127.0.0.1:1080\"`"),
+            ),
+            Some(a) => {
+                if a.parse::<std::net::SocketAddr>().is_err() {
+                    errors.push(
                         err_at(
                             files,
                             p,
-                            Some(&table),
-                            "type",
-                            format!("socks5 transport `{name}` is missing `address`"),
+                            Some(table),
+                            "address",
+                            format!("`{a}` is not a valid host:port"),
                         )
-                        .help("add `address = \"127.0.0.1:1080\"`"),
-                    ),
-                    Some(a) => {
-                        if a.parse::<std::net::SocketAddr>().is_err() {
-                            errors.push(
-                                err_at(
-                                    files,
-                                    p,
-                                    Some(&table),
-                                    "address",
-                                    format!("`{a}` is not a valid host:port"),
-                                )
-                                .help("use an IP and port, e.g. \"127.0.0.1:1080\""),
-                            );
-                        }
-                    }
-                },
-                "socks4" | "socks4a" => errors.push(
-                    err_at(
-                        files,
-                        p,
-                        Some(&table),
-                        "type",
-                        format!("transport `{name}` uses `{kind}`, which scanr does not support"),
-                    )
-                    .help(
-                        "SOCKS4/4a define only four reply codes and cannot distinguish a\n\
-                             closed port from a filtered one. Use socks5.",
-                    ),
-                ),
-                "" => errors.push(
-                    err_at(
-                        files,
-                        p,
-                        Some(&table),
-                        "type",
-                        format!("transport `{name}` is missing `type`"),
-                    )
-                    .help("use `type = \"direct\"` or `type = \"socks5\"`"),
-                ),
-                other => {
-                    let mut e = err_at(
-                        files,
-                        p,
-                        Some(&table),
-                        "type",
-                        format!("unknown transport type `{other}`"),
+                        .help("use an IP and port, e.g. \"127.0.0.1:1080\""),
                     );
-                    if let Some(s) = suggest(other, ["direct", "socks5"]) {
-                        e = e.help(format!("did you mean `{s}`?"));
-                    }
-                    errors.push(e);
                 }
             }
-
-            // D14: inline credentials are rejected outright, not warned about.
-            if t.password.is_some() {
-                errors.push(
-                    err_at(
-                        files,
-                        p,
-                        Some(&table),
-                        "password",
-                        format!("transport `{name}` sets an inline `password`"),
-                    )
-                    .help(
-                        "scanr never reads inline passwords, because project config is\n\
-                             normally committed to version control. Use one of:\n\
-                             \x20 password_env  = \"SCANR_LAB_PASSWORD\"\n\
-                             \x20 password_file = \"~/.config/scanr/lab.password\"",
-                    ),
-                );
+        },
+        "socks4" | "socks4a" => errors.push(
+            err_at(
+                files,
+                p,
+                Some(table),
+                "type",
+                format!("transport `{name}` uses `{kind}`, which scanr does not support"),
+            )
+            .help(
+                "SOCKS4/4a define only four reply codes and cannot distinguish a\n\
+                 closed port from a filtered one. Use socks5.",
+            ),
+        ),
+        "" => errors.push(
+            err_at(
+                files,
+                p,
+                Some(table),
+                "type",
+                format!("transport `{name}` is missing `type`"),
+            )
+            .help("use `type = \"direct\"` or `type = \"socks5\"`"),
+        ),
+        other => {
+            let mut e = err_at(
+                files,
+                p,
+                Some(table),
+                "type",
+                format!("unknown transport type `{other}`"),
+            );
+            if let Some(s) = suggest(other, ["direct", "socks5"]) {
+                e = e.help(format!("did you mean `{s}`?"));
             }
-            if t.password_env.is_some() && t.password_file.is_some() {
-                errors.push(err_at(
-                    files,
-                    p,
-                    Some(&table),
-                    "password_file",
-                    format!("transport `{name}` sets both `password_env` and `password_file`"),
-                ));
-            }
-            if let Some(f) = &t.password_file
-                && let Err(e) = check_secret_file_permissions(&expand_home(f))
-            {
-                errors.push(err_at(files, p, Some(&table), "password_file", e));
-            }
-            if let Some(f) = &t.fidelity
-                && crate::plan::types::Fidelity::parse(f).is_none()
-            {
-                errors.push(
-                    err_at(
-                        files,
-                        p,
-                        Some(&table),
-                        "fidelity",
-                        format!("unknown fidelity `{f}` for transport `{name}`"),
-                    )
-                    .help(format!(
-                        "expected one of: {}\nrun `scanr transport test {name}` to measure it",
-                        crate::plan::types::Fidelity::DECLARABLE.join(", ")
-                    )),
-                );
-            }
-            if let Some(d) = &t.dns
-                && DnsMode::parse(d).is_none()
-            {
-                let mut e = err_at(
-                    files,
-                    p,
-                    Some(&table),
-                    "dns",
-                    format!("unknown dns mode `{d}`"),
-                );
-                if let Some(s) = suggest(d, DnsMode::ALL.iter().copied()) {
-                    e = e.help(format!("did you mean `{s}`?"));
-                } else {
-                    e = e.help(format!("expected one of: {}", DnsMode::ALL.join(", ")));
-                }
-                errors.push(e);
-            }
+            errors.push(e);
         }
+    }
+}
 
-        for (name, ts) in &c.targets {
-            let table = format!("targets.{name}");
-            if ts.include.is_none() && ts.file.is_none() {
-                errors.push(
-                    err_at(
-                        files,
-                        p,
-                        Some(&table),
-                        "include",
-                        format!("target set `{name}` has neither `include` nor `file`"),
-                    )
-                    .help("add `include = [\"10.0.0.0/24\"]` or `file = \"hosts.txt\"`"),
-                );
-            }
-            for (field, list) in [("include", &ts.include), ("exclude", &ts.exclude)] {
-                if let Some(l) = list {
-                    for spec in l.items() {
-                        if let Err(e) = parse_target(&spec) {
-                            errors.push(err_at(files, p, Some(&table), field, e.to_string()));
-                        }
+fn validate_transport_credentials(
+    files: &Layered,
+    p: &Path,
+    table: &str,
+    name: &str,
+    t: &raw::RawTransport,
+    errors: &mut Vec<ConfigError>,
+) {
+    // D14: inline credentials are rejected outright, not warned about.
+    if t.password.is_some() {
+        errors.push(
+            err_at(
+                files,
+                p,
+                Some(table),
+                "password",
+                format!("transport `{name}` sets an inline `password`"),
+            )
+            .help(
+                "scanr never reads inline passwords, because project config is\n\
+                 normally committed to version control. Use one of:\n\
+                 \x20 password_env  = \"SCANR_LAB_PASSWORD\"\n\
+                 \x20 password_file = \"~/.config/scanr/lab.password\"",
+            ),
+        );
+    }
+    if t.password_env.is_some() && t.password_file.is_some() {
+        errors.push(err_at(
+            files,
+            p,
+            Some(table),
+            "password_file",
+            format!("transport `{name}` sets both `password_env` and `password_file`"),
+        ));
+    }
+    if let Some(f) = &t.password_file
+        && let Err(e) = check_secret_file_permissions(&expand_home(f))
+    {
+        errors.push(err_at(files, p, Some(table), "password_file", e));
+    }
+}
+
+/// Declared fidelity and DNS mode, both of which name a value from a fixed set.
+fn validate_transport_modes(
+    files: &Layered,
+    p: &Path,
+    table: &str,
+    name: &str,
+    t: &raw::RawTransport,
+    errors: &mut Vec<ConfigError>,
+) {
+    if let Some(f) = &t.fidelity
+        && crate::plan::types::Fidelity::parse(f).is_none()
+    {
+        errors.push(
+            err_at(
+                files,
+                p,
+                Some(table),
+                "fidelity",
+                format!("unknown fidelity `{f}` for transport `{name}`"),
+            )
+            .help(format!(
+                "expected one of: {}\nrun `scanr transport test {name}` to measure it",
+                crate::plan::types::Fidelity::DECLARABLE.join(", ")
+            )),
+        );
+    }
+    if let Some(d) = &t.dns
+        && DnsMode::parse(d).is_none()
+    {
+        let mut e = err_at(
+            files,
+            p,
+            Some(table),
+            "dns",
+            format!("unknown dns mode `{d}`"),
+        );
+        if let Some(s) = suggest(d, DnsMode::ALL.iter().copied()) {
+            e = e.help(format!("did you mean `{s}`?"));
+        } else {
+            e = e.help(format!("expected one of: {}", DnsMode::ALL.join(", ")));
+        }
+        errors.push(e);
+    }
+}
+
+fn validate_target_sets(files: &Layered, p: &Path, c: &RawConfig, errors: &mut Vec<ConfigError>) {
+    for (name, ts) in &c.targets {
+        let table = format!("targets.{name}");
+        if ts.include.is_none() && ts.file.is_none() {
+            errors.push(
+                err_at(
+                    files,
+                    p,
+                    Some(&table),
+                    "include",
+                    format!("target set `{name}` has neither `include` nor `file`"),
+                )
+                .help("add `include = [\"10.0.0.0/24\"]` or `file = \"hosts.txt\"`"),
+            );
+        }
+        for (field, list) in [("include", &ts.include), ("exclude", &ts.exclude)] {
+            if let Some(l) = list {
+                for spec in l.items() {
+                    if let Err(e) = parse_target(&spec) {
+                        errors.push(err_at(files, p, Some(&table), field, e.to_string()));
                     }
                 }
-            }
-        }
-
-        for (name, ps) in &c.ports {
-            let table = format!("ports.{name}");
-            match &ps.ports {
-                None => errors.push(err_at(
-                    files,
-                    p,
-                    Some(&table),
-                    "ports",
-                    format!("port set `{name}` has no `ports`"),
-                )),
-                Some(l) => {
-                    for spec in l.items() {
-                        if let Err(e) = parse_ports(&spec) {
-                            errors.push(err_at(files, p, Some(&table), "ports", e.to_string()));
-                        }
-                    }
-                }
-            }
-        }
-
-        for (name, s) in &c.scans {
-            let table = format!("scans.{name}");
-            validate_timing(files, p, &table, &s.timing, &mut errors);
-            if let Some(d) = &s.dns
-                && DnsMode::parse(d).is_none()
-            {
-                errors.push(err_at(
-                    files,
-                    p,
-                    Some(&table),
-                    "dns",
-                    format!("unknown dns mode `{d}`"),
-                ));
-            }
-            if s.targets.is_none() {
-                errors.push(err_at(
-                    files,
-                    p,
-                    Some(&table),
-                    "targets",
-                    format!("scan `{name}` has no `targets`"),
-                ));
-            }
-            if s.ports.is_none() {
-                errors.push(err_at(
-                    files,
-                    p,
-                    Some(&table),
-                    "ports",
-                    format!("scan `{name}` has no `ports`"),
-                ));
             }
         }
     }
+}
 
-    errors.extend(validate_references(files));
-    errors
+fn validate_port_sets(files: &Layered, p: &Path, c: &RawConfig, errors: &mut Vec<ConfigError>) {
+    for (name, ps) in &c.ports {
+        let table = format!("ports.{name}");
+        match &ps.ports {
+            None => errors.push(err_at(
+                files,
+                p,
+                Some(&table),
+                "ports",
+                format!("port set `{name}` has no `ports`"),
+            )),
+            Some(l) => {
+                for spec in l.items() {
+                    if let Err(e) = parse_ports(&spec) {
+                        errors.push(err_at(files, p, Some(&table), "ports", e.to_string()));
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn validate_scans(files: &Layered, p: &Path, c: &RawConfig, errors: &mut Vec<ConfigError>) {
+    for (name, s) in &c.scans {
+        let table = format!("scans.{name}");
+        validate_timing(files, p, &table, &s.timing, errors);
+        if let Some(d) = &s.dns
+            && DnsMode::parse(d).is_none()
+        {
+            errors.push(err_at(
+                files,
+                p,
+                Some(&table),
+                "dns",
+                format!("unknown dns mode `{d}`"),
+            ));
+        }
+        if s.targets.is_none() {
+            errors.push(err_at(
+                files,
+                p,
+                Some(&table),
+                "targets",
+                format!("scan `{name}` has no `targets`"),
+            ));
+        }
+        if s.ports.is_none() {
+            errors.push(err_at(
+                files,
+                p,
+                Some(&table),
+                "ports",
+                format!("scan `{name}` has no `ports`"),
+            ));
+        }
+    }
 }
 
 fn validate_timing(
