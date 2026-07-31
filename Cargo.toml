@@ -24,6 +24,12 @@ exclude = [
     "/fuzz/artifacts",
 ]
 
+[features]
+# In-process SOCKS5 and TCP fixtures. Off by default so a release build carries no
+# fixture servers; the dev-dependency below turns it on for the integration tests, which
+# are a separate crate and so cannot see `#[cfg(test)]` items.
+testsupport = []
+
 [dependencies]
 # CLI: subcommand tree, help rendering, shell completions. Hand-rolling this for a
 # 12-command tree with completions is real work for no gain. (D18)
@@ -51,6 +57,9 @@ libc = "0.2"
 tempfile = "3"
 # Man page generation, exercised by a test that fails if man/scanr.1 is stale.
 clap_mangen = "0.2"
+# Self-dependency so `cargo test` builds the library with the fixtures available while
+# `cargo build` and `cargo install` do not.
+scanr = { path = ".", features = ["testsupport"] }
 
 [profile.release]
 opt-level = 3

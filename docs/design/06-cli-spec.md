@@ -2,6 +2,25 @@
 
 Verbs at top level for the daily drivers; noun groups for everything else (D-session).
 
+<!-- COMMAND TREE: checked against the clap definition by tests/cli_spec.rs -->
+```
+run
+plan
+config init
+config show
+config validate
+config path
+transport list
+transport show
+transport test
+output summarize
+output verify
+output remainder
+completion
+```
+
+Read as a tree:
+
 ```
 scanr
 ├── run <scan>                 execute a named scan
@@ -43,18 +62,30 @@ Twenty-four commands became twelve. Each remaining one maps to a stated workflow
 Only these may be set on the command line. Anything else lives in config — this is what
 keeps runs reproducible from a file rather than from shell history.
 
+<!-- RUN FLAGS: checked against the clap definition by tests/cli_spec.rs -->
 ```
 --profile <name>            --transport <name>
 --targets <spec|file|->     --ports <spec>          --exclude <spec>
+--pairs <file|->            --resumed-from <scan-id>
 --concurrency <n>           --rate <n>
 --connect-timeout <dur>     --retries <n>
 --dns <auto|transport|local|disabled>
 --output-dir <path>         --seed <hex>
 --open-only / --all         --config <path>
--v / -q                     --no-color              --allow-large-range
+--verbose / -v              --quiet / -q
+--no-color                  --allow-large-range
 ```
 
 `--seed` exists so a randomized scan can be replayed exactly (D16).
+
+`--pairs` names exact `host:port` endpoints rather than a matrix, which is what makes
+`output remainder | run --pairs -` an exact resume (D12). `--resumed-from` records which
+scan is being continued; it is normally picked up from the remainder's leading
+`# resumed-from:` comment rather than typed.
+
+`transport test` additionally takes `--known-open`, `--known-closed` and `--calibrate`,
+which describe what to measure rather than how to scan, so they are not part of the
+override allowlist.
 
 ## Zero-config path
 
