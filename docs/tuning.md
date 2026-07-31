@@ -146,9 +146,52 @@ Records are larger than people expect, because every probe outcome is kept. Meas
 
 About 377 bytes per probe. Extrapolating, a 10M-probe scan is roughly 3.9 GB.
 
-The lines are highly repetitive and compress **16.8×** — that 377 MB record gzips to
-23.6 MB in 1.5 s. Built-in compression is deferred rather than rejected; if you are
-routinely scanning at this scale, piping through `gzip` afterwards is worth it.
+The lines are highly repetitive, which `--compress` exploits:
+
+```console
+scanr run --targets 10.0.0.0/16 --ports web --compress
+```
+
+Measured **20–23×** on real records, at about 0.04 s per 12 MB — so a 374 MB record
+becomes roughly 17 MB and the compression is free next to the scan. The file is named
+`.jsonl.gz` and `zcat`, `zless`, `gzip -d` and `scanr output` all read it unchanged.
+
+It is written as a sequence of gzip **frames**, not one stream, so a scan that is killed
+still decodes up to its last completed frame — the same guarantee the `.partial` suffix
+carries for an uncompressed record. A single-stream gzip would be unreadable past its
+start, which would mean paying for compression exactly when you could least afford to.
+
+Off by default: a scan record is a text file people grep, and switching that silently
+based on size is the kind of hidden behaviour this tool avoids. Turn it on per run with
+`--compress`, or for good:
+
+```toml
+[defaults]
+compress = true
+```
+
+The compressor is pure Rust — `flate2` on the `rust_backend` (`miniz_oxide`) — so the
+dependency tree contains no C and the fully static musl build is unaffected.
+
+**On zstd.** Measured against gzip on one genuine 12 MB record:
+
+| | ratio | time |
+|---|---|---|
+| gzip -6 | 20.1× | 0.04 s |
+| zstd -3 | 18.0× | 0.01 s |
+| zstd -9 | 22.4× | 0.06 s |
+| zstd -19 | 26.1× | 4.29 s |
+
+At comparable speed zstd buys about 11%. The mainstream `zstd` crate binds a vendored C
+library, and a musl-targeting C toolchain would destroy the static build (D19). Pure-Rust
+zstd encoders now exist but are young and little-used; a compressor defect in a forensic
+record tool means unreadable evidence, so 11% is not the trade to take on an immature
+implementation. Revisit when one is widely deployed.
+
+Writing one is not the answer either: a competitive zstd encoder is FSE and Huffman
+entropy coding, match finding, sequence encoding and frame handling — a long correctness
+tail for 11%. The same effort spent collapsing homogeneous outcomes into span events
+would be worth orders of magnitude more on the scans where size actually hurts.
 
 Memory is stable across a run: the million-probe scan held 17 MB resident from start to
 finish, the growth over the 5.8 MB baseline being the materialized target list.

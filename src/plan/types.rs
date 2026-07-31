@@ -245,6 +245,8 @@ pub struct ScanPlan {
     pub resumed_from: Option<String>,
     pub seed: u64,
     pub open_only: bool,
+    /// Write the record as framed gzip rather than plain JSONL.
+    pub compress: bool,
     pub output_dir: PathBuf,
     pub provenance: Provenance,
     pub warnings: Vec<PlanWarning>,
@@ -330,6 +332,7 @@ impl ScanPlan {
             resumed_from: None,
             seed: 1,
             open_only: false,
+            compress: false,
             output_dir: PathBuf::from("(unused)"),
             provenance: Provenance::default(),
             warnings: vec![],

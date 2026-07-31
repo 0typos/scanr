@@ -35,6 +35,14 @@ invited before then.
   that already completed. The resumed scan records `resumed_from`, so a scan split across
   an interruption stays traceable as one thing; the link travels through the pipe on its
   own, and `--resumed-from` sets it by hand for an edited list.
+- `--compress` writes the record as framed gzip, 20–23x smaller. `zcat`, `zless` and
+  `scanr output` read it unchanged, and the frames mean a killed scan still decodes up
+  to its last completed frame rather than being lost.
+- `output remainder` reconstructs the outstanding endpoints from the terminal event
+  rather than by re-reading every probe row. The work counter issues indices in order,
+  so what was never started is a contiguous range and only the in-flight probes are
+  scattered; the terminal event records both. Falls back to the full read when the hint
+  is missing or disagrees with the counts.
 - Record readers stream. `summarize`, `verify` and `remainder` hold single-digit
   megabytes regardless of record size (96 MB for `remainder`, which must retain the
   probed set), so the commands for inspecting a large scan work on a large scan.
