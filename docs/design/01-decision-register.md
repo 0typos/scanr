@@ -472,3 +472,33 @@ needs more outstanding probes to stay busy, bounded by the cliff.
 **Caveat:** measured on loopback, so it characterises the OpenSSH client rather than a
 network. The cliff location may move with ssh version or server; the profiles sit well
 below it for that reason.
+
+### D30 — Bulk outcomes collapse into spans, opt-in
+
+**Status:** accepted · **Alternatives rejected:** dropping derivable fields; collapsing by
+default; excluding every retried probe
+
+Measured: the bulk rows of a large scan carry one distinct `(state, source, reason)`
+tuple with timings inside 0.2% of the timeout. ~360 bytes per row to say "the timeout
+fired". On the `/16 × 16` scan, `--spans` takes 391,618,401 B / 1,048,580 events to
+**2,582 B / 5 events** — 151,000× — while `verify` and `remainder` return identical
+answers and the scan runs marginally faster for writing less.
+
+* **Not field-stripping.** Removing every derivable field was measured at 1.69×, and only
+  1.37× on top of compression, for a schema break. Spans attack the row count instead.
+* **Ranges over `probe_index`.** That index is the target-major position, so a consumer
+  expands a span with arithmetic and the specs in `scan_config` — the permutation decides
+  visit order, never the mapping, so the seed is not needed.
+* **A retry that agreed is still bulk.** The first rule excluded every retried probe,
+  which sounded careful and collapsed *nothing*: `retries = 1` is the default and applies
+  to timeouts, so in a scan of silent hosts every probe is retried. A probe whose attempts
+  *disagreed* is a flapping host and keeps its row.
+* **Opt-in.** It trades per-probe timestamps for size. That is a real loss of forensic
+  detail and should be asked for.
+
+**Bounded:** one bitset per outcome class, 128 KB per class per million probes, and above
+64 classes it stops collapsing — a record that varied is not one spans can help.
+
+**Consequence:** `probe_result` no longer covers every probe when spans are on. `verify`
+reconciles rows plus span counts, validates each span's ranges, and `remainder` expands
+them. `output.spans` in `scan_config` records whether it was used.

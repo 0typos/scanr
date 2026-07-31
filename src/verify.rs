@@ -240,6 +240,9 @@ struct Verifier {
 
     saw_config: bool,
     planned: Option<u64>,
+    /// Probes represented by `probe_span` events rather than by their own row.
+    span_probes: u64,
+    spans: u64,
     resumed_from: Option<String>,
 
     credential_problems: Vec<String>,
@@ -284,6 +287,10 @@ impl Verifier {
         }
         if k == "probe_result" {
             self.observed_probes += 1;
+        }
+        if k == "probe_span" {
+            self.spans += 1;
+            self.span_probes += e["count"].as_u64().unwrap_or(0);
         }
 
         if let Some(found) = find_exposed_secret(&e) {
@@ -334,8 +341,10 @@ impl Verifier {
             }
             Some(_) => {}
         }
-        if kind(e) == "probe_result" {
-            check_probe_row(e, i, self.planned, &mut self.values);
+        match kind(e) {
+            "probe_result" => check_probe_row(e, i, self.planned, &mut self.values),
+            "probe_span" => check_span_row(e, i, self.planned, &mut self.values),
+            _ => {}
         }
     }
 
@@ -374,6 +383,13 @@ impl Verifier {
             notes.push(format!("resumed from scan {parent}"));
         }
         notes.push(format!("{} probe results", commas(self.observed_probes)));
+        if self.spans > 0 {
+            notes.push(format!(
+                "{} further probes collapsed into {} span(s)",
+                commas(self.span_probes),
+                commas(self.spans)
+            ));
+        }
         if !self.bad_lines.is_empty() {
             notes.push(format!("{} unparseable lines", self.bad_lines.len()));
         }
@@ -438,11 +454,22 @@ impl Verifier {
         let Some(completed) = counts["completed"].as_u64() else {
             return;
         };
-        let observed = self.observed_probes;
+        // A collapsed probe is still a completed probe; it is just recorded once per
+        // outcome class rather than once per probe.
+        let observed = self.observed_probes + self.span_probes;
         if completed != observed {
+            let detail = if self.spans > 0 {
+                format!(
+                    "{} probe_result events plus {} probes across {} probe_span events",
+                    commas(self.observed_probes),
+                    commas(self.span_probes),
+                    commas(self.spans)
+                )
+            } else {
+                format!("{} probe_result events are", commas(self.observed_probes))
+            };
             problems.push(format!(
-                "terminal event claims {completed} completed probes but {observed} probe_result \
-                 events are present"
+                "terminal event claims {completed} completed probes but {detail} present"
             ));
         }
         let parts = ["open", "closed", "filtered", "error"]
@@ -592,6 +619,100 @@ fn check_probe_row(e: &Value, i: usize, planned: Option<u64>, found: &mut ValueP
     }
 
     check_timings(e, i, found);
+}
+
+/// A span stands for many probes, so a malformed one silently misrepresents all of
+/// them. Its ranges must be ordered, disjoint, inside the plan, and add up to its count.
+fn check_span_row(e: &Value, i: usize, planned: Option<u64>, found: &mut ValueProblems) {
+    let states = defined_states();
+    let sources = defined_sources();
+
+    match e["state"].as_str() {
+        Some(s) if states.contains(&s) => {}
+        other => found.note(
+            "have an unrecognised `state`",
+            i,
+            other.unwrap_or("(absent)"),
+        ),
+    }
+    match e["source"].as_str() {
+        Some(s) if sources.contains(&s) => {}
+        other => found.note(
+            "have an unrecognised `source`",
+            i,
+            other.unwrap_or("(absent)"),
+        ),
+    }
+
+    let Some(count) = e["count"].as_u64() else {
+        found.note("have a missing or non-numeric span `count`", i, &e["count"]);
+        return;
+    };
+    if count == 0 {
+        found.note("are a span covering no probes", i, 0);
+    }
+
+    let Some(ranges) = e["probe_indices"].as_array() else {
+        found.note(
+            "have a missing or malformed `probe_indices`",
+            i,
+            &e["probe_indices"],
+        );
+        return;
+    };
+
+    let mut covered: u64 = 0;
+    let mut previous_end: Option<u64> = None;
+    for r in ranges {
+        let (Some(start), Some(end)) = (r[0].as_u64(), r[1].as_u64()) else {
+            found.note("have a malformed range in `probe_indices`", i, r);
+            return;
+        };
+        if start > end {
+            found.note("have a reversed range in `probe_indices`", i, r);
+            return;
+        }
+        if let Some(p) = previous_end
+            && start <= p
+        {
+            found.note("have overlapping or unsorted `probe_indices`", i, r);
+            return;
+        }
+        if let Some(planned) = planned
+            && end >= planned
+        {
+            found.note(
+                "have a `probe_indices` range beyond `probes_planned`",
+                i,
+                format!("{end} >= {planned}"),
+            );
+            return;
+        }
+        previous_end = Some(end);
+        covered += end - start + 1;
+    }
+    if covered != count {
+        found.note(
+            "have a span `count` that disagrees with its ranges",
+            i,
+            format!("count {count}, ranges cover {covered}"),
+        );
+    }
+
+    if let Some(t) = e["timing_ms"].as_object() {
+        let g = |k: &str| t.get(k).and_then(Value::as_f64);
+        if let (Some(lo), Some(mean), Some(hi)) = (g("min"), g("mean"), g("max"))
+            && !(lo <= mean && mean <= hi && lo >= 0.0)
+        {
+            found.note(
+                "have span timings that are not min <= mean <= max",
+                i,
+                format!("{lo}/{mean}/{hi}"),
+            );
+        }
+    } else {
+        found.note("have a missing span `timing_ms`", i, &e["timing_ms"]);
+    }
 }
 
 fn check_timings(e: &Value, i: usize, found: &mut ValueProblems) {
@@ -909,14 +1030,22 @@ fn remainder_from_hint(path: &Path) -> Result<Option<Remainder>, String> {
 /// only disagree with the terminal event, which falls back to the full read. Wrong in
 /// the safe direction by construction.
 fn count_probe_rows(path: &Path) -> Result<u64, String> {
-    const MARKER: &str = "\"type\":\"probe_result\"";
+    const ROW: &str = "\"type\":\"probe_result\"";
+    const SPAN: &str = "\"type\":\"probe_span\"";
     let mut n = 0u64;
     let truncation_expected = is_partial(path);
     for line in open_record(path)?.lines() {
         match line {
             Ok(text) => {
-                if text.contains(MARKER) {
+                if text.contains(ROW) {
                     n += 1;
+                } else if text.contains(SPAN) {
+                    // A span stands for many probes; its count is the only part needed
+                    // here, so only this line is parsed.
+                    n += serde_json::from_str::<Value>(&text)
+                        .ok()
+                        .and_then(|v| v["count"].as_u64())
+                        .unwrap_or(0);
                 }
             }
             // Mirrors `stream`: a `.partial` file is expected to stop mid-way, and
@@ -935,12 +1064,25 @@ fn remainder_by_scanning(path: &Path) -> Result<Remainder, String> {
     // memory this command used.
     let mut config: Option<Value> = None;
     let mut probed: BTreeSet<(String, u16)> = BTreeSet::new();
+    // Collected during the pass and expanded after it: expanding needs the target list,
+    // and spans arrive at the end of a record while the config arrives at the start.
+    let mut span_ranges: Vec<[u64; 2]> = Vec::new();
 
     for line in stream(path)? {
         let Some(e) = line?.event else { continue };
         let k = kind(&e);
         if k == "scan_config" && config.is_none() {
             config = Some(e);
+            continue;
+        }
+        if k == "probe_span" {
+            if let Some(ranges) = e["probe_indices"].as_array() {
+                for r in ranges {
+                    if let (Some(a), Some(b)) = (r[0].as_u64(), r[1].as_u64()) {
+                        span_ranges.push([a, b]);
+                    }
+                }
+            }
             continue;
         }
         if k != "probe_result" {
@@ -967,6 +1109,23 @@ fn remainder_by_scanning(path: &Path) -> Result<Remainder, String> {
     let config = config.ok_or_else(|| format!("{} has no scan_config event", path.display()))?;
     let expected = expected_endpoints(&config, path)?;
     let planned = expected.len();
+
+    // A collapsed probe was still probed. Missing this would send a resume back over
+    // every endpoint a span covered.
+    for [start, end] in span_ranges {
+        for i in start..=end {
+            let Some(pair) = expected.at(i) else {
+                return Err(format!(
+                    "{} has a probe_span covering index {i}, which is outside its own \
+                     planned matrix; the record is inconsistent and its remainder cannot \
+                     be derived safely",
+                    path.display()
+                ));
+            };
+            probed.insert(pair);
+        }
+    }
+
     let endpoints = expected.outstanding(&probed);
 
     let note = format!(
@@ -1608,6 +1767,119 @@ mod tests {
             r.endpoints,
             ["10.0.0.2:80", "10.0.0.3:80"],
             "rows absent from the file must be treated as unprobed, not as done"
+        );
+    }
+
+    /// A span stands for probes that were made. `remainder` must treat them as probed,
+    /// or a resume goes back over every endpoint the span covered.
+    ///
+    /// Built as two records describing the *same* scan — one with rows, one with the
+    /// equivalent span — because comparing two live interrupted scans compares two
+    /// different seeds and two different interrupt points, which proves nothing.
+    #[test]
+    fn a_span_covers_exactly_the_endpoints_its_rows_would_have() {
+        let d = tempfile::tempdir().unwrap();
+        let header = vec![
+            json!({"type":"scan_started","seq":0,"ts":"2026-07-31T12:00:00.000Z","scan_id":"s1","schema_version":1}),
+            json!({"type":"scan_config","seq":1,"ts":"2026-07-31T12:00:00.000Z","scan_id":"s1","scan_name":"s",
+                   "targets":{"spec":["10.0.0.0/29"],"exclude":[],"count":8,"mode":"matrix"},
+                   "ports":{"spec":"80,443","count":2},"probes_planned":16,
+                   "permutation":{"algorithm":"feistel4","seed":"00000000000000ff"}}),
+        ];
+        let terminal = json!({"type":"scan_interrupted","seq":99,"ts":"2026-07-31T12:00:01.000Z",
+               "scan_id":"s1","termination":"signal",
+               "counts":{"planned":16,"started":10,"completed":10,"abandoned":0,"not_started":6,
+                         "open":0,"closed":10,"filtered":0,"error":0,"retried":0}});
+
+        // Indices 0..=9 probed and closed, expressed as ten rows.
+        let mut rows = header.clone();
+        for i in 0..10u64 {
+            rows.push(json!({"type":"probe_result","seq":2+i,"ts":"2026-07-31T12:00:00.000Z","scan_id":"s1",
+                   "probe_index":i,"target":format!("10.0.0.{}", i/2),"port":if i%2==0 {80} else {443},
+                   "protocol":"tcp","state":"closed","source":"local_stack","attempts":1,
+                   "attempt_states":["closed"],"timing_ms":{"total":1.0}}));
+        }
+        rows.push(terminal.clone());
+
+        // The same ten probes, expressed as one span.
+        let spans = vec![
+            header[0].clone(),
+            header[1].clone(),
+            json!({"type":"probe_span","seq":2,"ts":"2026-07-31T12:00:00.000Z","scan_id":"s1",
+                   "state":"closed","source":"local_stack","reason":null,"protocol":"tcp",
+                   "attempts":1,"count":10,"probe_indices":[[0,9]],
+                   "timing_ms":{"min":1.0,"mean":1.0,"max":1.0}}),
+            terminal,
+        ];
+
+        let a = remainder(&write(d.path(), "rows.jsonl", &rows)).unwrap();
+        let b = remainder(&write(d.path(), "span.jsonl", &spans)).unwrap();
+        assert_eq!(
+            a.endpoints, b.endpoints,
+            "a span must cover what its rows covered"
+        );
+        assert_eq!(
+            b.endpoints,
+            [
+                "10.0.0.5:80",
+                "10.0.0.5:443",
+                "10.0.0.6:80",
+                "10.0.0.6:443",
+                "10.0.0.7:80",
+                "10.0.0.7:443"
+            ],
+            "indices 10..15 are the outstanding ones"
+        );
+    }
+
+    /// Both forms of the same scan must also verify identically.
+    #[test]
+    fn a_span_record_reconciles_its_counts() {
+        let d = tempfile::tempdir().unwrap();
+        let e = vec![
+            json!({"type":"scan_started","seq":0,"ts":"2026-07-31T12:00:00.000Z","scan_id":"s2","schema_version":1}),
+            json!({"type":"scan_config","seq":1,"ts":"2026-07-31T12:00:00.000Z","scan_id":"s2","scan_name":"s",
+                   "targets":{"spec":["10.0.0.0/30"],"exclude":[],"count":4,"mode":"matrix"},
+                   "ports":{"spec":"80","count":1},"probes_planned":4}),
+            json!({"type":"probe_result","seq":2,"ts":"2026-07-31T12:00:00.000Z","scan_id":"s2",
+                   "probe_index":0,"target":"10.0.0.0","port":80,"protocol":"tcp","state":"open",
+                   "source":"local_stack","attempts":1,"attempt_states":["open"],"timing_ms":{"total":1.0}}),
+            json!({"type":"probe_span","seq":3,"ts":"2026-07-31T12:00:00.000Z","scan_id":"s2",
+                   "state":"closed","source":"local_stack","reason":null,"protocol":"tcp",
+                   "attempts":1,"count":3,"probe_indices":[[1,3]],
+                   "timing_ms":{"min":0.5,"mean":0.7,"max":1.0}}),
+            json!({"type":"scan_completed","seq":4,"ts":"2026-07-31T12:00:01.000Z","scan_id":"s2",
+                   "termination":"natural",
+                   "counts":{"planned":4,"started":4,"completed":4,"abandoned":0,"not_started":0,
+                             "open":1,"closed":3,"filtered":0,"error":0,"retried":0}}),
+        ];
+        let r = verify(&write(d.path(), "mixed.jsonl", &e)).unwrap();
+        assert!(r.problems.is_empty(), "{:?}", r.problems);
+        assert!(
+            r.notes.iter().any(|n| n.contains("collapsed into 1 span")),
+            "{:?}",
+            r.notes
+        );
+    }
+
+    #[test]
+    fn a_span_that_disagrees_with_its_own_ranges_is_rejected() {
+        let d = tempfile::tempdir().unwrap();
+        let mut e = good_events();
+        e.insert(
+            6,
+            json!({"type":"probe_span","seq":6,"ts":"2026-07-30T12:00:00.000Z","scan_id":"a1",
+                   "state":"closed","source":"local_stack","protocol":"tcp","attempts":1,
+                   "count":99,"probe_indices":[[0,1]],
+                   "timing_ms":{"min":1.0,"mean":1.0,"max":1.0}}),
+        );
+        let r = verify(&write(d.path(), "badspan.jsonl", &e)).unwrap();
+        assert!(
+            r.problems
+                .iter()
+                .any(|p| p.contains("disagrees with its ranges")),
+            "{:?}",
+            r.problems
         );
     }
 

@@ -1,5 +1,6 @@
 pub mod human;
 pub mod jsonl;
+pub mod span;
 
 use std::net::IpAddr;
 
@@ -7,6 +8,7 @@ use crate::probe::{ProbeOutcome, State};
 
 pub use human::{Progress, ResultPrinter, Style};
 pub use jsonl::{Counts, JsonlWriter, SCHEMA_VERSION, new_scan_id};
+pub use span::Spans;
 
 /// One completed probe, retries already merged (D10).
 #[derive(Debug, Clone)]

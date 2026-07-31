@@ -149,7 +149,38 @@ Records are larger than people expect, because every probe outcome is kept. Meas
 
 About 377 bytes per probe. Extrapolating, a 10M-probe scan is roughly 3.9 GB.
 
-The lines are highly repetitive, which `--compress` exploits:
+### Collapsing repetitive outcomes
+
+Most of a large record is the same answer written a million times. `--spans` replaces
+runs of identical `closed`/`filtered` outcomes with one event each. Measured on the
+`/16 × 16 ports` scan above:
+
+| | record | events | scan wall |
+|---|---|---|---|
+| full | 391,618,401 B | 1,048,580 | 5.73 s |
+| `--spans` | **2,582 B** | 5 | 5.59 s |
+| `--spans --compress` | 1,595 B | 5 | 5.53 s |
+
+That is **151,000×**, and it costs nothing — the scan is marginally *faster* for writing
+less. Both records answer identically: `output verify` reports the same conclusion and
+`output remainder` the same 0 of 1,048,576. Verify drops from 1.91 s to instant.
+
+The catch is that it only pays when results are uniform. A varied network collapses far
+less, and above 64 distinct outcome classes it stops collapsing entirely and every probe
+keeps its row.
+
+**What you give up** is the per-probe timestamp and exact per-probe timing for collapsed
+results — the span keeps min/mean/max. `open` and `error` results always keep their own
+row, as does anything that hit resource pressure or whose retry disagreed with its first
+attempt. So the results you are likely to actually read are untouched; what collapses is
+the "nothing there" bulk.
+
+```toml
+[defaults]
+spans = true
+```
+
+The lines are also highly repetitive, which `--compress` exploits:
 
 ```console
 scanr run --targets 10.0.0.0/16 --ports web --compress

@@ -17,7 +17,9 @@ use serde_json::json;
 use crate::cancel::Cancel;
 use crate::diag::HostFacts;
 use crate::net::Target;
-use crate::output::{Counts, JsonlWriter, ProbeRecord, Progress, ResultPrinter, SCHEMA_VERSION};
+use crate::output::{
+    Counts, JsonlWriter, ProbeRecord, Progress, ResultPrinter, SCHEMA_VERSION, Spans,
+};
 use crate::plan::types::{ScanPlan, TransportKind};
 use crate::plan::{Permutation, types::Fidelity};
 use crate::probe::State;
@@ -225,6 +227,7 @@ pub(crate) fn execute_with(
         progress_interval: harness.progress_interval.unwrap_or(PROGRESS_INTERVAL),
         total,
         reported: Reported::new(total),
+        spans: plan.spans.then(|| Spans::new(total)),
     }
     .run(&rx, &mut writer, &mut writer_error);
 
@@ -245,6 +248,16 @@ pub(crate) fn execute_with(
                 ),
             }),
         );
+    }
+
+    // Written here rather than as they accumulate: probes complete out of order, so a
+    // span is only whole once the scan is.
+    if let Some(spans) = collected.spans
+        && !spans.is_empty()
+    {
+        for body in spans.into_events() {
+            emit(&mut writer, &mut writer_error, "probe_span", body);
+        }
     }
 
     let duration = started.elapsed();
@@ -412,6 +425,8 @@ struct Collector<'a> {
     total: u64,
     /// `None` once the scan is too large to track a bit per probe.
     reported: Option<Reported>,
+    /// `None` unless the scan asked for spans.
+    spans: Option<Spans>,
 }
 
 /// What the collection loop produced.
@@ -419,6 +434,7 @@ struct Collected {
     counts: Counts,
     interrupt_requested_at: Option<u64>,
     reported: Option<Reported>,
+    spans: Option<Spans>,
 }
 
 impl Collector<'_> {
@@ -462,7 +478,12 @@ impl Collector<'_> {
                     {
                         self.report_pressure(p, writer, writer_error);
                     }
-                    emit(writer, writer_error, "probe_result", record.to_json());
+                    // A bulk outcome goes into the span accumulator and is written
+                    // once, at the end, alongside every probe that shared it.
+                    let absorbed = self.spans.as_mut().is_some_and(|s| s.absorb(&record));
+                    if !absorbed {
+                        emit(writer, writer_error, "probe_result", record.to_json());
+                    }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -503,6 +524,7 @@ impl Collector<'_> {
             counts,
             interrupt_requested_at,
             reported: self.reported,
+            spans: self.spans,
         }
     }
 
@@ -847,6 +869,7 @@ fn config_event(plan: &ScanPlan, facts: &HostFacts) -> serde_json::Value {
             "dir": plan.output_dir.to_string_lossy(),
             "open_only": plan.open_only,
             "compressed": plan.compress,
+            "spans": plan.spans,
         },
         "provenance": provenance,
         "host": {

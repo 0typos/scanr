@@ -35,6 +35,12 @@ invited before then.
   that already completed. The resumed scan records `resumed_from`, so a scan split across
   an interruption stays traceable as one thing; the link travels through the pipe on its
   own, and `--resumed-from` sets it by hand for an edited list.
+- `--spans` collapses runs of identical `closed`/`filtered` outcomes into `probe_span`
+  events instead of one row each. Measured on a million-probe scan: 391 MB and 1,048,580
+  events become **2.6 KB and 5 events**, with the scan marginally faster for writing less
+  and `verify`/`remainder` giving identical answers. `open` and `error` always keep their
+  own row, as does anything under resource pressure or whose retry disagreed. Costs the
+  per-probe timestamp and exact timing for collapsed results.
 - `--compress` writes the record as framed gzip, 20–23x smaller. `zcat`, `zless` and
   `scanr output` read it unchanged, and the frames mean a killed scan still decodes up
   to its last completed frame rather than being lost.
