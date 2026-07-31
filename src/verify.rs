@@ -32,6 +32,17 @@ struct RecordLine {
     event: Option<Value>,
 }
 
+/// Is this record gzip? Decided by magic bytes, like `open_record`, so the two cannot
+/// disagree about the same file.
+fn is_gzip(path: &Path) -> bool {
+    use std::io::Read;
+    let mut magic = [0u8; 2];
+    File::open(path)
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .is_ok()
+        && magic == [0x1f, 0x8b]
+}
+
 /// Open a record, transparently decompressing a gzip one.
 ///
 /// Detected by magic bytes rather than by extension, so a renamed file still reads and a
@@ -934,7 +945,16 @@ pub fn remainder(path: &Path) -> Result<Remainder, String> {
 /// an older record, a scan too large to have tracked it, or a file whose terminal event
 /// cannot be trusted. The caller then does it the long way.
 fn remainder_from_hint(path: &Path) -> Result<Option<Remainder>, String> {
-    let Some(terminal) = read_last_event(path).filter(|e| TERMINALS.contains(&kind(e))) else {
+    // Cheap rejection first, and only where it is cheap. An uncompressed record can be
+    // seeked, so a file with no hint — an older record, or a scan too large to have
+    // tracked one — costs a 64 KiB tail read rather than a full pass before falling back.
+    // A gzip stream cannot be seeked into, so there the digest below is the first look.
+    if !is_gzip(path) && read_last_event(path).is_none_or(|e| e["not_started_from"].is_null()) {
+        return Ok(None);
+    }
+
+    let digest = Digest::read(path)?;
+    let Some(terminal) = digest.terminal.filter(|e| TERMINALS.contains(&kind(e))) else {
         return Ok(None);
     };
     let (Some(from), Some(abandoned)) = (
@@ -964,18 +984,11 @@ fn remainder_from_hint(path: &Path) -> Result<Option<Remainder>, String> {
     // the remainder would omit endpoints that were never actually probed. Silently
     // under-reporting a resume set is the failure this tool exists to prevent, so the
     // hint is believed only when the rows are still there to back it.
-    if count_probe_rows(path)? != completed {
+    if digest.probes != completed {
         return Ok(None);
     }
 
-    // Only the header is read from the front, and it is the first two lines.
-    let mut header = Vec::new();
-    for line in stream(path)?.take(4) {
-        if let Some(e) = line?.event {
-            header.push(e);
-        }
-    }
-    let Some(config) = header.into_iter().find(|e| kind(e) == "scan_config") else {
+    let Some(config) = digest.config else {
         return Ok(None);
     };
     let Some(seed) = config["permutation"]["seed"]
@@ -1024,37 +1037,65 @@ fn remainder_from_hint(path: &Path) -> Result<Option<Remainder>, String> {
     }))
 }
 
-/// Count `probe_result` rows without parsing them.
+/// The config event, the last event, and how many probes the record accounts for —
+/// gathered in a single pass.
 ///
-/// A byte-level scan: far cheaper than the full read it guards, and any miscount can
-/// only disagree with the terminal event, which falls back to the full read. Wrong in
-/// the safe direction by construction.
-fn count_probe_rows(path: &Path) -> Result<u64, String> {
-    const ROW: &str = "\"type\":\"probe_result\"";
-    const SPAN: &str = "\"type\":\"probe_span\"";
-    let mut n = 0u64;
-    let truncation_expected = is_partial(path);
-    for line in open_record(path)?.lines() {
-        match line {
-            Ok(text) => {
-                if text.contains(ROW) {
-                    n += 1;
-                } else if text.contains(SPAN) {
-                    // A span stands for many probes; its count is the only part needed
-                    // here, so only this line is parsed.
-                    n += serde_json::from_str::<Value>(&text)
-                        .ok()
-                        .and_then(|v| v["count"].as_u64())
-                        .unwrap_or(0);
-                }
+/// Previously three: a tail read for the terminal event, a full scan to count rows, and
+/// a third open for the header. On an uncompressed record two of those were cheap; on a
+/// gzip one — which is now the default — each meant decompressing the whole file.
+struct Digest {
+    config: Option<Value>,
+    terminal: Option<Value>,
+    /// `probe_result` rows plus the probes covered by `probe_span` events. A collapsed
+    /// probe is still a probe the record accounts for.
+    probes: u64,
+}
+
+impl Digest {
+    fn read(path: &Path) -> Result<Self, String> {
+        const ROW: &str = "\"type\":\"probe_result\"";
+        const SPAN: &str = "\"type\":\"probe_span\"";
+        const CONFIG: &str = "\"type\":\"scan_config\"";
+
+        let mut d = Self {
+            config: None,
+            terminal: None,
+            probes: 0,
+        };
+        let truncation_expected = is_partial(path);
+        let mut last: Option<String> = None;
+        let mut seen = 0usize;
+
+        for line in open_record(path)?.lines() {
+            let text = match line {
+                Ok(t) => t,
+                // Mirrors `stream`: a `.partial` file is expected to stop mid-way, and
+                // anything else means the count cannot be vouched for.
+                Err(_) if truncation_expected && seen > 0 => break,
+                Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+            };
+            if text.trim().is_empty() {
+                continue;
             }
-            // Mirrors `stream`: a `.partial` file is expected to stop mid-way, and
-            // anything else means we cannot vouch for the count.
-            Err(_) if truncation_expected && n > 0 => break,
-            Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+            seen += 1;
+            // Substring tests rather than parsing: only spans and the two singleton
+            // events need their fields, and the rows are the overwhelming majority.
+            if text.contains(ROW) {
+                d.probes += 1;
+            } else if text.contains(SPAN) {
+                d.probes += serde_json::from_str::<Value>(&text)
+                    .ok()
+                    .and_then(|v| v["count"].as_u64())
+                    .unwrap_or(0);
+            } else if d.config.is_none() && text.contains(CONFIG) {
+                d.config = serde_json::from_str(&text).ok();
+            }
+            last = Some(text);
         }
+
+        d.terminal = last.and_then(|l| serde_json::from_str(&l).ok());
+        Ok(d)
     }
-    Ok(n)
 }
 
 fn remainder_by_scanning(path: &Path) -> Result<Remainder, String> {
