@@ -823,15 +823,27 @@ fn remainder_from_hint(path: &Path) -> Result<Option<Remainder>, String> {
         return Ok(None);
     };
     let counts = &terminal["counts"];
-    let (Some(planned), Some(not_started)) =
-        (counts["planned"].as_u64(), counts["not_started"].as_u64())
-    else {
+    let (Some(planned), Some(not_started), Some(completed)) = (
+        counts["planned"].as_u64(),
+        counts["not_started"].as_u64(),
+        counts["completed"].as_u64(),
+    ) else {
         return Ok(None);
     };
     // The hint has to agree with the accounting, or it is not a hint worth taking.
     if planned.saturating_sub(from) != not_started
         || abandoned.len() as u64 != counts["abandoned"].as_u64().unwrap_or(u64::MAX)
     {
+        return Ok(None);
+    }
+    // And the accounting has to agree with the file.
+    //
+    // The hint records what the *scanner* did. If the file has since lost rows —
+    // truncated, corrupted, edited — the hint still claims those probes completed, and
+    // the remainder would omit endpoints that were never actually probed. Silently
+    // under-reporting a resume set is the failure this tool exists to prevent, so the
+    // hint is believed only when the rows are still there to back it.
+    if count_probe_rows(path)? != completed {
         return Ok(None);
     }
 
@@ -889,6 +901,31 @@ fn remainder_from_hint(path: &Path) -> Result<Option<Remainder>, String> {
             .map(str::to_string),
         note,
     }))
+}
+
+/// Count `probe_result` rows without parsing them.
+///
+/// A byte-level scan: far cheaper than the full read it guards, and any miscount can
+/// only disagree with the terminal event, which falls back to the full read. Wrong in
+/// the safe direction by construction.
+fn count_probe_rows(path: &Path) -> Result<u64, String> {
+    const MARKER: &str = "\"type\":\"probe_result\"";
+    let mut n = 0u64;
+    let truncation_expected = is_partial(path);
+    for line in open_record(path)?.lines() {
+        match line {
+            Ok(text) => {
+                if text.contains(MARKER) {
+                    n += 1;
+                }
+            }
+            // Mirrors `stream`: a `.partial` file is expected to stop mid-way, and
+            // anything else means we cannot vouch for the count.
+            Err(_) if truncation_expected && n > 0 => break,
+            Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+        }
+    }
+    Ok(n)
 }
 
 fn remainder_by_scanning(path: &Path) -> Result<Remainder, String> {
@@ -1539,6 +1576,39 @@ mod tests {
         let counted = |n: &str| n.split(';').next().unwrap().to_string();
         assert_eq!(counted(&fast.note), counted(&slow.note));
         assert!(fast.note.starts_with("4 of 8 endpoints"), "{}", fast.note);
+    }
+
+    /// A record that has lost rows must not be told it is complete.
+    ///
+    /// The terminal hint records what the scanner did, and stays internally consistent
+    /// even after rows are removed from the file. Trusting it alone made `remainder`
+    /// report nothing outstanding for a record missing two probes — a resume that
+    /// silently skips endpoints, which is the whole failure class this tool exists to
+    /// prevent. CI caught this; the local suite had caught it too and I misread the
+    /// output.
+    #[test]
+    fn a_hint_is_not_trusted_when_rows_are_missing_from_the_file() {
+        let d = tempfile::tempdir().unwrap();
+        let mut e = good_events();
+        // A completed scan: nothing outstanding, and the hint says so truthfully.
+        e[6]["not_started_from"] = json!(4);
+        e[6]["abandoned_indices"] = json!([]);
+        let complete = write(d.path(), "complete.jsonl", &e);
+        assert!(
+            remainder(&complete).unwrap().endpoints.is_empty(),
+            "a genuinely complete scan has no remainder"
+        );
+
+        // The same terminal event, but two probe rows have gone missing.
+        e.remove(5);
+        e.remove(4);
+        let lossy = write(d.path(), "lossy.jsonl", &e);
+        let r = remainder(&lossy).unwrap();
+        assert_eq!(
+            r.endpoints,
+            ["10.0.0.2:80", "10.0.0.3:80"],
+            "rows absent from the file must be treated as unprobed, not as done"
+        );
     }
 
     /// A hint that disagrees with the counts is not trusted.
