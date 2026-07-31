@@ -192,6 +192,13 @@ scanr output remainder scanr-results/scan-*.jsonl | scanr run --pairs -
 That re-probes precisely the endpoints that were never reported — not whole targets — so a
 host whose first two ports completed resumes with only the rest.
 
+The new record names the one it continues, so the two halves stay connected:
+
+```console
+$ scanr output verify scanr-results/scan-*.jsonl | grep resumed
+  resumed from scan a7b012c0
+```
+
 ## Where to go next
 
 | | |

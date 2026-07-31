@@ -4,7 +4,7 @@
 .SH NAME
 scanr\-run \- Execute a scan
 .SH SYNOPSIS
-\fBscanr\-run\fR [\fB\-\-profile\fR] [\fB\-\-transport\fR] [\fB\-\-targets\fR] [\fB\-\-ports\fR] [\fB\-\-pairs\fR] [\fB\-\-exclude\fR] [\fB\-\-concurrency\fR] [\fB\-\-rate\fR] [\fB\-\-connect\-timeout\fR] [\fB\-\-retries\fR] [\fB\-\-dns\fR] [\fB\-\-output\-dir\fR] [\fB\-\-seed\fR] [\fB\-\-open\-only\fR] [\fB\-\-all\fR] [\fB\-\-allow\-large\-range\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fISCAN\fR] 
+\fBscanr\-run\fR [\fB\-\-profile\fR] [\fB\-\-transport\fR] [\fB\-\-targets\fR] [\fB\-\-ports\fR] [\fB\-\-pairs\fR] [\fB\-\-resumed\-from\fR] [\fB\-\-exclude\fR] [\fB\-\-concurrency\fR] [\fB\-\-rate\fR] [\fB\-\-connect\-timeout\fR] [\fB\-\-retries\fR] [\fB\-\-dns\fR] [\fB\-\-output\-dir\fR] [\fB\-\-seed\fR] [\fB\-\-open\-only\fR] [\fB\-\-all\fR] [\fB\-\-allow\-large\-range\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fISCAN\fR] 
 .SH DESCRIPTION
 Execute a scan
 .SH OPTIONS
@@ -23,6 +23,9 @@ Ports: `80`, `1\-1024`, `all`, or a named set (repeatable)
 .TP
 \fB\-\-pairs\fR \fI<FILE|\->\fR
 Exact `host:port` endpoints from `scanr output remainder`; a file, or `\-` for stdin. IPv6 must be bracketed. Cannot be combined with \-\-targets or \-\-ports
+.TP
+\fB\-\-resumed\-from\fR \fI<SCAN_ID>\fR
+The scan_id this run continues, recorded in the record so a resumed scan can be traced back. Picked up automatically from `scanr output remainder`
 .TP
 \fB\-\-exclude\fR \fI<SPEC|FILE>\fR
 Targets to exclude after expansion (repeatable)

@@ -35,6 +35,10 @@ pub struct Overrides {
     /// Explicit `host:port` pairs, from `scanr output remainder`. Mutually exclusive
     /// with targets/ports, which describe a matrix.
     pub pairs: Option<Vec<String>>,
+    /// The scan this one continues. Normally picked up from the `# resumed-from:`
+    /// directive in a remainder, so the pipe carries it; settable by hand for a list
+    /// that has been edited or reassembled.
+    pub resumed_from: Option<String>,
     pub exclude: Option<Vec<String>>,
     pub concurrency: Option<u32>,
     pub rate: Option<u32>,
@@ -239,7 +243,7 @@ pub fn resolve(
     // A pair scan names exact endpoints and bypasses matrix expansion. Targets and ports
     // are still derived from it, so everything downstream — DNS, the record, the plan
     // display — works unchanged.
-    let explicit_pairs = resolve_pairs(ov)?;
+    let (explicit_pairs, resumed_from) = resolve_pairs(ov)?;
 
     let (raw_targets, ports, target_specs, exclude_specs, port_spec_override) =
         match &explicit_pairs {
@@ -355,6 +359,7 @@ pub fn resolve(
         targets,
         ports,
         pairs: explicit_pairs,
+        resumed_from,
         target_specs,
         exclude_specs,
         port_spec,
@@ -560,15 +565,47 @@ fn load_password(
     Ok(None)
 }
 
+/// A target or pair list, plus anything its comment lines declared.
+#[derive(Debug, Default)]
+struct ListInput {
+    lines: Vec<String>,
+    /// From a `# resumed-from: <scan-id>` directive, which `scanr output remainder`
+    /// writes so that piping it into `--pairs` carries the link to the original scan
+    /// without the user having to pass it.
+    resumed_from: Option<String>,
+}
+
+impl ListInput {
+    fn push(&mut self, line: &str) {
+        if let Some(id) = parse_resumed_from(line) {
+            // First wins: concatenating two remainders makes the second's origin
+            // ambiguous, and silently keeping the last would be a worse guess.
+            self.resumed_from.get_or_insert(id);
+        }
+        let l = line.split('#').next().unwrap_or("").trim();
+        if !l.is_empty() {
+            self.lines.push(l.to_string());
+        }
+    }
+}
+
+/// Recognise `# resumed-from: <scan-id>` in a list's comment lines.
+fn parse_resumed_from(line: &str) -> Option<String> {
+    let rest = line.trim().strip_prefix('#')?.trim();
+    let id = rest.strip_prefix("resumed-from:")?.trim();
+    // Scan ids are hex; refuse anything else rather than record a guess.
+    (!id.is_empty() && id.chars().all(|c| c.is_ascii_hexdigit())).then(|| id.to_string())
+}
+
 /// Expand one `--targets` argument: `-` for stdin, an existing file path, or a
 /// comma-separated list of specs.
-fn expand_target_argument(arg: &str) -> Result<Vec<String>, ConfigError> {
+fn expand_target_argument(arg: &str) -> Result<ListInput, ConfigError> {
     if arg == "-" {
         let stdin = std::io::stdin();
-        let mut out = Vec::new();
+        let mut out = ListInput::default();
         for line in stdin.lock().lines() {
             let line = line.map_err(|e| ConfigError::new(format!("reading stdin: {e}")))?;
-            push_list_line(&line, &mut out);
+            out.push(&line);
         }
         return Ok(out);
     }
@@ -576,30 +613,26 @@ fn expand_target_argument(arg: &str) -> Result<Vec<String>, ConfigError> {
     if path.is_file() {
         return read_target_file(&path);
     }
-    Ok(arg
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        .collect())
+    Ok(ListInput {
+        lines: arg
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect(),
+        resumed_from: None,
+    })
 }
 
-fn read_target_file(path: &std::path::Path) -> Result<Vec<String>, ConfigError> {
+fn read_target_file(path: &std::path::Path) -> Result<ListInput, ConfigError> {
     let text = std::fs::read_to_string(path).map_err(|e| {
         ConfigError::new(format!("cannot read target file {}: {e}", path.display()))
     })?;
-    let mut out = Vec::new();
+    let mut out = ListInput::default();
     for line in text.lines() {
-        push_list_line(line, &mut out);
+        out.push(line);
     }
     Ok(out)
-}
-
-fn push_list_line(line: &str, out: &mut Vec<String>) {
-    let l = line.split('#').next().unwrap_or("").trim();
-    if !l.is_empty() {
-        out.push(l.to_string());
-    }
 }
 
 fn resolve_targets(
@@ -613,7 +646,7 @@ fn resolve_targets(
     let items: Vec<String> = if let Some(t) = &ov.targets {
         let mut v = Vec::new();
         for arg in t {
-            v.extend(expand_target_argument(arg)?);
+            v.extend(expand_target_argument(arg)?.lines);
         }
         v
     } else if let Some(n) = scan {
@@ -646,7 +679,7 @@ fn resolve_targets(
                 }
             }
             if let Some(f) = &raw.file {
-                for s in read_target_file(&expand_home(f))? {
+                for s in read_target_file(&expand_home(f))?.lines {
                     set.include.push(parse_spec(&s)?);
                 }
                 specs.push(format!("file:{f}"));
@@ -672,7 +705,7 @@ fn resolve_targets(
     }
     if let Some(ex) = &ov.exclude {
         for arg in ex {
-            for s in expand_target_argument(arg)? {
+            for s in expand_target_argument(arg)?.lines {
                 set.exclude.push(parse_spec(&s)?);
             }
         }
@@ -681,10 +714,14 @@ fn resolve_targets(
     Ok((set, specs))
 }
 
-/// Read explicit `host:port` pairs, if any were supplied.
-fn resolve_pairs(ov: &Overrides) -> Result<Option<Vec<(Target, u16)>>, ConfigError> {
+/// Explicit endpoints, plus the scan they were derived from if the input declared one.
+type ResolvedPairs = (Option<Vec<(Target, u16)>>, Option<String>);
+
+/// Read explicit `host:port` pairs, if any were supplied, along with the scan they were
+/// derived from when the input declared one.
+fn resolve_pairs(ov: &Overrides) -> Result<ResolvedPairs, ConfigError> {
     let Some(args) = &ov.pairs else {
-        return Ok(None);
+        return Ok((None, ov.resumed_from.clone()));
     };
     if ov.targets.is_some() || ov.ports.is_some() {
         return Err(
@@ -696,8 +733,15 @@ fn resolve_pairs(ov: &Overrides) -> Result<Option<Vec<(Target, u16)>>, ConfigErr
     }
 
     let mut lines = Vec::new();
+    // An explicit --resumed-from beats a directive in the input: the user is the more
+    // deliberate source, and it lets a hand-edited list keep its provenance.
+    let mut resumed_from = ov.resumed_from.clone();
     for arg in args {
-        lines.extend(expand_target_argument(arg)?);
+        let input = expand_target_argument(arg)?;
+        lines.extend(input.lines);
+        if resumed_from.is_none() {
+            resumed_from = input.resumed_from;
+        }
     }
     let mut out = Vec::with_capacity(lines.len());
     for line in &lines {
@@ -722,7 +766,7 @@ fn resolve_pairs(ov: &Overrides) -> Result<Option<Vec<(Target, u16)>>, ConfigErr
     // Deduplicate while preserving order, so concatenated inputs are harmless.
     let mut seen = BTreeSet::new();
     out.retain(|(t, p)| seen.insert((t.to_string(), *p)));
-    Ok(Some(out))
+    Ok((Some(out), resumed_from))
 }
 
 fn parse_spec(s: &str) -> Result<TargetSpec, ConfigError> {
@@ -1376,5 +1420,81 @@ ports = ["web"]
         let text = format!("{BASE}\n[scans.s9]\ntargets=[\"lab\"]\nports=[\"web\"]\nrate = 0\n");
         let p = plan_of(&text, "s9", Overrides::default());
         assert_eq!(p.projected_duration(), None);
+    }
+
+    // ── resume provenance ───────────────────────────────────────────────────
+
+    fn pairs_plan(contents: &str, resumed_from: Option<&str>) -> ScanPlan {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("pairs.txt");
+        std::fs::write(&path, contents).unwrap();
+        let ov = Overrides {
+            pairs: Some(vec![path.to_string_lossy().into_owned()]),
+            resumed_from: resumed_from.map(String::from),
+            ..Default::default()
+        };
+        resolve(
+            &files(&[(Layer::Project, "version = 1\n")]),
+            None,
+            &ov,
+            &facts(),
+        )
+        .expect("plan should resolve")
+    }
+
+    #[test]
+    fn recognises_the_resumed_from_directive() {
+        for (line, expected) in [
+            ("# resumed-from: a7b012c0", Some("a7b012c0")),
+            ("#resumed-from:a7b012c0", Some("a7b012c0")),
+            ("  #  resumed-from:  a7b012c0  ", Some("a7b012c0")),
+            // Not hex, so not a scan id — recording a guess would be worse than nothing.
+            ("# resumed-from: not-an-id", None),
+            ("# resumed-from:", None),
+            ("# just a comment", None),
+            ("10.0.0.1:80", None),
+        ] {
+            assert_eq!(
+                parse_resumed_from(line).as_deref(),
+                expected,
+                "for {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pair_list_carries_the_scan_it_came_from() {
+        let p = pairs_plan(
+            "# resumed-from: a7b012c0\n10.0.0.1:80\n10.0.0.2:443\n",
+            None,
+        );
+        assert_eq!(p.resumed_from.as_deref(), Some("a7b012c0"));
+        // The directive is provenance, not an endpoint.
+        assert_eq!(p.probe_count(), 2);
+    }
+
+    #[test]
+    fn a_pair_list_without_a_directive_records_no_origin() {
+        let p = pairs_plan("10.0.0.1:80\n", None);
+        assert_eq!(p.resumed_from, None);
+    }
+
+    #[test]
+    fn an_explicit_resumed_from_beats_the_directive() {
+        // A hand-edited or reassembled list needs a way to say where it really came from.
+        let p = pairs_plan("# resumed-from: aaaa\n10.0.0.1:80\n", Some("bbbb"));
+        assert_eq!(p.resumed_from.as_deref(), Some("bbbb"));
+    }
+
+    #[test]
+    fn concatenated_remainders_keep_the_first_origin() {
+        // Two remainders piped together have no single origin; guessing the last would
+        // be no better than guessing the first, and silence would lose both.
+        let p = pairs_plan(
+            "# resumed-from: aaaa\n10.0.0.1:80\n# resumed-from: bbbb\n10.0.0.2:80\n",
+            None,
+        );
+        assert_eq!(p.resumed_from.as_deref(), Some("aaaa"));
+        assert_eq!(p.probe_count(), 2);
     }
 }

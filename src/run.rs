@@ -596,6 +596,10 @@ fn config_event(plan: &ScanPlan, facts: &HostFacts) -> serde_json::Value {
         "scan_name": plan.scan_name,
         "description": plan.description,
         "profile": plan.profile,
+        // The scan this one continues, when it was built from another's remainder.
+        // Null for an ordinary scan; a chain of these reconstructs a scan that was
+        // split across one or more interruptions.
+        "resumed_from": plan.resumed_from,
         "targets": {
             // The expanded matrix is deliberately not embedded: a /16 x 1000 ports is
             // 65M probes. The canonical spec plus the seed reproduces the scan exactly.

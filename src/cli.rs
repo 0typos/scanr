@@ -203,6 +203,11 @@ struct OverrideArgs {
     )]
     pairs: Option<Vec<String>>,
 
+    /// The scan_id this run continues, recorded in the record so a resumed scan can be
+    /// traced back. Picked up automatically from `scanr output remainder`.
+    #[arg(long, value_name = "SCAN_ID", requires = "pairs")]
+    resumed_from: Option<String>,
+
     /// Targets to exclude after expansion (repeatable)
     #[arg(long, value_name = "SPEC|FILE", action = clap::ArgAction::Append)]
     exclude: Option<Vec<String>>,
@@ -271,6 +276,7 @@ impl OverrideArgs {
             targets: self.targets.clone(),
             ports: self.ports.clone(),
             pairs: self.pairs.clone(),
+            resumed_from: self.resumed_from.clone(),
             exclude: self.exclude.clone(),
             concurrency: self.concurrency,
             rate: self.rate,
@@ -871,12 +877,9 @@ fn cmd_output(_cli: &Cli, cmd: &OutputCmd) -> Result<u8, ConfigError> {
             })
         }
         OutputCmd::Remainder { file } => {
-            let (targets, note) = crate::verify::remainder(file).map_err(ConfigError::new)?;
-            let mut out = std::io::stdout();
-            for t in &targets {
-                let _ = writeln!(out, "{t}");
-            }
-            let _ = writeln!(std::io::stderr(), "{note}");
+            let rem = crate::verify::remainder(file).map_err(ConfigError::new)?;
+            let _ = write!(std::io::stdout(), "{}", rem.render());
+            let _ = writeln!(std::io::stderr(), "{}", rem.note);
             Ok(EXIT_OK)
         }
     }

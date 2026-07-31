@@ -627,7 +627,25 @@ fn output_remainder_round_trips_into_a_rescan() {
         &["output", "remainder", partial.to_str().unwrap()],
     );
     assert_eq!(code(&rem), 0, "{}", stderr(&rem));
-    let listed: Vec<String> = stdout(&rem).lines().map(|l| l.trim().to_string()).collect();
+    let all: Vec<String> = stdout(&rem).lines().map(|l| l.trim().to_string()).collect();
+
+    // The remainder leads with where it came from, so the pipe carries the link.
+    let original_id =
+        serde_json::from_str::<Value>(text.lines().next().unwrap()).unwrap()["scan_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+    assert_eq!(
+        all[0],
+        format!("# resumed-from: {original_id}"),
+        "got {all:?}"
+    );
+
+    let listed: Vec<String> = all
+        .iter()
+        .filter(|l| !l.starts_with('#'))
+        .cloned()
+        .collect();
     assert_eq!(
         listed.len(),
         2,
@@ -640,8 +658,9 @@ fn output_remainder_round_trips_into_a_rescan() {
         );
     }
 
-    // Feed it back. Exactly two probes should run — not two whole targets.
-    std::fs::write(d.path().join("resume.txt"), listed.join("\n") + "\n").unwrap();
+    // Feed it back verbatim, directive included. Exactly two probes should run — not
+    // two whole targets.
+    std::fs::write(d.path().join("resume.txt"), all.join("\n") + "\n").unwrap();
     let again = scanr(
         d.path(),
         &[
@@ -689,6 +708,15 @@ fn output_remainder_round_trips_into_a_rescan() {
     // And the record says it was a pair scan, so its own remainder works too.
     let config = events.iter().find(|e| e["type"] == "scan_config").unwrap();
     assert_eq!(config["targets"]["mode"], "pairs");
+
+    // The chain is reconstructible: this record names the scan it continues, which is
+    // what makes an interrupted-then-resumed scan a single traceable thing rather than
+    // two unrelated files.
+    assert_eq!(
+        config["resumed_from"].as_str(),
+        Some(original_id.as_str()),
+        "the resumed scan must name its origin"
+    );
 }
 
 #[test]
