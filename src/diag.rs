@@ -220,17 +220,42 @@ mod tests {
         }
     }
 
+    /// `RLIMIT_NOFILE` comes from `getrlimit`, which every Unix has, so it is the one
+    /// fact that must be readable everywhere — and the one that matters most on macOS,
+    /// where the default of 256 sits under the default concurrency.
     #[test]
-    fn reads_real_host_facts() {
-        // These files exist on any Linux; the point is that parsing works.
+    fn reads_the_rlimit_on_any_unix() {
+        assert!(
+            HostFacts::probe().rlimit_nofile.is_some(),
+            "should read RLIMIT_NOFILE"
+        );
+    }
+
+    /// The sysctls come from `/proc`, so this is a Linux claim rather than a Unix one.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reads_the_ephemeral_range_on_linux() {
         let f = HostFacts::probe();
         assert!(
             f.ephemeral_range.is_some(),
             "should read ip_local_port_range"
         );
-        assert!(f.rlimit_nofile.is_some(), "should read RLIMIT_NOFILE");
         let (lo, hi) = f.ephemeral_range.unwrap();
         assert!(lo < hi && hi <= 65535);
+    }
+
+    /// Elsewhere the same probe must degrade rather than guess. A fabricated ephemeral
+    /// range would drive the budget warnings, and a wrong warning is worse than none.
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn degrades_where_proc_does_not_exist() {
+        let f = HostFacts::probe();
+        assert!(f.ephemeral_range.is_none(), "must not invent a range");
+        assert!(f.tcp_tw_reuse.is_none(), "must not invent a sysctl");
+        assert!(
+            f.to_string().contains("ephemeral unknown"),
+            "and must say so: {f}"
+        );
     }
 
     #[test]
