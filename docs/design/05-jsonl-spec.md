@@ -178,6 +178,13 @@ Emitted during the scan, at most once each, carrying host-specific remediation u
 The runtime three are rate-limited to one per code per scan: a saturated host would
 otherwise emit one warning per failing probe.
 
+Emitted immediately before the terminal event, and unlike the rest a report of a scanr
+bug rather than an environmental condition:
+
+| code | meaning |
+|---|---|
+| `worker_panic` | one or more scan workers terminated abnormally; results are incomplete |
+
 ## Terminal events
 
 Exactly one, last. Nothing may follow it.
@@ -203,15 +210,34 @@ Exactly one, last. Nothing may follow it.
 
 If the writer itself fails, one attempt is made to emit `scan_failed` with
 `error_code: "writer_failure"`; if that also fails the file stays `.partial`, which is
-the correct signal.
+the correct signal. A write failure on *any* event type sets this, not only on
+`probe_result`.
+
+If a scan worker panics, the terminal event is `scan_failed` with
+`error_code: "worker_panic"` and a `worker_panics` count. Workers unwind rather than
+abort (D1) so that a crash cannot take the writer with it and lose the record — but a
+crashed worker still means the results are incomplete, so it can never be reported as a
+natural completion. The probes it was holding are accounted for as `abandoned`.
 
 ## `scanr output verify` checks
 
-Valid JSON per line · consistent `scan_id` · strictly increasing `seq` · `scan_started`
-first and `scan_config` second · exactly one terminal event, last · nothing after it ·
-`counts` internally consistent and matching observed `probe_result` rows · supported
-`schema_version` · no unredacted credential-shaped values · `.partial` suffix reported
-as abrupt termination.
+**Structure.** Valid JSON per line · consistent `scan_id` · strictly increasing `seq` ·
+`scan_started` first and `scan_config` second · exactly one terminal event, last ·
+nothing after it · `counts` internally consistent and matching observed `probe_result`
+rows · supported `schema_version` · no unredacted credential-shaped values · `.partial`
+suffix reported as abrupt termination.
+
+**Values.** Every event's `ts` readable as RFC 3339; and for each `probe_result`:
+`port` within 1–65535 · `state` and `source` among the values defined above ·
+`protocol` is `tcp` · `attempts` at least 1 and matching the length of `attempt_states`
+· each `attempt_states` entry a defined state · `probe_index` below `probes_planned` ·
+`timing_ms` present, numeric, non-negative, and carrying `total`.
+
+Structure being right is not the same as the record being true: a row carrying
+`"port": 65616` satisfies every structural rule above, and `output remainder` would then
+narrow it to 80 and drop a genuinely unprobed endpoint from the resume set. Value
+problems are aggregated by kind rather than listed per row, so a systematically corrupt
+record reports one line per defect and not one per probe.
 
 ## Stability
 

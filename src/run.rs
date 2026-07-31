@@ -65,6 +65,8 @@ pub struct ScanSummary {
     pub duration: Duration,
     pub path: PathBuf,
     pub writer_failed: bool,
+    /// Workers that terminated abnormally. Non-zero forces `scan_failed`.
+    pub worker_panics: u32,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -90,22 +92,44 @@ struct Completed {
     record: ProbeRecord,
 }
 
+/// Overrides for the two things `execute` would otherwise construct itself.
+///
+/// The scan's failure paths — a worker dying, the writer failing on a particular event
+/// type — were unreachable from a test without this, which is why defects lived in them.
+#[derive(Default)]
+pub(crate) struct Harness {
+    pub transport: Option<Arc<dyn Transport>>,
+    pub writer: Option<JsonlWriter>,
+}
+
 pub fn execute(
     plan: Arc<ScanPlan>,
     cancel: Cancel,
     opts: &RunOptions,
+) -> Result<ScanSummary, ScanError> {
+    execute_with(plan, cancel, opts, Harness::default())
+}
+
+pub(crate) fn execute_with(
+    plan: Arc<ScanPlan>,
+    cancel: Cancel,
+    opts: &RunOptions,
+    harness: Harness,
 ) -> Result<ScanSummary, ScanError> {
     let facts = HostFacts::probe();
     let scan_id = crate::output::new_scan_id();
     let started_ms = now_epoch_ms();
     let started = Instant::now();
 
-    let mut writer = JsonlWriter::create(&plan.output_dir, &scan_id, started_ms).map_err(|e| {
-        ScanError::Output {
-            path: plan.output_dir.clone(),
-            source: e,
-        }
-    })?;
+    let mut writer = match harness.writer {
+        Some(w) => w,
+        None => JsonlWriter::create(&plan.output_dir, &scan_id, started_ms).map_err(|e| {
+            ScanError::Output {
+                path: plan.output_dir.clone(),
+                source: e,
+            }
+        })?,
+    };
 
     writer
         .emit("scan_started", started_event(started_ms))
@@ -114,8 +138,16 @@ pub fn execute(
         .emit("scan_config", config_event(&plan, &facts))
         .map_err(ScanError::Writer)?;
 
+    // Every event from here on goes through `emit`, which remembers the first failure.
+    // Only `probe_result` used to record one; the other five discarded it, so a disk
+    // filling during the warning phase produced a record missing events and still
+    // labelled `scan_completed`.
+    let mut writer_error: Option<std::io::Error> = None;
+
     for h in &plan.resolved_hosts {
-        let _ = writer.emit(
+        emit(
+            &mut writer,
+            &mut writer_error,
             "target_resolved",
             json!({
                 "target": h.hostname,
@@ -126,7 +158,9 @@ pub fn execute(
         );
     }
     for w in &plan.warnings {
-        let _ = writer.emit(
+        emit(
+            &mut writer,
+            &mut writer_error,
             "scan_warning",
             json!({ "code": w.code, "message": w.message }),
         );
@@ -152,7 +186,10 @@ pub fn execute(
     }
 
     // ── workers ─────────────────────────────────────────────────────────────
-    let transport: Arc<dyn Transport> = Arc::from(crate::transport::build(&plan.transport));
+    let transport: Arc<dyn Transport> = match harness.transport {
+        Some(t) => t,
+        None => Arc::from(crate::transport::build(&plan.transport)),
+    };
     let permutation = Arc::new(Permutation::new(total.max(1), plan.seed));
     let counter = Arc::new(WorkCounter::new(total));
     let limiter = Arc::new(RateLimiter::new(plan.timing.rate));
@@ -197,7 +234,6 @@ pub fn execute(
     let mut stdout = std::io::stdout().lock();
     let mut last_progress = Instant::now();
     let mut last_count = 0u64;
-    let mut writer_error: Option<std::io::Error> = None;
     // Pressure conditions are reported once each. A saturated host would otherwise
     // produce one warning per failing probe, which is tens of thousands of them.
     let mut pressure_seen: std::collections::BTreeSet<&'static str> = Default::default();
@@ -223,16 +259,16 @@ pub fn execute(
                     && pressure_seen.insert(p.code())
                 {
                     let remediation = p.remediation(&facts, plan.timing.concurrency);
-                    if writer_error.is_none() {
-                        let _ = writer.emit(
-                            "scan_warning",
-                            json!({
-                                "code": p.code(),
-                                "message": p.summary(),
-                                "detail": { "remediation": remediation },
-                            }),
-                        );
-                    }
+                    emit(
+                        &mut writer,
+                        &mut writer_error,
+                        "scan_warning",
+                        json!({
+                            "code": p.code(),
+                            "message": p.summary(),
+                            "detail": { "remediation": remediation },
+                        }),
+                    );
                     if !opts.quiet {
                         progress.clear();
                         let _ = writeln!(
@@ -248,11 +284,12 @@ pub fn execute(
                     }
                 }
 
-                if writer_error.is_none()
-                    && let Err(e) = writer.emit("probe_result", record.to_json())
-                {
-                    writer_error = Some(e);
-                }
+                emit(
+                    &mut writer,
+                    &mut writer_error,
+                    "probe_result",
+                    record.to_json(),
+                );
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
@@ -287,18 +324,18 @@ pub fn execute(
             let remaining = total.saturating_sub(counts.completed) as f64;
             let eta = (rate > 0.01).then(|| remaining / rate);
             progress.render(counts.completed, total, counts.open, rate, eta);
-            if writer_error.is_none() {
-                let _ = writer.emit(
-                    "scan_progress",
-                    json!({
-                        "completed": counts.completed,
-                        "planned": total,
-                        "open": counts.open,
-                        "rate_per_s": (rate * 10.0).round() / 10.0,
-                        "eta_s": eta.map(|e| e.round()),
-                    }),
-                );
-            }
+            emit(
+                &mut writer,
+                &mut writer_error,
+                "scan_progress",
+                json!({
+                    "completed": counts.completed,
+                    "planned": total,
+                    "open": counts.open,
+                    "rate_per_s": (rate * 10.0).round() / 10.0,
+                    "eta_s": eta.map(|e| e.round()),
+                }),
+            );
             last_progress = Instant::now();
             last_count = counts.completed;
         }
@@ -309,15 +346,40 @@ pub fn execute(
 
     // Workers exit on their own once the counter is exhausted or cancellation is seen.
     // A forced stop skips the join: process exit will reap them.
+    //
+    // The join result is not discarded. `panic = "unwind"` is deliberate (D1) so that a
+    // panicking worker cannot take the writer down with it — but that only helps if we
+    // then notice. Discarding it meant a crashed worker produced a short scan labelled
+    // `scan_completed` with `termination: natural` and exit 0, which is precisely the
+    // outcome this tool exists to make impossible.
+    let mut worker_panics = 0u32;
     if !cancel.is_forced() {
         for h in handles {
-            let _ = h.join();
+            if h.join().is_err() {
+                worker_panics += 1;
+            }
         }
+    }
+    if worker_panics > 0 {
+        emit(
+            &mut writer,
+            &mut writer_error,
+            "scan_warning",
+            json!({
+                "code": "worker_panic",
+                "message": format!(
+                    "{worker_panics} of {n_workers} scan workers terminated abnormally; \
+                     the probes they held were abandoned and these results are incomplete"
+                ),
+            }),
+        );
     }
 
     // ── terminal event ──────────────────────────────────────────────────────
     let duration = started.elapsed();
-    let termination = if writer_error.is_some() {
+    // A crashed worker outranks an interrupt: the user asked for the interrupt and did
+    // not ask for the crash, and only one of the two needs investigating.
+    let termination = if writer_error.is_some() || worker_panics > 0 {
         Termination::Failed
     } else if cancel.is_cancelled() {
         Termination::Interrupted
@@ -343,6 +405,14 @@ pub fn execute(
             body["requested_at"] = json!(rfc3339_ms(at));
         }
     }
+    // Recorded numerically as well as in the reason, so a consumer can detect it
+    // without string-matching. A writer failure is the more fundamental fault, so it
+    // takes the `error_code` when both happened; the panic count survives regardless.
+    if worker_panics > 0 {
+        body["worker_panics"] = json!(worker_panics);
+        body["error"] = json!(format!("{worker_panics} scan worker(s) panicked"));
+        body["error_code"] = json!("worker_panic");
+    }
     if let Some(e) = &writer_error {
         body["error"] = json!(e.to_string());
         body["error_code"] = json!("writer_failure");
@@ -358,7 +428,27 @@ pub fn execute(
         duration,
         path,
         writer_failed: writer_error.is_some() || !terminal_ok,
+        worker_panics,
     })
+}
+
+/// Emit an event, remembering the first write failure and going quiet after it.
+///
+/// Once the writer has failed the record is already incomplete, so continuing to push
+/// events at it only risks partial lines. The single remembered error is what turns the
+/// terminal event into `scan_failed`.
+fn emit(
+    writer: &mut JsonlWriter,
+    writer_error: &mut Option<std::io::Error>,
+    event: &str,
+    body: serde_json::Value,
+) {
+    if writer_error.is_some() {
+        return;
+    }
+    if let Err(e) = writer.emit(event, body) {
+        *writer_error = Some(e);
+    }
 }
 
 fn worker(
@@ -644,6 +734,14 @@ pub fn print_summary(summary: &ScanSummary, quiet: bool) {
             commas(c.retried)
         );
     }
+    if summary.worker_panics > 0 {
+        let _ = writeln!(
+            err,
+            "  {} scan worker(s) crashed — this is a bug in scanr, and these results are \
+             incomplete; the record's terminal event records it as `worker_panic`",
+            summary.worker_panics
+        );
+    }
     // A run that "completed" while most probes errored is not a useful result, and the
     // word `completed` on its own invites reading it as one.
     if c.completed > 0 && c.error * 2 > c.completed {
@@ -668,4 +766,301 @@ pub fn tally(records: &[ProbeRecord]) -> Vec<(State, usize)> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plan::types::Timing;
+    use crate::probe::{Phases, ProbeOutcome, Source};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Collects the record in memory so a test can assert on the events themselves.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl Captured {
+        fn events(&self) -> Vec<serde_json::Value> {
+            let buf = self.0.lock().unwrap();
+            String::from_utf8_lossy(&buf)
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| serde_json::from_str(l).expect("each line is one JSON object"))
+                .collect()
+        }
+    }
+
+    impl Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Fails exactly the writes carrying `needle`, and lets everything else through.
+    ///
+    /// Deliberately *not* sticky. A sticky sink cannot prove anything here: if the
+    /// warning's failure is discarded, the very next event fails too and records it, so
+    /// the scan is marked failed either way and the bug stays hidden. Striking one event
+    /// and then recovering is what isolates "did *this* event type record its failure".
+    struct FailsOn {
+        inner: Captured,
+        needle: &'static str,
+        hits: u32,
+    }
+
+    impl FailsOn {
+        fn new(inner: Captured, needle: &'static str) -> Self {
+            Self {
+                inner,
+                needle,
+                hits: 0,
+            }
+        }
+    }
+
+    impl Write for FailsOn {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if String::from_utf8_lossy(buf).contains(self.needle) {
+                self.hits += 1;
+                return Err(std::io::Error::other("no space left on device"));
+            }
+            self.inner.write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Panics on the `panic_on`-th probe, then answers normally.
+    struct PanickingTransport {
+        seen: AtomicU32,
+        panic_on: u32,
+    }
+
+    impl Transport for PanickingTransport {
+        fn probe(&self, _dest: &Destination, _timing: &Timing) -> ProbeOutcome {
+            let n = self.seen.fetch_add(1, Ordering::SeqCst) + 1;
+            assert!(n != self.panic_on, "deliberate worker panic for the test");
+            ProbeOutcome::open(
+                Phases {
+                    proxy_connect: None,
+                    handshake: None,
+                    connect: Some(Duration::from_millis(1)),
+                    total: Duration::from_millis(1),
+                },
+                Source::LocalStack,
+            )
+        }
+        fn supports_remote_dns(&self) -> bool {
+            false
+        }
+        fn name(&self) -> &str {
+            "test"
+        }
+        fn type_name(&self) -> &'static str {
+            "direct"
+        }
+        fn fidelity(&self) -> Fidelity {
+            Fidelity::Full
+        }
+    }
+
+    /// Always answers open, without touching the network.
+    struct StubTransport;
+
+    impl Transport for StubTransport {
+        fn probe(&self, _dest: &Destination, _timing: &Timing) -> ProbeOutcome {
+            ProbeOutcome::open(
+                Phases {
+                    proxy_connect: None,
+                    handshake: None,
+                    connect: Some(Duration::from_millis(1)),
+                    total: Duration::from_millis(1),
+                },
+                Source::LocalStack,
+            )
+        }
+        fn supports_remote_dns(&self) -> bool {
+            false
+        }
+        fn name(&self) -> &str {
+            "test"
+        }
+        fn type_name(&self) -> &'static str {
+            "direct"
+        }
+        fn fidelity(&self) -> Fidelity {
+            Fidelity::Full
+        }
+    }
+
+    fn quiet() -> RunOptions {
+        RunOptions {
+            quiet: true,
+            no_color: true,
+            verbose: false,
+        }
+    }
+
+    fn terminal(events: &[serde_json::Value]) -> &serde_json::Value {
+        events
+            .last()
+            .filter(|e| {
+                let t = e["type"].as_str().unwrap_or("");
+                t.starts_with("scan_") && t != "scan_started"
+            })
+            .expect("a terminal event is last")
+    }
+
+    #[test]
+    fn a_panicking_worker_is_not_reported_as_a_clean_completion() {
+        // The join result used to be discarded, so a crashed worker produced
+        // `scan_completed` / `termination: natural` / exit 0 on a short scan.
+        let sink = Captured::default();
+        let plan = Arc::new(ScanPlan::for_test((1..=40).collect(), 4));
+        let summary = execute_with(
+            plan,
+            Cancel::new(),
+            &quiet(),
+            Harness {
+                transport: Some(Arc::new(PanickingTransport {
+                    seen: AtomicU32::new(0),
+                    panic_on: 3,
+                })),
+                writer: Some(JsonlWriter::with_sink(Box::new(sink.clone()), "s-panic")),
+            },
+        )
+        .expect("the scan itself still returns");
+
+        assert_eq!(summary.worker_panics, 1);
+        assert_eq!(summary.termination, Termination::Failed);
+        assert_eq!(summary.termination.exit_code(), 2);
+
+        let events = sink.events();
+        let t = terminal(&events);
+        assert_eq!(t["type"], "scan_failed");
+        assert_eq!(t["termination"], "error");
+        assert_eq!(t["error_code"], "worker_panic");
+        assert_eq!(t["worker_panics"], 1);
+
+        // And it is described in the record, not only in the terminal counts.
+        assert!(
+            events
+                .iter()
+                .any(|e| e["type"] == "scan_warning" && e["code"] == "worker_panic"),
+            "a worker_panic warning is emitted"
+        );
+    }
+
+    #[test]
+    fn a_clean_scan_still_completes_naturally() {
+        // Guards the above against over-reach: no panic must mean no worker_panics.
+        let sink = Captured::default();
+        let plan = Arc::new(ScanPlan::for_test((1..=20).collect(), 4));
+        let summary = execute_with(
+            plan,
+            Cancel::new(),
+            &quiet(),
+            Harness {
+                transport: Some(Arc::new(StubTransport)),
+                writer: Some(JsonlWriter::with_sink(Box::new(sink.clone()), "s-clean")),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.worker_panics, 0);
+        assert_eq!(summary.termination, Termination::Completed);
+        assert_eq!(summary.counts.completed, 20);
+        let events = sink.events();
+        assert_eq!(terminal(&events)["type"], "scan_completed");
+        assert!(terminal(&events).get("worker_panics").is_none());
+    }
+
+    /// A writer failure during the *warning* phase, which is the case that used to be
+    /// discarded: only `probe_result` recorded one.
+    #[test]
+    fn a_writer_failure_on_a_warning_is_not_swallowed() {
+        let sink = Captured::default();
+        let mut plan = ScanPlan::for_test(vec![80], 1);
+        plan.warnings = vec![crate::plan::types::PlanWarning {
+            code: "fidelity_unknown",
+            message: "measure this proxy".into(),
+        }];
+
+        // Strikes the warning event specifically, leaving the header intact.
+        let failing = FailsOn::new(sink.clone(), "fidelity_unknown");
+        let summary = execute_with(
+            Arc::new(plan),
+            Cancel::new(),
+            &quiet(),
+            Harness {
+                transport: Some(Arc::new(StubTransport)),
+                writer: Some(JsonlWriter::with_sink(Box::new(failing), "s-writer")),
+            },
+        )
+        .unwrap();
+
+        assert!(
+            summary.writer_failed,
+            "a failed write during the warning phase must be recorded"
+        );
+        assert_eq!(summary.termination, Termination::Failed);
+        assert_eq!(summary.termination.exit_code(), 2);
+    }
+
+    #[test]
+    fn a_writer_failure_on_a_probe_result_is_not_swallowed() {
+        let sink = Captured::default();
+        let failing = FailsOn::new(sink.clone(), "probe_result");
+        let summary = execute_with(
+            Arc::new(ScanPlan::for_test((1..=200).collect(), 2)),
+            Cancel::new(),
+            &quiet(),
+            Harness {
+                transport: Some(Arc::new(StubTransport)),
+                writer: Some(JsonlWriter::with_sink(Box::new(failing), "s-writer2")),
+            },
+        )
+        .unwrap();
+
+        assert!(summary.writer_failed);
+        assert_eq!(summary.termination, Termination::Failed);
+    }
+
+    #[test]
+    fn cancellation_before_any_probe_reports_interrupted() {
+        let sink = Captured::default();
+        let cancel = Cancel::new();
+        cancel.request_graceful();
+        let summary = execute_with(
+            Arc::new(ScanPlan::for_test((1..=50).collect(), 2)),
+            cancel,
+            &quiet(),
+            Harness {
+                transport: Some(Arc::new(StubTransport)),
+                writer: Some(JsonlWriter::with_sink(Box::new(sink.clone()), "s-cancel")),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary.termination, Termination::Interrupted);
+        assert_eq!(summary.termination.exit_code(), 130);
+        let events = sink.events();
+        let t = terminal(&events);
+        assert_eq!(t["type"], "scan_interrupted");
+        assert_eq!(t["signal"], "SIGINT");
+        // The three buckets must still reconcile.
+        let c = &t["counts"];
+        assert_eq!(
+            c["planned"].as_u64().unwrap(),
+            c["completed"].as_u64().unwrap()
+                + c["abandoned"].as_u64().unwrap()
+                + c["not_started"].as_u64().unwrap()
+        );
+    }
 }

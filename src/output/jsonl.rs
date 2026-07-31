@@ -34,10 +34,20 @@ fn is_critical(kind: &str) -> bool {
     )
 }
 
+/// Where a record is written. Boxed rather than generic so `JsonlWriter` stays a plain
+/// type in every signature that mentions it.
+///
+/// The indirection costs nothing on the hot path: per-event writes land in the
+/// `BufWriter`, so the virtual call happens once per 64 KiB flush rather than once per
+/// probe.
+type Sink = BufWriter<Box<dyn Write + Send>>;
+
 pub struct JsonlWriter {
-    file: Option<BufWriter<File>>,
+    file: Option<Sink>,
     partial_path: PathBuf,
     final_path: PathBuf,
+    /// Whether `finalize` should rename. False for an injected sink, which has no file.
+    renames: bool,
     scan_id: String,
     seq: u64,
     last_flush: Instant,
@@ -53,15 +63,41 @@ impl JsonlWriter {
         let partial_path = dir.join(format!("{name}.partial"));
         let file = File::create(&partial_path)?;
         Ok(Self {
-            file: Some(BufWriter::with_capacity(64 * 1024, file)),
+            file: Some(BufWriter::with_capacity(64 * 1024, Box::new(file))),
             partial_path,
             final_path,
+            renames: true,
             scan_id: scan_id.to_string(),
             seq: 0,
             last_flush: Instant::now(),
             terminal_written: false,
             error: None,
         })
+    }
+
+    /// A writer over an arbitrary sink, for driving writer failure in tests.
+    ///
+    /// This exists because writer failure was previously only reachable by spawning the
+    /// binary under an `RLIMIT_FSIZE`, which is slow, Linux-specific, and cannot choose
+    /// *which* event fails — so the bug where only `probe_result` recorded a failure
+    /// stayed invisible.
+    #[cfg(test)]
+    pub(crate) fn with_sink(sink: Box<dyn Write + Send>, scan_id: &str) -> Self {
+        Self {
+            // Unbuffered: `BufWriter` passes any write at or above its capacity straight
+            // through, so a zero-capacity buffer makes each event reach the sink as its
+            // own call. A test can then fail one specific event instead of whichever one
+            // happened to cross a 64 KiB boundary.
+            file: Some(BufWriter::with_capacity(0, sink)),
+            partial_path: PathBuf::from("(sink)"),
+            final_path: PathBuf::from("(sink)"),
+            renames: false,
+            scan_id: scan_id.to_string(),
+            seq: 0,
+            last_flush: Instant::now(),
+            terminal_written: false,
+            error: None,
+        }
     }
 
     pub fn partial_path(&self) -> &Path {
@@ -137,7 +173,7 @@ impl JsonlWriter {
             f.flush()?;
             drop(f);
         }
-        if !self.terminal_written {
+        if !self.terminal_written || !self.renames {
             return Ok(self.partial_path.clone());
         }
         std::fs::rename(&self.partial_path, &self.final_path)?;
