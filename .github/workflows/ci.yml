@@ -72,6 +72,52 @@ jobs:
           fi
           echo "static: no NEEDED entries"
 
+  coverage:
+    name: Coverage floor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with: { key: coverage }
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Measure
+        # Two integration tests deliberately kill a process under a resource limit, which
+        # truncates its .profraw and makes llvm-profdata refuse the whole merge. They are
+        # covered by the run above in the `check` job; excluding them here costs coverage
+        # of code that the in-process failure tests reach anyway.
+        run: |
+          set -euo pipefail
+          cargo llvm-cov --summary-only --json --output-path coverage.json \
+            --ignore-filename-regex 'testsupport' -- \
+            --skip writer_failure_exits_three --skip resource_pressure_is_reported
+
+      - name: Enforce the floor
+        # A floor, not a target. It exists so the failure paths that carried three
+        # integrity defects cannot quietly go uncovered again; raise it when the real
+        # figure has moved comfortably clear.
+        #
+        # Note the figure counts inline `#[cfg(test)]` modules, which are themselves
+        # fully covered, so it flatters production coverage by a few points. That is
+        # fine for a floor — it is measured the same way every run, so a regression
+        # still shows — but do not read it as the coverage of shipped code.
+        run: |
+          set -euo pipefail
+          FLOOR=85
+          pct=$(jq -r '.data[0].totals.regions.percent' coverage.json)
+          printf 'region coverage: %.2f%% (floor %s%%)\n' "$pct" "$FLOOR"
+          # An `if` rather than `awk ... && { ... }`: under `set -e` the latter fails the
+          # step when awk exits non-zero, which is exactly the passing case.
+          if awk -v p="$pct" -v f="$FLOOR" 'BEGIN { exit !(p < f) }'; then
+            echo "::error::region coverage $pct% is below the $FLOOR% floor"
+            exit 1
+          fi
+          echo "above the floor"
+
   msrv:
     name: Minimum supported Rust version
     runs-on: ubuntu-latest
