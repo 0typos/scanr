@@ -252,10 +252,8 @@ pub(crate) fn execute_with(
 
     // Written here rather than as they accumulate: probes complete out of order, so a
     // span is only whole once the scan is.
-    if let Some(spans) = collected.spans
-        && !spans.is_empty()
-    {
-        for body in spans.into_events() {
+    if let Some(mut spans) = collected.spans {
+        for body in spans.drain_events() {
             emit(&mut writer, &mut writer_error, "probe_span", body);
         }
     }
@@ -514,6 +512,13 @@ impl Collector<'_> {
 
             if last_progress.elapsed() >= self.progress_interval {
                 self.tick_progress(&counts, last_progress, last_count, writer, writer_error);
+                // Durability, not size: spans held only in memory are lost outright if
+                // the process is killed, where streamed rows were not.
+                if let Some(spans) = self.spans.as_mut() {
+                    for body in spans.drain_events() {
+                        emit(writer, writer_error, "probe_span", body);
+                    }
+                }
                 last_progress = Instant::now();
                 last_count = counts.completed;
             }

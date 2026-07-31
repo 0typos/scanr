@@ -5,7 +5,8 @@
 ## File naming
 
 ```
-scanr-results/scan-<epoch_ms>-<scan_id>.jsonl
+scanr-results/scan-<epoch_ms>-<scan_id>.jsonl.gz   # default
+scanr-results/scan-<epoch_ms>-<scan_id>.jsonl      # --no-compress
 ```
 
 `scan_id` is 8 lowercase hex characters (32 bits from `getrandom`). Epoch milliseconds
@@ -26,7 +27,7 @@ Seven, trimmed from the thirteen in the original brief.
 | `scan_config` | exactly 1, second | Fully resolved configuration |
 | `probe_span` | 0..n, before the terminal | Many probes that shared one outcome |
 | `target_resolved` | 0..n | Emitted only when DNS actually resolved something |
-| `probe_result` | 1 per host:port | The results |
+| `probe_result` | 1 per uncollapsed probe | The results |
 | `scan_progress` | 0..n | Periodic counters |
 | `scan_warning` | 0..n | Non-fatal operational conditions |
 | `scan_completed` \| `scan_interrupted` \| `scan_failed` | exactly 1, last | Terminal |
@@ -217,13 +218,13 @@ bug rather than an environmental condition:
 
 ## `probe_span`
 
-Written only when `--spans` (or `spans = true`) is set. Each one stands for many probes
-that shared an outcome, in place of one `probe_result` row each.
+Written by default; `--no-spans` (or `spans = false`) suppresses them. Each one stands
+for many probes that shared an outcome, in place of one `probe_result` row each.
 
 ```json
 {"type":"probe_span","seq":41,"ts":"...","scan_id":"a3f19c02",
  "state":"filtered","source":"timeout","reason":"connect timed out","protocol":"tcp",
- "attempts":2,"count":1047992,"probe_indices":[[0,523],[525,1048575]],
+ "attempts":2,"count":1048575,"probe_indices":[[0,523],[525,1048575]],
  "timing_ms":{"min":300.1,"mean":300.4,"max":300.9}}
 ```
 
@@ -239,12 +240,27 @@ port   = ports[probe_index % ports.count]
 The permutation decides only the order probes are *visited*, never this mapping, so the
 seed is not needed to expand a span.
 
+That form applies to a matrix scan. When `targets.mode` is `"pairs"` — which is what a
+resumed scan writes — `probe_index` indexes the embedded `targets.pairs` list directly:
+
+```
+endpoint = targets.pairs[probe_index]
+```
+
+The permutation decides only the order probes are *visited*, never either mapping, so the
+seed is not needed to expand a span.
+
 **What is kept:** exactly which endpoints got which outcome, `attempts`, aggregate
 timing, and the three-bucket accounting — a collapsed probe still counts as `completed`.
 `output remainder` expands spans, so resuming works identically either way.
 
-**What is lost:** the per-probe `ts`, and exact per-probe timing. That is the trade, and
-it is why this is opt-in.
+**What is lost:** the per-probe `ts`, and exact per-probe timing. That is the trade;
+`--no-spans` declines it.
+
+Spans are drained on the progress cadence rather than held to the end, and flushed as
+critical events. Held in memory they would be lost outright by a killed process, where a
+streamed `probe_result` was not — so a `.partial` record retains the probes its spans
+stood for, bounded by one progress interval.
 
 **What is never collapsed:** `open` (the result the scan exists to find), `error`
 (something that needs reading), any probe that hit resource pressure, and any probe whose

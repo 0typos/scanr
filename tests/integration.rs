@@ -11,24 +11,6 @@ use serde_json::Value;
 
 const BIN: &str = env!("CARGO_BIN_EXE_scanr");
 
-/// Read a scan record, decompressing the default framed-gzip form.
-///
-/// Records are compressed unless a scan asks otherwise, so a test that reads one must
-/// cope with either shape — and reading the default shape is the point.
-fn record_text(path: &std::path::Path) -> String {
-    let bytes = std::fs::read(path).expect("record should be readable");
-    if bytes.starts_with(&[0x1f, 0x8b]) {
-        use std::io::Read as _;
-        let mut s = String::new();
-        flate2::read::MultiGzDecoder::new(&bytes[..])
-            .read_to_string(&mut s)
-            .expect("a finalized record decodes");
-        s
-    } else {
-        String::from_utf8(bytes).expect("record is UTF-8")
-    }
-}
-
 /// An IPv6 loopback listener, for the paths that only IPv6 reaches.
 fn open_port_v6() -> (TcpListener, SocketAddr) {
     let l = TcpListener::bind("[::1]:0").expect("IPv6 loopback should be available");
@@ -113,16 +95,8 @@ fn closed_port() -> SocketAddr {
 
 fn read_events(dir: &Path) -> Vec<Value> {
     let results = dir.join("out");
-    let file = std::fs::read_dir(&results)
-        .expect("output dir should exist")
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .find(|p| {
-            let n = p.file_name().unwrap_or_default().to_string_lossy();
-            n.starts_with("scan-") && !n.ends_with(".partial")
-        })
-        .expect("a finalized .jsonl should exist");
-    record_text(&file)
+    let file = scanr::testsupport::find_record(&results).expect("a finalized .jsonl should exist");
+    scanr::testsupport::record_text(&file)
         .lines()
         .map(|l| serde_json::from_str(l).expect("valid JSON per line"))
         .collect()
@@ -194,15 +168,7 @@ fn adhoc_scan_writes_a_verifiable_record() {
 
     // And the tool agrees the file is sound.
     let results_dir = d.path().join("out");
-    let f = std::fs::read_dir(&results_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .find(|p| {
-            let n = p.file_name().unwrap_or_default().to_string_lossy();
-            n.starts_with("scan-") && !n.ends_with(".partial")
-        })
-        .unwrap();
+    let f = scanr::testsupport::find_record(&results_dir).unwrap();
     let v = scanr(d.path(), &["output", "verify", f.to_str().unwrap()]);
     assert_eq!(code(&v), 0, "{}", stdout(&v));
     assert!(stdout(&v).contains("ok — record is complete"));
@@ -318,16 +284,8 @@ fn a_seed_makes_probe_order_reproducible() {
         );
         assert_eq!(code(&out), 0, "run {i}: {}", stderr(&out));
 
-        let file = std::fs::read_dir(d.path().join(dir))
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .find(|p| {
-                let n = p.file_name().unwrap_or_default().to_string_lossy();
-                n.starts_with("scan-") && !n.ends_with(".partial")
-            })
-            .unwrap();
-        let mut m: Vec<(u64, u64)> = record_text(&file)
+        let file = scanr::testsupport::find_record(&d.path().join(dir)).unwrap();
+        let mut m: Vec<(u64, u64)> = scanr::testsupport::record_text(&file)
             .lines()
             .map(|l| serde_json::from_str::<Value>(l).unwrap())
             .filter(|e| e["type"] == "probe_result")
@@ -463,16 +421,8 @@ fn credentials_never_reach_the_record() {
     assert_eq!(code(&out), 0, "{}", stderr(&out));
 
     let results = d.path().join("out");
-    let file = std::fs::read_dir(&results)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .find(|p| {
-            let n = p.file_name().unwrap_or_default().to_string_lossy();
-            n.starts_with("scan-") && !n.ends_with(".partial")
-        })
-        .unwrap();
-    let body = record_text(&file);
+    let file = scanr::testsupport::find_record(&results).unwrap();
+    let body = scanr::testsupport::record_text(&file);
     assert!(
         !body.contains("s3cr3t-do-not-log"),
         "the password leaked into the scan record"
@@ -638,15 +588,7 @@ fn output_remainder_round_trips_into_a_rescan() {
     );
     assert_eq!(code(&out), 0, "{}", stderr(&out));
 
-    let file = std::fs::read_dir(d.path().join("out"))
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .find(|p| {
-            let n = p.file_name().unwrap_or_default().to_string_lossy();
-            n.starts_with("scan-") && !n.ends_with(".partial")
-        })
-        .unwrap();
+    let file = scanr::testsupport::find_record(&d.path().join("out")).unwrap();
     let rem = scanr(d.path(), &["output", "remainder", file.to_str().unwrap()]);
     assert_eq!(code(&rem), 0, "{}", stderr(&rem));
     assert!(stdout(&rem).trim().is_empty(), "{}", stdout(&rem));
@@ -659,7 +601,7 @@ fn output_remainder_round_trips_into_a_rescan() {
     // Now simulate an interrupted scan by dropping two probe_result lines, and check the
     // round trip re-probes exactly those endpoints and nothing else. This is the property
     // that justifies not having a `resume` command at all.
-    let text = record_text(&file);
+    let text = scanr::testsupport::record_text(&file);
     let mut kept = Vec::new();
     let mut dropped = Vec::new();
     for line in text.lines() {
@@ -731,16 +673,8 @@ fn output_remainder_round_trips_into_a_rescan() {
     );
     assert_eq!(code(&again), 0, "{}", stderr(&again));
 
-    let file2 = std::fs::read_dir(d.path().join("out2"))
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .find(|p| {
-            let n = p.file_name().unwrap_or_default().to_string_lossy();
-            n.starts_with("scan-") && !n.ends_with(".partial")
-        })
-        .unwrap();
-    let events: Vec<Value> = record_text(&file2)
+    let file2 = scanr::testsupport::find_record(&d.path().join("out2")).unwrap();
+    let events: Vec<Value> = scanr::testsupport::record_text(&file2)
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
@@ -828,15 +762,7 @@ fn the_default_record_is_compressed_and_collapsed_and_still_verifies() {
     );
     assert_eq!(code(&out), 0, "{}", stderr(&out));
 
-    let file = std::fs::read_dir(d.path().join("out"))
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .find(|p| {
-            let n = p.file_name().unwrap_or_default().to_string_lossy();
-            n.starts_with("scan-") && !n.ends_with(".partial")
-        })
-        .expect("a finalized record");
+    let file = scanr::testsupport::find_record(&d.path().join("out")).expect("a finalized record");
 
     assert!(
         file.to_string_lossy().ends_with(".jsonl.gz"),
@@ -849,7 +775,7 @@ fn the_default_record_is_compressed_and_collapsed_and_still_verifies() {
         "and is really gzip, not just named so"
     );
 
-    let events: Vec<Value> = record_text(&file)
+    let events: Vec<Value> = scanr::testsupport::record_text(&file)
         .lines()
         .map(|l| serde_json::from_str(l).expect("valid JSON per line"))
         .collect();
@@ -885,6 +811,65 @@ fn the_default_record_is_compressed_and_collapsed_and_still_verifies() {
         stderr(&rem).contains("0 of 202 endpoints"),
         "a complete scan has nothing outstanding: {}",
         stderr(&rem)
+    );
+}
+
+/// A hard kill must not lose the probes a span stands for.
+///
+/// Spans accumulate in memory, so the first version wrote them once at the end: a
+/// SIGKILLed scan recovered its header and nothing else, where every streamed
+/// `probe_result` used to survive. They are now drained on the progress cadence and
+/// flushed as critical events.
+#[test]
+fn a_sigkilled_scan_keeps_the_probes_its_spans_stood_for() {
+    use std::process::Stdio;
+
+    let d = tempfile::tempdir().unwrap();
+    let mut child = Command::new(BIN)
+        .args([
+            "run",
+            "--targets",
+            "192.0.2.0/24",
+            "--ports",
+            "80,443",
+            "--connect-timeout",
+            "400ms",
+            "--concurrency",
+            "64",
+            "--output-dir",
+            "out",
+            "-q",
+        ])
+        .current_dir(d.path())
+        .env("XDG_CONFIG_HOME", d.path().join("xdg"))
+        .env("NO_COLOR", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("scanr should start");
+
+    // Past the first progress tick, which is when spans are drained.
+    std::thread::sleep(std::time::Duration::from_millis(6_500));
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let partial = std::fs::read_dir(d.path().join("out"))
+        .expect("output dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.to_string_lossy().ends_with(".partial"))
+        .expect("a killed scan leaves a .partial record");
+
+    let covered: u64 = scanr::testsupport::record_text(&partial)
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|e| e["type"] == "probe_span")
+        .filter_map(|e| e["count"].as_u64())
+        .sum();
+    assert!(
+        covered > 0,
+        "a killed scan must retain the probes it already made, got none in {}",
+        partial.display()
     );
 }
 

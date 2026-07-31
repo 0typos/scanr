@@ -22,6 +22,12 @@ pub const SCHEMA_VERSION: u32 = 1;
 const FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Events whose loss would make the file uninterpretable are flushed immediately.
+///
+/// `probe_span` is here because it is the only record that many probes happened at all.
+/// The time-based flush cannot cover it: when spans are on, `emit` is called only at
+/// progress ticks, so the 250 ms rule — which is checked inside `emit` — never fires
+/// between them, and a span written at one tick sat unflushed until the next. A scan
+/// killed in between lost every probe it stood for.
 fn is_critical(kind: &str) -> bool {
     matches!(
         kind,
@@ -31,6 +37,7 @@ fn is_critical(kind: &str) -> bool {
             | "scan_interrupted"
             | "scan_failed"
             | "scan_warning"
+            | "probe_span"
     )
 }
 
@@ -90,9 +97,13 @@ impl<W: Write> GzFrames<W> {
         }
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         enc.write_all(&self.buf)?;
-        self.inner.write_all(&enc.finish()?)?;
+        let frame = enc.finish()?;
+        // Cleared before the write, not after. On a failed write those bytes are lost
+        // either way, and keeping them would re-emit the whole frame on the next flush
+        // and again on drop — appending duplicate members after a truncated one, which
+        // stops `MultiGzDecoder` at the truncation and buries the rest.
         self.buf.clear();
-        Ok(())
+        self.inner.write_all(&frame)
     }
 }
 

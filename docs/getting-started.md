@@ -130,13 +130,13 @@ act on.
 ```console
 $ scanr run internal-web --all
 scanr 0.1.0 — internal-web via socks5 127.0.0.1:1080 — 3 probes (1 targets x 3 ports)
-  scan 0e1a180b  seed 950f58a8b869db32  concurrency 512  -> ./scanr-results/scan-1785455411611-0e1a180b.jsonl.partial
+  scan 0e1a180b  seed 950f58a8b869db32  concurrency 512  -> ./scanr-results/scan-1785455411611-0e1a180b.jsonl.gz.partial
 127.0.0.1:8080/tcp open http-proxy 0.6ms
 127.0.0.1:8443/tcp open https-alt 0.5ms
 127.0.0.1:9999/tcp closed 0.4ms
 
 completed in 0.01s — 2 open, 1 closed, 0 filtered, 0 error (3 of 3 probed)
-  record: ./scanr-results/scan-1785455411611-0e1a180b.jsonl
+  record: ./scanr-results/scan-1785455411611-0e1a180b.jsonl.gz
 ```
 
 Without `--all` only open ports print, which is the default. Either way **the record keeps
@@ -156,8 +156,8 @@ complete record saying it was interrupted and exactly how much it got through.
 Every run writes one, without being asked.
 
 ```console
-$ scanr output verify scanr-results/scan-1785455411611-0e1a180b.jsonl
-scanr-results/scan-1785455411611-0e1a180b.jsonl
+$ scanr output verify scanr-results/scan-1785455411611-0e1a180b.jsonl.gz
+scanr-results/scan-1785455411611-0e1a180b.jsonl.gz
   6 events
   terminal: scan_completed
   3 probe results
@@ -169,7 +169,7 @@ That checks the file is structurally sound, that the counts reconcile, and that 
 credential leaked into it.
 
 ```console
-$ scanr output summarize scanr-results/scan-*.jsonl*
+$ scanr output summarize scanr-results/scan-*.jsonl.gz
   seed            950f58a8b869db32
   result          scan_completed (natural)
   duration        0.01s
@@ -180,13 +180,14 @@ open ports:
   127.0.0.1:8443/tcp  https-alt
 ```
 
-A file still named `.jsonl.partial` means the process died before finalizing. The results
-in it are valid; `verify` will tell you it was truncated.
+A file still named `.partial` means the process died before finalizing. The results in it
+are valid; `verify` will tell you it was truncated. With the default settings that is
+`scan-<...>.jsonl.gz.partial`.
 
 ## 6. If it was interrupted
 
 ```console
-scanr output remainder scanr-results/scan-*.jsonl* | scanr run --pairs -
+scanr output remainder scanr-results/scan-*.jsonl.gz | scanr run --pairs -
 ```
 
 That re-probes precisely the endpoints that were never reported — not whole targets — so a
@@ -195,7 +196,7 @@ host whose first two ports completed resumes with only the rest.
 The new record names the one it continues, so the two halves stay connected:
 
 ```console
-$ scanr output verify scanr-results/scan-*.jsonl* | grep resumed
+$ scanr output verify scanr-results/scan-*.jsonl.gz | grep resumed
   resumed from scan a7b012c0
 ```
 

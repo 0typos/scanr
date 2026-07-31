@@ -16,7 +16,7 @@ completed in 2.31s — 0 open, 0 closed, 0 filtered, 64 error (64 of 64 probed)
 Look at the reason on a result to find out which case it is:
 
 ```console
-$ zcat -f scan-*.jsonl* | jq -r 'select(.type=="probe_result" and .state=="error") | .reason' | sort | uniq -c
+$ zcat -f scan-*.jsonl.gz | jq -r 'select(.type=="probe_result" and .state=="error") | .reason' | sort | uniq -c
 ```
 
 ## `out of file descriptors`
@@ -113,13 +113,13 @@ address, not the destination's — measured as literally `0.0.0.0` from `ssh -D`
 address actually probed is not knowable. Use `--dns local` if you need it recorded, at the
 cost of leaking queries and possibly resolving differently than the far side.
 
-## The scan record ends in `.jsonl.partial`
+## The scan record ends in `.partial`
 
 The process died without writing a terminal event. The results in it are still valid;
 `scanr output verify` will tell you it was truncated:
 
 ```console
-$ scanr output verify scanr-results/scan-*.jsonl.partial
+$ scanr output verify scanr-results/scan-*.partial
   problem: no terminal event — the scan did not finish writing (process died?)
   problem: file still has the .partial suffix, meaning the process never finalized it
 ```

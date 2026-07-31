@@ -109,7 +109,7 @@ Stands for many probes that shared an outcome.
 ```json
 {"type":"probe_span","seq":41,"ts":"2026-07-31T12:42:16.049Z","scan_id":"a3f19c02",
  "state":"filtered","source":"timeout","reason":"connect timed out","protocol":"tcp",
- "attempts":2,"count":1047992,"probe_indices":[[0,523],[525,1048575]],
+ "attempts":2,"count":1048575,"probe_indices":[[0,523],[525,1048575]],
  "timing_ms":{"min":300.1,"mean":300.4,"max":300.9}}
 ```
 
@@ -123,6 +123,16 @@ port   = ports[probe_index % ports.count]
 
 The permutation seed affects only the order probes were *visited*, never that mapping, so
 expanding a span needs nothing but `scan_config`.
+
+That form applies to a matrix scan. When `targets.mode` is `"pairs"` — which is what a
+resumed scan writes — `probe_index` indexes the embedded `targets.pairs` list directly:
+
+```
+endpoint = targets.pairs[probe_index]
+```
+
+The permutation decides only the order probes are *visited*, never either mapping, so the
+seed is not needed to expand a span.
 
 A collapsed probe still counts as `completed` in the terminal event, and
 `scanr output remainder` expands spans, so resuming works the same either way. What you
@@ -153,7 +163,7 @@ Emitted during the scan, at most once each, with `detail.remediation`:
 | `proxy_saturation` | the proxy stopped accepting connections |
 
 ```console
-zcat -f scan-*.jsonl* | jq -r 'select(.type=="scan_warning") | "\(.code)\t\(.message)"'
+zcat -f scan-*.jsonl.gz | jq -r 'select(.type=="scan_warning") | "\(.code)\t\(.message)"'
 ```
 
 Seeing `fidelity_open_only`, `proxy_saturation`, or either `*_pressure` code means some
@@ -184,22 +194,22 @@ Three buckets, summing to `planned`:
 Open ports, as `host:port`:
 
 ```console
-zcat -f scan-*.jsonl* | jq -r 'select(.type=="probe_result" and .state=="open") | "\(.target):\(.port)"'
+zcat -f scan-*.jsonl.gz | jq -r 'select(.type=="probe_result" and .state=="open") | "\(.target):\(.port)"'
 ```
 
 Only verdicts you can trust as `closed`:
 
 ```console
-zcat -f scan-*.jsonl* | jq -r 'select(.type=="probe_result" and .state=="closed" and .source=="local_stack")
+zcat -f scan-*.jsonl.gz | jq -r 'select(.type=="probe_result" and .state=="closed" and .source=="local_stack")
        | "\(.target):\(.port)"'
 ```
 
 Did it finish, and what settings produced it?
 
 ```console
-zcat -f scan-*.jsonl* | jq -r 'select(.counts)
+zcat -f scan-*.jsonl.gz | jq -r 'select(.counts)
        | "\(.type) \(.termination) \(.counts.completed)/\(.counts.planned)"'
-zcat -f scan-*.jsonl* | jq -r 'select(.type=="scan_config") | .timing, .transport, .permutation'
+zcat -f scan-*.jsonl.gz | jq -r 'select(.type=="scan_config") | .timing, .transport, .permutation'
 ```
 
 Diff two scans for ports that changed:
@@ -215,13 +225,13 @@ diff old.jsonl.gz.st new.jsonl.gz.st
 Which build produced this record:
 
 ```console
-zcat -f scan-*.jsonl* | jq -r 'select(.type=="scan_started") | "\(.tool_version) \(.git_commit) \(.target_triple)"'
+zcat -f scan-*.jsonl.gz | jq -r 'select(.type=="scan_started") | "\(.tool_version) \(.git_commit) \(.target_triple)"'
 ```
 
 Slowest responders:
 
 ```console
-zcat -f scan-*.jsonl* | jq -r 'select(.type=="probe_result" and .state=="open")
+zcat -f scan-*.jsonl.gz | jq -r 'select(.type=="probe_result" and .state=="open")
        | [.timing_ms.total, "\(.target):\(.port)"] | @tsv' | sort -rn | head
 ```
 
@@ -232,7 +242,7 @@ expanded matrix — a /16 × 1000 ports is 65M probes. With the recorded permuta
 that is enough to reproduce the scan exactly:
 
 ```console
-cfg() { zcat -f scan-*.jsonl* | jq -r "select(.type==\"scan_config\")|$1"; }
+cfg() { zcat -f scan-*.jsonl.gz | jq -r "select(.type==\"scan_config\")|$1"; }
 scanr run --targets "$(cfg '.targets.spec[]')" \
           --ports   "$(cfg '.ports.spec')" \
           --seed    "$(cfg '.permutation.seed')"
@@ -247,7 +257,7 @@ not just what ran but why.
 lines, which `run --pairs` consumes:
 
 ```console
-scanr output remainder scan-*.jsonl* | scanr run --pairs -
+scanr output remainder scan-*.jsonl.gz | scanr run --pairs -
 ```
 
 This probes precisely what is outstanding — not whole targets — so a target whose first

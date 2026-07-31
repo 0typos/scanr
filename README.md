@@ -233,22 +233,27 @@ With no profile selected, the default follows the transport: `proxy` for SOCKS5,
 
 ## The scan record
 
-Every run writes `scanr-results/scan-<epoch_ms>-<scan_id>.jsonl`. It is
-`.jsonl.partial` while running and renamed on the terminal event, so a file still named
-`.partial` means the process died without finalizing.
+Every run writes `scanr-results/scan-<epoch_ms>-<scan_id>.jsonl.gz`, carrying `.partial`
+while running and renamed on the terminal event — so a file still named `.partial` means
+the process died without finalizing.
 
-Seven event types; `scan_started` first, `scan_config` second, exactly one terminal
+Records are gzip and repeated outcomes are collapsed by default; `--no-compress` and
+`--no-spans` give plain JSONL with one row per probe. `zcat`, `zless` and every
+`scanr output` command read either form. Note that with spans on, `probe_result` does not
+cover every probe — see [docs/output-schema.md](docs/output-schema.md).
+
+Eight event types; `scan_started` first, `scan_config` second, exactly one terminal
 event (`scan_completed` / `scan_interrupted` / `scan_failed`) last, and nothing after it.
 
 ```console
-$ scanr output verify scanr-results/scan-1785294704201-a3f19c02.jsonl
+$ scanr output verify scanr-results/scan-1785294704201-a3f19c02.jsonl.gz
   61 events
   terminal: scan_interrupted
   56 probe results
 ok — record is complete and internally consistent
 
-$ scanr output summarize scanr-results/scan-*.jsonl*
-$ scanr output remainder scanr-results/scan-*.jsonl* | scanr run --pairs -
+$ scanr output summarize scanr-results/scan-*.jsonl.gz
+$ scanr output remainder scanr-results/scan-*.jsonl.gz | scanr run --pairs -
 ```
 
 The config event embeds the **canonical unexpanded** target spec plus counts, never the
