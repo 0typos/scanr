@@ -371,8 +371,8 @@ destination. It is deliberately conservative — it clears 16 where a real scan 
 24 — and worded as "what this test observed", not "the maximum safe value". Opt-in,
 because it generates real traffic.
 
-### D26 — Scale validated at 10^6 probes; gzip remains deferred but now has numbers
-**Status:** accepted · gzip **deferred, revisit trigger tightened**
+### D26 — Scale validated at 10^6 probes; gzip deferred, then adopted
+**Status:** accepted · gzip **no longer deferred — shipped as `--compress`, see D28**
 
 Measured on loopback, which is the only place a million-probe scan can be run without
 authorization concerns — all of `127.0.0.0/8` is locally routable, giving 16.7M addresses.
@@ -420,3 +420,55 @@ than absence of panics: a failed handshake must never report `open`, and must al
 carry a reason a human can read.
 
 66 million executions, clean.
+
+### D28 — Record compression is opt-in framed gzip, pure Rust
+
+**Status:** accepted · **Alternatives rejected:** zstd; a single gzip stream; on by default
+
+D26 deferred compression with numbers. Reading a 374 MB record back turned out to cost
+4.2 GB, and fixing that exposed how much of the file is pure redundancy, so it was taken.
+
+* **Framed, not streamed.** One gzip member per 256 KiB or per critical-event flush.
+  Concatenated members are valid gzip, so `zcat` and friends are unaffected, and a killed
+  scan still decodes up to its last completed frame. A single stream would be unreadable
+  past its start — paying for compression precisely when a `.partial` record matters most.
+* **gzip, not zstd.** Measured on one genuine 12 MB record: gzip -6 20.1x, zstd -3 18.0x,
+  zstd -9 22.4x, zstd -19 26.1x at 100x the time. About 11% at comparable speed. The
+  mainstream `zstd` crate binds a vendored C library, and a musl C toolchain would destroy
+  the static build (D19); pure-Rust zstd encoders exist but are young, and a compressor
+  defect here means unreadable evidence. `flate2` on `rust_backend` keeps the tree free of
+  C — verified: 0 `NEEDED` entries in the musl binary.
+* **Off by default.** A record is a text file people grep. Switching that silently on size
+  is the hidden behaviour this tool avoids.
+
+**Revisit trigger:** a widely-deployed pure-Rust zstd encoder, or span encoding landing
+(which would beat any compressor on homogeneous scans by orders of magnitude).
+
+### D29 — `ssh -D` gets its own profile family
+
+**Status:** accepted · **Alternative rejected:** continuing to point `ssh -D` at
+`proxy-careful`
+
+Measured against OpenSSH 10.2p1 through a real `ssh -D` tunnel. `ssh -D` is not a normal
+SOCKS5 proxy in three ways, and the proxy profiles get all three wrong:
+
+* **Its listener is local.** `tcp_tw_reuse = 2` exempts loopback, so the ~470/s ephemeral
+  ceiling behind `proxy`'s `rate = 400` does not apply. That cap was the entire cost:
+  4,000 probes took **80 s** under `proxy-careful` (rate 50), **10 s** under `proxy`
+  (rate 400), and **0.16 s** with the cap removed. Every probe was reported in all three.
+* **The local legs are free.** SOCKS negotiation measured 0.4–0.5 ms, and a refused
+  destination returns in 0.4 ms because the channel simply closes. Only silent hosts ever
+  cost `connect_timeout`.
+* **Concurrency saturates at ~128, then cliffs.** Flat at ~28,500 probes/s from 32 to 128;
+  at 160 and above it drops to ~1,850. Three runs at each level. The cliff is a fixed ~1 s
+  stall, not a slower rate — 2,000 / 4,000 / 8,000 probes at concurrency 160 all cost
+  ~1.1 s — so it amortises on a large scan and dominates a small one. Nothing above 128
+  buys throughput, so all three profiles stay below it and a test enforces that.
+
+`ssh-fast` / `ssh` / `ssh-slow` raise concurrency as the link gets *slower*, which inverts
+the usual instinct: in-flight work needed is roughly rate x RTT, so a longer round trip
+needs more outstanding probes to stay busy, bounded by the cliff.
+
+**Caveat:** measured on loopback, so it characterises the OpenSSH client rather than a
+network. The cliff location may move with ssh version or server; the profiles sit well
+below it for that reason.
