@@ -127,16 +127,33 @@ pub fn builtin_profiles() -> Vec<BuiltinProfile> {
                 retry_delay: ms(250),
             },
         },
+        // A short timeout is only safe when something else covers a lost SYN.
+        //
+        // TCP's initial retransmission timeout is about one second (RFC 6298, Linux
+        // `TCP_TIMEOUT_INIT`), so a *single* attempt with a sub-second budget gives up
+        // before the first retransmit: one dropped SYN — routine on wifi — silently
+        // becomes `filtered`, and a missed open port is the worst answer this tool can
+        // give. The previous shape here, a 1s timeout with `retries: 0`, sat exactly in
+        // that trap.
+        //
+        // A retry is a *fresh* SYN rather than a longer wait, which is the cheaper way
+        // to survive loss. 300ms twice beats 1s once on both axes: measured 9.22s
+        // against 13.13s over an unresponsive /24 x 100 ports, and two independent
+        // chances instead of one.
+        //
+        // Still a LAN profile. On a path whose round trip genuinely exceeds 300ms both
+        // attempts fail and the host is reported filtered — use `direct` there, which is
+        // why its 2s default is not being shortened to match.
         BuiltinProfile {
             name: "direct-fast",
-            summary: "LAN scanning where latency is known to be low",
+            summary: "LAN scanning where round-trip latency is known to be under ~100ms",
             timing: Timing {
                 concurrency: 2048,
                 rate: 0,
                 proxy_connect_timeout: ms(3_000),
                 handshake_timeout: ms(5_000),
-                connect_timeout: ms(1_000),
-                retries: 0,
+                connect_timeout: ms(300),
+                retries: 1,
                 retry_delay: ms(100),
             },
         },
@@ -483,6 +500,26 @@ mod tests {
                 p.timing.connect_timeout >= p.timing.proxy_connect_timeout,
                 "{name}: the local leg should not outlast the remote one"
             );
+        }
+    }
+
+    /// A sub-second timeout must be paired with a retry.
+    ///
+    /// TCP's initial RTO is about a second, so a single attempt below that gives up
+    /// before the first SYN retransmit and turns one dropped packet into a missed open
+    /// port. `direct-fast` used to be 1s with no retry, which is that trap.
+    #[test]
+    fn a_short_timeout_always_has_a_second_chance() {
+        for p in builtin_profiles() {
+            if p.timing.connect_timeout < ms(1_000) {
+                assert!(
+                    p.timing.retries >= 1,
+                    "{}: {:?} is under TCP's initial RTO, so it needs a retry to survive \
+                     a dropped SYN",
+                    p.name,
+                    p.timing.connect_timeout
+                );
+            }
         }
     }
 

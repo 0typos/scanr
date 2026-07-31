@@ -94,7 +94,7 @@ Little's law an unreachable combination is easy to write: 2,000/s with a 1s time
 
 | profile | connect | for |
 |---|---|---|
-| `direct-fast` | 1s | LAN, latency known low |
+| `direct-fast` | 300ms x2 | LAN, round trip known under ~100ms |
 | `direct` | 2s | routed networks |
 | `proxy` | 5s | self-hosted proxy |
 | `proxy-careful` | 8s | rotating pools, unknown limits |
@@ -117,8 +117,18 @@ zcat -f scan-*.jsonl.gz | jq -r 'select(.type=="probe_span") | {state, count, ti
 ```
 
 Shortening `connect_timeout` is the most effective lever on a scan dominated by silent
-hosts, at the cost of false negatives on slow ones. `retries = 1` (the default, timeouts
-only) partly compensates.
+hosts, at the cost of false negatives on slow ones.
+
+**Do not take it below a second without a retry.** TCP's initial retransmission timeout
+is about one second (RFC 6298), so a single attempt with a shorter budget gives up before
+the first SYN retransmit — one dropped packet, routine on wifi, silently becomes
+`filtered`. A retry is a *fresh* SYN rather than a longer wait, which is the cheaper way
+to survive that: `direct-fast` is 300ms twice, measured at 9.22s against the 13.13s of
+the 1s-once it replaced, with two independent chances instead of one. A test enforces
+that no built-in profile pairs a sub-second timeout with `retries = 0`.
+
+That still assumes a LAN. On a path whose round trip genuinely exceeds 300ms both
+attempts fail and the host is reported `filtered`, which is why `direct` stays at 2s.
 
 ## glibc versus musl
 
