@@ -54,12 +54,23 @@ jobs:
       - name: Static binary is actually static
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: |
+          set -euo pipefail
+          BIN=target/${{ matrix.target }}/release/scanr
           cargo build --release --target ${{ matrix.target }}
-          file target/${{ matrix.target }}/release/scanr
+          file "$BIN"
           # The whole point of the musl build is needing nothing at runtime.
-          if ldd target/${{ matrix.target }}/release/scanr 2>&1 | grep -qv 'not a dynamic executable'; then
-            echo "::error::musl build is not static"; exit 1
+          #
+          # Tested via NEEDED entries rather than ldd output. ldd prints "statically
+          # linked" for a static-pie binary and "not a dynamic executable" for a
+          # classic static one, so matching on its text is fragile — an earlier version
+          # did exactly that and failed a build that was correctly static.
+          needed=$(readelf -d "$BIN" | grep -c NEEDED || true)
+          if [ "$needed" -ne 0 ]; then
+            readelf -d "$BIN" | grep NEEDED
+            echo "::error::musl build links $needed shared librar(ies); it is not static"
+            exit 1
           fi
+          echo "static: no NEEDED entries"
 
   msrv:
     name: Minimum supported Rust version
