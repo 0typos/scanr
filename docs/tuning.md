@@ -153,6 +153,24 @@ routinely scanning at this scale, piping through `gzip` afterwards is worth it.
 Memory is stable across a run: the million-probe scan held 17 MB resident from start to
 finish, the growth over the 5.8 MB baseline being the materialized target list.
 
+Reading a record back is also bounded, which took a fix to become true. `output`
+streams, so it does not matter how large the file is:
+
+| command | peak resident on the 374 MB record |
+|---|---|
+| `output summarize` | 2.7 MB |
+| `output verify` | 3.1 MB |
+| `output remainder` | 96 MB |
+
+`remainder` is the outlier because it must hold the set of endpoints already probed in
+order to subtract it — that set is the question being asked. The other two retain
+nothing but their counters, the config event, and, for `summarize`, the open ports it is
+about to print.
+
+Before this was fixed, all three loaded the whole record into memory first and needed
+**4.2 GB** for that 374 MB file — about 11× the file size. The tool could write a
+million-probe record on a laptop and then fail to read it back.
+
 ## Things that will not help
 
 - **More concurrency against a capped proxy.** It makes the loss worse; 3proxy at its

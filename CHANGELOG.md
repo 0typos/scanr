@@ -35,6 +35,9 @@ invited before then.
   that already completed. The resumed scan records `resumed_from`, so a scan split across
   an interruption stays traceable as one thing; the link travels through the pipe on its
   own, and `--resumed-from` sets it by hand for an edited list.
+- Record readers stream. `summarize`, `verify` and `remainder` hold single-digit
+  megabytes regardless of record size (96 MB for `remainder`, which must retain the
+  probed set), so the commands for inspecting a large scan work on a large scan.
 - `output verify` checks field *values* as well as structure — port range, `state` and
   `source` against their defined sets, `attempts` against `attempt_states`, `probe_index`
   against `probes_planned`, timings, and timestamps. A structurally perfect record can
