@@ -95,6 +95,27 @@ jobs:
           ulimit -n 4096
           cargo test
 
+  differential:
+    name: Agreement with nmap
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { key: differential }
+      - run: sudo apt-get update && sudo apt-get install -y nmap
+
+      # These are `#[ignore]`d so a machine without nmap still gets a clean `cargo test`,
+      # which meant nothing ran them and they rotted unnoticed: making spans the default
+      # broke all three, and it took someone asking to find out. An ignored test that
+      # nothing runs is decoration.
+      #
+      # `--test-threads=1` because each test binds its own fixture ports and shells out
+      # to nmap; running them concurrently makes the port bookkeeping racy.
+      - name: Differential against nmap
+        run: cargo test --test differential -- --ignored --test-threads=1
+
   coverage:
     name: Coverage floor
     runs-on: ubuntu-latest

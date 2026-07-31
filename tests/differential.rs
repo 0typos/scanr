@@ -1,18 +1,18 @@
-//! Differential testing against nmap.
+//! Agreement with nmap.
 //!
-//! Every other test in this repository checks scanr against scanr's own fixtures and my
-//! own model of how a proxy behaves. That catches inconsistency, not a systematically
-//! wrong idea. These tests compare verdicts against an independent implementation on
-//! identical targets, which is the only check here that could catch the classification
-//! logic being wrong in the same way everywhere.
+//! Two implementations agreeing is weak evidence — they can agree and both be wrong — so
+//! every comparison also checks both against the fixture that was deliberately
+//! constructed: a listener that is definitely open, a bound-then-dropped port that is
+//! definitely closed, and TEST-NET-1 which is definitely unroutable.
 //!
-//! Ignored by default: they need nmap installed and take a few seconds. Run with
+//! `#[ignore]`d so that `cargo test` stays clean on a machine without nmap. That means
+//! nothing runs them by default, which is exactly how all three came to be broken by the
+//! spans default without anyone noticing — so CI now installs nmap and runs them
+//! explicitly. Locally:
 //!
-//!     cargo test --test differential -- --ignored --nocapture
-//!
-//! They skip rather than fail when nmap is absent, so they are safe to leave enabled in
-//! an environment that does not have it.
-
+//! ```console
+//! cargo test --test differential -- --ignored --test-threads=1
+//! ```
 use std::collections::BTreeMap;
 use std::net::TcpListener;
 use std::process::Command;
@@ -106,6 +106,11 @@ fn scanr_states(
         "out",
         "--all",
         "-q",
+        // Per-probe rows, not spans. What is being compared here is the *verdict* for
+        // each endpoint, which the record format is orthogonal to — and a collapsed
+        // `closed` has no row to line up against nmap's. Span expansion has its own
+        // equivalence test in `verify`.
+        "--no-spans",
     ];
     args.extend_from_slice(extra);
 
@@ -297,6 +302,11 @@ fn a_proxied_scan_agrees_with_nmap_direct() {
             "out",
             "--all",
             "-q",
+            // Per-probe rows, not spans. What is being compared here is the *verdict* for
+            // each endpoint, which the record format is orthogonal to — and a collapsed
+            // `closed` has no row to line up against nmap's. Span expansion has its own
+            // equivalence test in `verify`.
+            "--no-spans",
         ])
         .current_dir(dir.path())
         .env("XDG_CONFIG_HOME", dir.path().join("xdg"))
