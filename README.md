@@ -43,8 +43,22 @@ cargo build --release                                    # ./target/release/scan
 cargo build --release --target x86_64-unknown-linux-musl  # static, no libc dependency
 ```
 
-Linux x86_64 only for now. The musl build is fully static (`static-pie`, ~2 MB) and
-needs no C toolchain.
+Linux x86_64 is the supported platform — the performance numbers are measured there and
+it is the only target with a static musl build (`static-pie`, ~2 MB, no C toolchain).
+
+**macOS** builds and passes its test suite in CI:
+
+```console
+cargo install --path .          # Apple Silicon or Intel
+ulimit -n 8192                  # macOS defaults to 256, under the default concurrency
+```
+
+Two caveats there. The host diagnostics that read `/proc` — the ephemeral-port range and
+`tcp_tw_reuse` — report as unknown, so the `ephemeral_budget` warning cannot fire; the
+`fd_budget` one still does. And there is no static build. See D3 in the
+[decision register](docs/design/01-decision-register.md).
+
+Windows is deferred, not planned.
 
 ## Quick start
 
