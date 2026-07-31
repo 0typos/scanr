@@ -63,7 +63,7 @@ The fully resolved plan, credentials redacted, each field tagged with provenance
 
 ```json
 {"type":"scan_config","seq":1,"ts":"...","scan_id":"a3f19c02",
- "scan_name":"internal-web","profile":"proxy",
+ "scan_name":"internal-web","profile":"proxy","resumed_from":null,
  "targets":{"spec":["10.20.30.0/24"],"exclude":["10.20.30.1"],"count":255,
             "expanded":false},
  "ports":{"spec":["80","443","8000-8999"],"count":1002},
@@ -87,6 +87,35 @@ The fully resolved plan, credentials redacted, each field tagged with provenance
 **The expanded target set is never embedded.** A /16 × 1000 ports is 65M probes; the
 canonical *spec* plus counts is what makes the scan reproducible, and the permutation
 seed makes the order reproducible too. `expanded: false` states this explicitly.
+
+### `resumed_from`
+
+The `scan_id` this scan continues, or `null` for a scan that continues nothing.
+
+A scan interrupted and then resumed produces two records. Without this field nothing
+connects them, and the record — the whole point of which is to answer what happened —
+cannot answer it across the join. Chasing `resumed_from` back through records
+reconstructs a scan split across any number of interruptions.
+
+It is populated without the user having to do anything: `scanr output remainder` emits a
+leading `# resumed-from: <scan-id>` comment, and `--pairs` reads it.
+
+```console
+$ scanr output remainder scan-...-a7b012c0.jsonl
+# resumed-from: a7b012c0
+192.0.2.0:80
+192.0.2.0:443
+```
+
+```console
+$ scanr output remainder old.jsonl | scanr run --pairs -   # link carried by the pipe
+```
+
+Every other consumer ignores it, because it is a comment in a list that already strips
+them. `--resumed-from <scan-id>` sets it by hand for a list that has been edited or
+reassembled, and takes precedence over the directive. Concatenating two remainders keeps
+the first origin: there is no single right answer, and preferring the last would be no
+better a guess.
 
 `transport.fidelity_source` is present for every transport type and is one of:
 

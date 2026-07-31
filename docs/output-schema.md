@@ -216,6 +216,33 @@ two ports completed resumes with only its remaining ports.
 reported, so whether they reached the network is unknown and re-probing is the safe
 choice.
 
+### The two records stay connected
+
+A resumed scan writes its own record, and that record names the one it continues:
+
+```console
+$ scanr output remainder scan-...-a7b012c0.jsonl | head -3
+# resumed-from: a7b012c0
+192.0.2.0:80
+192.0.2.0:443
+
+$ jq -r 'select(.type=="scan_config") | .resumed_from' scan-...-441e1980.jsonl
+a7b012c0
+```
+
+The link travels through the pipe on its own — the leading comment is provenance, not an
+endpoint, and `--pairs` reads it. `scanr output verify` prints it back:
+
+```
+  terminal: scan_completed
+  resumed from scan a7b012c0
+```
+
+Without this a scan split across an interruption would leave two files that only a human
+memory connects, which is a poor answer from a tool whose point is the record. If you
+have edited or reassembled a list and want to state its origin yourself, pass
+`--resumed-from <scan-id>`; it wins over the directive.
+
 A pair scan records `targets.mode = "pairs"` and embeds its endpoint list, since an
 explicit list has no compact spec. Above 50,000 pairs the list is omitted and
 `pairs_truncated` is set; `remainder` then refuses rather than returning a wrong answer.

@@ -227,6 +227,15 @@ pub fn verify(path: &Path) -> Result<VerifyReport, String> {
     // Field values, not just structure.
     check_values(&rec, &mut problems);
 
+    if let Some(parent) = rec
+        .events
+        .iter()
+        .find(|e| kind(e) == "scan_config")
+        .and_then(|c| c["resumed_from"].as_str())
+    {
+        notes.push(format!("resumed from scan {parent}"));
+    }
+
     notes.push(format!("{} probe results", commas(observed)));
     if rec.raw_lines != rec.events.len() {
         notes.push(format!("{} unparseable lines", rec.bad_lines.len()));
@@ -570,7 +579,7 @@ pub fn summarize(path: &Path) -> Result<String, String> {
 /// re-probed ports that had already completed — a weakness that undermined the argument
 /// for dropping resume in the first place. The record contains every probed pair, so the
 /// exact remainder was always derivable; only a way to express it was missing.
-pub fn remainder(path: &Path) -> Result<(Vec<String>, String), String> {
+pub fn remainder(path: &Path) -> Result<Remainder, String> {
     let rec = read(path)?;
     let config = rec
         .events
@@ -683,7 +692,45 @@ pub fn remainder(path: &Path) -> Result<(Vec<String>, String), String> {
         commas(expected.len() as u64),
         path.display()
     );
-    Ok((remaining, note))
+    Ok(Remainder {
+        endpoints: remaining,
+        // Carried separately rather than prepended to `endpoints`, so the list stays a
+        // list of endpoints and the count cannot be inflated by its own provenance.
+        scan_id: config["scan_id"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        note,
+    })
+}
+
+/// What `scanr output remainder` produces.
+#[derive(Debug)]
+pub struct Remainder {
+    /// Endpoints the scan intended to probe but never reported.
+    pub endpoints: Vec<String>,
+    /// The scan these came from, rendered as a leading `# resumed-from:` comment so
+    /// that piping into `--pairs` carries the link with no extra flag. Before this, a
+    /// scan split across an interruption left two records nothing could connect.
+    pub scan_id: Option<String>,
+    /// Human-facing summary, for stderr.
+    pub note: String,
+}
+
+impl Remainder {
+    /// The stdout form: directive first, then one endpoint per line.
+    pub fn render(&self) -> String {
+        let mut s = String::new();
+        if let Some(id) = &self.scan_id
+            && !self.endpoints.is_empty()
+        {
+            let _ = writeln!(s, "# resumed-from: {id}");
+        }
+        for e in &self.endpoints {
+            let _ = writeln!(s, "{e}");
+        }
+        s
+    }
 }
 
 #[cfg(test)]
@@ -995,6 +1042,52 @@ mod tests {
         assert!(port_problems[0].contains('4'), "{}", port_problems[0]);
     }
 
+    /// Without this a scan split across an interruption leaves two records that nothing
+    /// connects — the open question the original brief raised about resume linkage.
+    #[test]
+    fn remainder_leads_with_the_scan_it_came_from() {
+        let d = tempfile::tempdir().unwrap();
+        let mut e = good_events();
+        e.remove(5);
+        e.remove(4);
+        e[4]["counts"] = json!({"planned":4,"started":2,"completed":2,"not_started":2,
+                                "open":1,"closed":1,"filtered":0,"error":0,"retried":0});
+        let p = write(d.path(), "part.jsonl", &e);
+        let r = remainder(&p).unwrap();
+        let rendered: Vec<String> = r.render().lines().map(str::to_string).collect();
+        assert_eq!(rendered[0], "# resumed-from: a1");
+        // A directive, not an endpoint: it must not be counted as one.
+        assert_eq!(&rendered[1..], ["10.0.0.2:80", "10.0.0.3:80"]);
+        assert_eq!(r.endpoints, ["10.0.0.2:80", "10.0.0.3:80"]);
+        assert!(r.note.starts_with("2 of 4 endpoints"), "{}", r.note);
+    }
+
+    #[test]
+    fn a_complete_scan_emits_no_directive() {
+        let d = tempfile::tempdir().unwrap();
+        let p = write(d.path(), "done.jsonl", &good_events());
+        let r = remainder(&p).unwrap();
+        assert!(r.endpoints.is_empty(), "{:?}", r.endpoints);
+        assert!(r.scan_id.is_some(), "the origin is still known");
+        assert_eq!(r.render(), "", "nothing outstanding means no directive");
+        assert!(r.note.starts_with("0 of 4 endpoints"), "{}", r.note);
+    }
+
+    #[test]
+    fn verify_surfaces_the_resume_link() {
+        let d = tempfile::tempdir().unwrap();
+        let mut e = good_events();
+        e[1]["resumed_from"] = json!("beef1234");
+        let p = write(d.path(), "chained.jsonl", &e);
+        let r = verify(&p).unwrap();
+        assert!(r.problems.is_empty(), "{:?}", r.problems);
+        assert!(
+            r.notes.iter().any(|n| n == "resumed from scan beef1234"),
+            "{:?}",
+            r.notes
+        );
+    }
+
     #[test]
     fn summarize_lists_open_ports() {
         let d = tempfile::tempdir().unwrap();
@@ -1019,7 +1112,8 @@ mod tests {
                       "counts":{"planned":4,"started":4,"completed":2,"not_started":2,
                                 "open":1,"closed":1,"filtered":0,"error":0,"retried":0}});
         let p = write(d.path(), "part.jsonl", &e);
-        let (endpoints, note) = remainder(&p).unwrap();
+        let r = remainder(&p).unwrap();
+        let (endpoints, note) = (r.endpoints, r.note);
         // Exact endpoints now, not whole targets: the port is part of the answer.
         assert_eq!(endpoints, ["10.0.0.2:80", "10.0.0.3:80"]);
         assert!(note.contains("2 of 4 endpoints"), "{note}");
@@ -1033,7 +1127,7 @@ mod tests {
     fn remainder_is_empty_for_a_complete_scan() {
         let d = tempfile::tempdir().unwrap();
         let p = write(d.path(), "full.jsonl", &good_events());
-        let (targets, _) = remainder(&p).unwrap();
+        let targets = remainder(&p).unwrap().endpoints;
         assert!(targets.is_empty());
     }
 
@@ -1068,7 +1162,7 @@ mod tests {
                                 "error":0,"retried":0}}));
         let p = write(d.path(), "partial.jsonl", &e);
 
-        let (rem, _) = remainder(&p).unwrap();
+        let rem = remainder(&p).unwrap().endpoints;
         assert_eq!(
             rem,
             ["10.0.0.1:443", "10.0.0.1:8080"],
@@ -1097,7 +1191,7 @@ mod tests {
                              "error":0,"retried":0}}),
         ];
         let p = write(d.path(), "pairs.jsonl", &e);
-        let (rem, _) = remainder(&p).unwrap();
+        let rem = remainder(&p).unwrap().endpoints;
         // IPv6 stays bracketed so the output can be parsed back.
         assert_eq!(rem, ["10.0.0.1:8080", "[::1]:22"]);
     }

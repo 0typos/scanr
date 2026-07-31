@@ -239,6 +239,10 @@ pub struct ScanPlan {
     pub exclude_specs: Vec<String>,
     pub port_spec: String,
     pub resolved_hosts: Vec<ResolvedHost>,
+    /// The `scan_id` this scan continues, when it was built from another scan's
+    /// remainder. Without it a scan split across an interruption leaves two records
+    /// that cannot be connected.
+    pub resumed_from: Option<String>,
     pub seed: u64,
     pub open_only: bool,
     pub output_dir: PathBuf,
@@ -323,6 +327,7 @@ impl ScanPlan {
             target_specs: vec!["127.0.0.1".into()],
             exclude_specs: vec![],
             resolved_hosts: vec![],
+            resumed_from: None,
             seed: 1,
             open_only: false,
             output_dir: PathBuf::from("(unused)"),
