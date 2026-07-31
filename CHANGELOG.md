@@ -32,12 +32,21 @@ invited before then.
   accidentally recorded credentials; `summarize` and `remainder` alongside it.
 - Exact resumption: `output remainder` emits the endpoints that were never reported and
   `run --pairs` consumes them, so an interrupted scan resumes without re-probing ports
-  that already completed.
+  that already completed. The resumed scan records `resumed_from`, so a scan split across
+  an interruption stays traceable as one thing; the link travels through the pipe on its
+  own, and `--resumed-from` sets it by hand for an edited list.
+- `output verify` checks field *values* as well as structure — port range, `state` and
+  `source` against their defined sets, `attempts` against `attempt_states`, `probe_index`
+  against `probes_planned`, timings, and timestamps. A structurally perfect record can
+  still be untrue, and `remainder` would act on it.
 - Randomized probe order via a seeded Feistel permutation: O(1) memory, and exactly
   reproducible from the recorded seed via `--seed`.
 - Graceful interruption. First SIGINT stops scheduling and drains in-flight probes
   bounded by the connect timeout; second exits immediately. Either way the record is
   finalized, with `completed` / `abandoned` / `not_started` accounted separately.
+- A scan that fails says so. A write failure on any event type, and a scan worker dying,
+  both force `scan_failed` with a distinguishing `error_code` rather than being reported
+  as a natural completion.
 - Host diagnostics that name operational causes rather than errnos, with remediation
   derived from the sysctls actually present on the machine.
 - Four built-in profiles (`proxy-careful`, `proxy`, `direct`, `direct-fast`); the default
