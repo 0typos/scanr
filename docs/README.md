@@ -36,6 +36,7 @@ are changing the tool, or if you want to know why it does not do something.
 | [06-cli-spec.md](design/06-cli-spec.md) | Command tree, override allowlist, exit codes |
 | [07-milestones.md](design/07-milestones.md) | Implementation plan as executed |
 | [08-release-plan.md](design/08-release-plan.md) | What remains before a release, and what is deferred |
+| [09-review-2026-07.md](design/09-review-2026-07.md) | Post-publication review: findings, evidence, and the plan to address them |
 
 The decision register is the one to read first. It records the assumptions that turned out
 to be **wrong** as prominently as the ones that held — `ssh -D` does not collapse reply
