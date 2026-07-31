@@ -247,6 +247,9 @@ pub struct ScanPlan {
     pub open_only: bool,
     /// Write the record as framed gzip rather than plain JSONL.
     pub compress: bool,
+    /// Collapse repetitive `closed`/`filtered` outcomes into `probe_span` events
+    /// instead of one row each.
+    pub spans: bool,
     pub output_dir: PathBuf,
     pub provenance: Provenance,
     pub warnings: Vec<PlanWarning>,
@@ -333,6 +336,7 @@ impl ScanPlan {
             seed: 1,
             open_only: false,
             compress: false,
+            spans: false,
             output_dir: PathBuf::from("(unused)"),
             provenance: Provenance::default(),
             warnings: vec![],

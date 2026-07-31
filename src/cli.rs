@@ -253,6 +253,11 @@ struct OverrideArgs {
     #[arg(long)]
     compress: bool,
 
+    /// Collapse repetitive closed/filtered results into span events instead of one row
+    /// each. Much smaller records; drops per-probe timestamps for those results.
+    #[arg(long)]
+    spans: bool,
+
     /// Permit target sets larger than 4,000,000 addresses
     #[arg(long)]
     allow_large_range: bool,
@@ -291,6 +296,7 @@ impl OverrideArgs {
             output_dir: self.output_dir.clone(),
             seed: self.seed,
             compress: self.compress.then_some(true),
+            spans: self.spans.then_some(true),
             open_only: if self.all {
                 Some(false)
             } else if self.open_only {

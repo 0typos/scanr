@@ -35,7 +35,7 @@ impl fmt::Display for State {
 
 /// Where a classification came from. This is what keeps the tool honest about proxies
 /// that collapse every failure into one reply code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Source {
     /// The local TCP stack gave a definitive answer.
     LocalStack,

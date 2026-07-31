@@ -51,6 +51,9 @@ pub struct Overrides {
     /// Write the record as framed gzip. Off unless asked for: a plain record is
     /// greppable, and that is worth keeping as the default.
     pub compress: Option<bool>,
+    /// Collapse repetitive outcomes into spans. Off unless asked for: it trades
+    /// per-probe timestamps for size.
+    pub spans: Option<bool>,
     pub allow_large_range: bool,
 }
 
@@ -148,6 +151,7 @@ pub fn resolve(
     let output_dir = resolve_output_dir(files, scan_name, ov, &mut prov);
     let open_only = resolve_open_only(files, scan_name, ov, &mut prov);
     let compress = resolve_compress(files, scan_name, ov, &mut prov);
+    let spans = resolve_spans(files, scan_name, ov, &mut prov);
     let seed = resolve_seed(ov, &mut prov);
 
     let port_spec = port_spec_override.unwrap_or_else(|| PortSummary(&ports).to_string());
@@ -171,6 +175,7 @@ pub fn resolve(
         seed,
         open_only,
         compress,
+        spans,
         output_dir,
         provenance: prov,
         warnings,
@@ -423,6 +428,36 @@ fn resolve_compress(
                 }
                 None => {
                     prov.set("compress", Origin::Default);
+                    false
+                }
+            }
+        }
+    }
+}
+
+/// Collapsing bulk outcomes into spans. Defaults off: it drops per-probe timestamps,
+/// which is a real loss of forensic detail and should be asked for rather than assumed.
+fn resolve_spans(
+    files: &Layered,
+    scan_name: Option<&str>,
+    ov: &Overrides,
+    prov: &mut Provenance,
+) -> bool {
+    match ov.spans {
+        Some(v) => {
+            prov.set("spans", Origin::Cli);
+            v
+        }
+        None => {
+            let from_scan =
+                scan_name.and_then(|n| files.pick(|c| c.scans.get(n).and_then(|s| s.spans)));
+            match from_scan.or_else(|| files.pick(|c| c.defaults.spans)) {
+                Some((v, path)) => {
+                    prov.set("spans", Origin::Defaults(path));
+                    v
+                }
+                None => {
+                    prov.set("spans", Origin::Default);
                     false
                 }
             }
