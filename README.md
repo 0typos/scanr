@@ -285,6 +285,44 @@ Counts distinguish three buckets, which sum to `planned`:
 | 3 | output writer failure |
 | 130 | interrupted by SIGINT; results finalized |
 
+## How fast, next to nmap
+
+A `/24` × nmap's top 100 ports — 25,600 probes. Both doing **unprivileged TCP connect
+scans**, so the technique is identical. nmap 7.92, `-sT -T5 --min-rate 10000
+--max-retries 0 -Pn -n`.
+
+**Responsive hosts** (every port refused):
+
+| | wall | probes/s |
+|---|---|---|
+| `scanr`, default profile | **0.17 s** | ~150,000 |
+| nmap `-T5` | 0.52 s | ~49,000 |
+
+Both reported exactly the same 259 open ports — the gap is not `scanr` cutting corners.
+
+**Unresponsive hosts** (every probe times out), where the comparison is really about
+timeouts:
+
+| | wall |
+|---|---|
+| `scanr --profile direct-fast` (1 s timeout) | 13.10 s |
+| nmap `-T5` | 7.16 s |
+| `scanr --connect-timeout 300ms --concurrency 4096` | **2.23 s** |
+
+nmap wins the first line and it is not mysterious: `-T5` caps its retransmit timeout at
+300 ms while `direct-fast` waits a full second. Told to give up as fast as nmap does,
+`scanr` is **3.2× quicker** — the same ratio as the responsive case.
+
+The real difference is that **nmap adapts its timeout from observed round-trip times and
+`scanr` does not**. That is deliberate (clear limits over hidden magic), and it has a
+cost: on an unfamiliar network nmap self-tunes and you have to set `--connect-timeout`.
+`scanr plan` projects the duration so the consequence is visible before you spend it.
+
+Measured on loopback and TEST-NET on one machine, so it compares the tools rather than a
+network. As root, nmap's `-sS` SYN scan is a different and faster technique that `scanr`
+does not implement. And `scanr` is writing a complete JSONL record throughout, which
+nmap is not.
+
 ## Performance notes
 
 Probe sockets are closed with `SO_LINGER{on,0}`, sending RST instead of FIN and

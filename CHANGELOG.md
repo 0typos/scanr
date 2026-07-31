@@ -89,7 +89,11 @@ invited before then.
 
 ### Known limitations
 
-- Linux x86_64 only. Windows and macOS are deferred, not planned.
+- Linux x86_64 is the supported platform; the performance numbers are measured there and
+  it is the only target with a static musl build. macOS builds and its test suite runs in
+  CI, but the host diagnostics that read `/proc` — the ephemeral-port range and
+  `tcp_tw_reuse` — report as unknown there, so the `ephemeral_budget` warning cannot
+  fire. Windows is deferred, not planned.
 - SOCKS4 and SOCKS4a are unsupported by design: four reply codes cannot distinguish a
   closed port from a filtered one.
 - One proxy per scan. Multiple proxies and proxy chains are deferred.

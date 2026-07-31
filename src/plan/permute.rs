@@ -101,13 +101,32 @@ impl Permutation {
     }
 }
 
+/// Fill `buf` from the OS entropy source, reporting whether it succeeded.
+///
+/// Two spellings because there is no one call: Linux has `getrandom(2)`, and Apple
+/// platforms have `getentropy(2)` instead — the sole thing that stopped this crate
+/// compiling for macOS.
+#[cfg(target_os = "linux")]
+fn os_entropy(buf: &mut [u8]) -> bool {
+    // SAFETY: getrandom writes at most buf.len() bytes into a buffer we own.
+    let rc = unsafe { libc::getrandom(buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) };
+    rc == buf.len() as isize
+}
+
+#[cfg(target_vendor = "apple")]
+fn os_entropy(buf: &mut [u8]) -> bool {
+    // SAFETY: getentropy writes exactly buf.len() bytes into a buffer we own, and is
+    // documented to accept up to 256 at a time.
+    let rc = unsafe { libc::getentropy(buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+    rc == 0
+}
+
 /// Draw a seed from the OS. Used when the user has not pinned one with `--seed`.
 pub fn random_seed() -> u64 {
     let mut buf = [0u8; 8];
-    // getrandom(2) cannot fail for an 8-byte buffer with no flags, but fall back to a
-    // clock-derived seed rather than panicking in the unreachable case.
-    let rc = unsafe { libc::getrandom(buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) };
-    if rc == buf.len() as isize {
+    // The OS call cannot fail for an 8-byte buffer, but fall back to a clock-derived
+    // seed rather than panicking in the unreachable case.
+    if os_entropy(&mut buf) {
         u64::from_ne_bytes(buf)
     } else {
         mix(std::time::SystemTime::now()

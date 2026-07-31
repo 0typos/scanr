@@ -51,11 +51,27 @@ machines would be hand-written regardless. **SOCKS-primary** makes the state-mac
 cost apply to the dominant code path rather than an exotic one. It costs the most of
 the three options and its distinguishing benefit does not apply here.
 
-### D3 — Platform: Linux x86_64 only; glibc and static musl
-**Status:** accepted
+### D3 — Platform: Linux x86_64 first; macOS builds and is tested, Windows deferred
+**Status:** accepted · **amended:** macOS was deferred, then turned out to cost one call
 
-Windows and macOS deferred. Removes IOCP/kqueue, console control events, and
-cross-platform CI from v1 entirely.
+Windows stays deferred: it removes IOCP, console control events and a third CI matrix
+from v1 entirely.
+
+macOS was deferred with it, on the assumption that supporting it meant kqueue and a
+cross-platform rewrite. That was wrong — there is no event loop to port, because the I/O
+model is blocking sockets on threads (D1). Compile-checking `aarch64-apple-darwin`
+turned up exactly **one** error: `libc::getrandom` does not exist on Apple platforms,
+which have `getentropy` instead. Both spellings behind a `cfg`, and both Apple targets
+build.
+
+A `macos-latest` CI job now runs clippy and the full suite, so this is a tested claim.
+What macOS does *not* get is the host diagnostics: `ephemeral_range` and `tcp_tw_reuse`
+are read from `/proc`, so they report as unknown and the `ephemeral_budget` warning
+cannot fire. `RLIMIT_NOFILE` still works, so the `fd_budget` warning does — which matters
+there, because macOS defaults that limit to 256, well below the default concurrency.
+
+Linux remains the platform the performance numbers are measured on and the only one with
+a static musl build.
 
 ### D4 — SOCKS5 only; SOCKS4 and SOCKS4a dropped from v1
 **Status:** accepted

@@ -72,6 +72,29 @@ jobs:
           fi
           echo "static: no NEEDED entries"
 
+  macos:
+    name: macOS (build and test)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: clippy }
+      - uses: Swatinem/rust-cache@v2
+        with: { key: macos }
+
+      # macOS is not a supported platform (D3) — Linux is. This job exists so that
+      # "it also builds on a Mac" is a tested claim rather than a hopeful one, and so a
+      # Linux-only assumption creeping into the code is noticed here rather than by
+      # somebody's laptop. Diagnostics that read /proc degrade to "unknown" there.
+      - run: cargo clippy --all-targets
+      - name: Tests
+        # macOS defaults RLIMIT_NOFILE to 256, well under the default concurrency, and
+        # the fixtures need descriptors of their own.
+        run: |
+          ulimit -n 4096
+          cargo test
+
   coverage:
     name: Coverage floor
     runs-on: ubuntu-latest
