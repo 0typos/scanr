@@ -19,24 +19,6 @@ use std::process::Command;
 
 const BIN: &str = env!("CARGO_BIN_EXE_scanr");
 
-/// Read a scan record, decompressing the default framed-gzip form.
-///
-/// Records are compressed unless a scan asks otherwise, so a test that reads one must
-/// cope with either shape — and reading the default shape is the point.
-fn record_text(path: &std::path::Path) -> String {
-    let bytes = std::fs::read(path).expect("record should be readable");
-    if bytes.starts_with(&[0x1f, 0x8b]) {
-        use std::io::Read as _;
-        let mut s = String::new();
-        flate2::read::MultiGzDecoder::new(&bytes[..])
-            .read_to_string(&mut s)
-            .expect("a finalized record decodes");
-        s
-    } else {
-        String::from_utf8(bytes).expect("record is UTF-8")
-    }
-}
-
 fn nmap_available() -> bool {
     Command::new("nmap")
         .arg("--version")
@@ -140,17 +122,10 @@ fn scanr_states(
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let file = std::fs::read_dir(dir.path().join("out"))
-        .expect("output dir")
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .find(|p| {
-            let n = p.file_name().unwrap_or_default().to_string_lossy();
-            n.starts_with("scan-") && !n.ends_with(".partial")
-        })
-        .expect("a finalized record");
+    let file =
+        scanr::testsupport::find_record(&dir.path().join("out")).expect("a finalized record");
 
-    record_text(&file)
+    scanr::testsupport::record_text(&file)
         .lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .filter(|e| e["type"] == "probe_result")
@@ -334,16 +309,8 @@ fn a_proxied_scan_agrees_with_nmap_direct() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let file = std::fs::read_dir(dir.path().join("out"))
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .find(|p| {
-            let n = p.file_name().unwrap_or_default().to_string_lossy();
-            n.starts_with("scan-") && !n.ends_with(".partial")
-        })
-        .unwrap();
-    let proxied: BTreeMap<u16, String> = record_text(&file)
+    let file = scanr::testsupport::find_record(&dir.path().join("out")).unwrap();
+    let proxied: BTreeMap<u16, String> = scanr::testsupport::record_text(&file)
         .lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .filter(|e| e["type"] == "probe_result")

@@ -90,6 +90,38 @@ pub fn closed_port() -> SocketAddr {
     addr
 }
 
+/// Locate the finalized scan record in an output directory.
+///
+/// Records are named for their format — `.jsonl.gz` by default, `.jsonl` under
+/// `--no-compress` — and carry `.partial` until finalized. Matching on the name rather
+/// than the extension keeps every caller working when either changes, which is the point
+/// of it living here instead of being copied into each test crate.
+pub fn find_record(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| {
+            let n = p.file_name().unwrap_or_default().to_string_lossy();
+            n.starts_with("scan-") && !n.ends_with(".partial")
+        })
+}
+
+/// Read a scan record, decompressing the default framed-gzip form.
+pub fn record_text(path: &std::path::Path) -> String {
+    let bytes = std::fs::read(path).expect("record should be readable");
+    if bytes.starts_with(&[0x1f, 0x8b]) {
+        use std::io::Read as _;
+        let mut s = String::new();
+        flate2::read::MultiGzDecoder::new(&bytes[..])
+            .read_to_string(&mut s)
+            .expect("a finalized record decodes");
+        s
+    } else {
+        String::from_utf8(bytes).expect("record is UTF-8")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -107,7 +107,13 @@ destination, so it needs to exceed the round trip to the proxy plus whatever the
 allows. Per-phase timings in the record show where the time actually went:
 
 ```console
-jq -r 'select(.type=="probe_result") | .timing_ms' scan-*.jsonl* | head
+# open and error results, which always keep their own row
+zcat -f scan-*.jsonl.gz | jq -r 'select(.type=="probe_result") | .timing_ms' | head
+
+# the collapsed bulk, summarised per outcome class
+zcat -f scan-*.jsonl.gz | jq -r 'select(.type=="probe_span") | {state, count, timing_ms}'
+
+# or scan with --no-spans for a per-probe timing on every result
 ```
 
 Shortening `connect_timeout` is the most effective lever on a scan dominated by silent

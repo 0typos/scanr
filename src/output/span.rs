@@ -65,16 +65,29 @@ impl Group {
     }
 
     /// Set bits as inclusive `[start, end]` ranges.
+    ///
+    /// Word at a time, skipping empty ones. Testing every bit individually cost
+    /// `planned` iterations per outcome class, which on a 65M-probe scan against the
+    /// 64-class ceiling is billions of iterations between the last probe and the
+    /// terminal event — a scan that looks hung after reporting itself complete.
     fn ranges(&self, planned: u64) -> Vec<[u64; 2]> {
         let mut out: Vec<[u64; 2]> = Vec::new();
-        for i in 0..planned {
-            let set = self.bits[(i / 64) as usize] & (1 << (i % 64)) != 0;
-            if !set {
+        for (w, &word) in self.bits.iter().enumerate() {
+            if word == 0 {
                 continue;
             }
-            match out.last_mut() {
-                Some(r) if r[1] + 1 == i => r[1] = i,
-                _ => out.push([i, i]),
+            for b in 0..64u64 {
+                if word & (1 << b) == 0 {
+                    continue;
+                }
+                let i = w as u64 * 64 + b;
+                if i >= planned {
+                    break;
+                }
+                match out.last_mut() {
+                    Some(r) if r[1] + 1 == i => r[1] = i,
+                    _ => out.push([i, i]),
+                }
             }
         }
         out
@@ -157,10 +170,17 @@ impl Spans {
         self.groups.values().map(|g| g.count).sum()
     }
 
-    /// One `probe_span` body per outcome class.
-    pub fn into_events(self) -> Vec<Value> {
+    /// One `probe_span` body per outcome class, emptying the accumulator.
+    ///
+    /// Called periodically as well as at the end, because a span held only in memory is
+    /// a span a killed process loses. Before spans existed every probe was written as it
+    /// completed, so a `.partial` record preserved real progress; accumulating for the
+    /// whole scan and writing once would have made a SIGKILL lose every collapsed probe.
+    /// Draining bounds that to one progress interval, and several spans of the same
+    /// class are as valid as one — their ranges are disjoint and their counts add.
+    pub fn drain_events(&mut self) -> Vec<Value> {
         let planned = self.planned;
-        self.groups
+        std::mem::take(&mut self.groups)
             .into_iter()
             .map(|((state, source, reason, attempts), g)| {
                 let round = |v: f64| (v * 100.0).round() / 100.0;
@@ -265,7 +285,7 @@ mod tests {
         r.attempts = 2;
         r.attempt_states = vec![State::Filtered, State::Filtered];
         s.absorb(&r);
-        let events = s.into_events();
+        let events = s.drain_events();
         assert_eq!(
             events.len(),
             2,
@@ -285,7 +305,7 @@ mod tests {
         for i in 0..100 {
             assert!(s.absorb(&record(i, 80, State::Filtered, 300)));
         }
-        let events = s.into_events();
+        let events = s.drain_events();
         assert_eq!(events.len(), 1, "one outcome class, one span");
         assert_eq!(events[0]["count"], 100);
         assert_eq!(events[0]["probe_indices"], json!([[0, 99]]));
@@ -299,7 +319,7 @@ mod tests {
             s.absorb(&record(i, 80, State::Filtered, 300));
         }
         assert_eq!(
-            s.into_events()[0]["probe_indices"],
+            s.drain_events()[0]["probe_indices"],
             json!([[0, 2], [5, 6], [9, 9]])
         );
     }
@@ -309,7 +329,7 @@ mod tests {
         let mut s = Spans::new(10);
         s.absorb(&record(0, 80, State::Filtered, 300));
         s.absorb(&record(1, 80, State::Closed, 1));
-        let events = s.into_events();
+        let events = s.drain_events();
         assert_eq!(events.len(), 2);
         let states: Vec<&str> = events
             .iter()
@@ -327,7 +347,7 @@ mod tests {
         for (i, ms) in [(0u64, 100u64), (1, 200), (2, 300)] {
             s.absorb(&record(i, 80, State::Filtered, ms));
         }
-        let t = &s.into_events()[0]["timing_ms"];
+        let t = &s.drain_events()[0]["timing_ms"];
         assert_eq!(t["min"], 100.0);
         assert_eq!(t["max"], 300.0);
         assert_eq!(t["mean"], 200.0);
@@ -347,6 +367,32 @@ mod tests {
             }
         }
         assert!(s.groups.len() <= MAX_GROUPS);
+    }
+
+    /// Draining must empty the accumulator, or the periodic flush would re-emit every
+    /// probe it already wrote and the counts would double.
+    #[test]
+    fn draining_empties_the_accumulator() {
+        let mut s = Spans::new(100);
+        for i in 0..10 {
+            s.absorb(&record(i, 80, State::Filtered, 300));
+        }
+        let first = s.drain_events();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0]["count"], 10);
+        assert!(s.is_empty(), "the drained probes must not still be held");
+        assert!(
+            s.drain_events().is_empty(),
+            "a second drain has nothing to say"
+        );
+
+        // Probes after a drain form their own span, disjoint from the first.
+        for i in 10..15 {
+            s.absorb(&record(i, 80, State::Filtered, 300));
+        }
+        let second = s.drain_events();
+        assert_eq!(second[0]["count"], 5);
+        assert_eq!(second[0]["probe_indices"], json!([[10, 14]]));
     }
 
     #[test]

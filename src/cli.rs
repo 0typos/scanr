@@ -55,7 +55,7 @@ pub const EXIT_INTERRUPTED: u8 = 130;
         scanr run --targets 10.20.30.0/24 --ports 22,80,443\n  \
         subfinder -d example.com | scanr run --targets - --ports web\n  \
         scanr transport test lab\n  \
-        scanr output verify scanr-results/scan-*.jsonl",
+        scanr output verify scanr-results/scan-*.jsonl.gz",
     disable_help_subcommand = true
 )]
 pub struct Cli {
@@ -315,13 +315,7 @@ impl OverrideArgs {
             seed: self.seed,
             compress: flag(self.compress, self.no_compress),
             spans: flag(self.spans, self.no_spans),
-            open_only: if self.all {
-                Some(false)
-            } else if self.open_only {
-                Some(true)
-            } else {
-                None
-            },
+            open_only: flag(self.open_only, self.all),
             allow_large_range: self.allow_large_range,
         }
     }
@@ -680,18 +674,25 @@ fn render_plan_timing(s: &mut String, plan: &ScanPlan, style: &Style) {
     );
     // Both change what the record contains, so they belong on the surface whose job is
     // to say what the run will do before it does it.
+    // Two rows, not one: they are separate decisions from possibly separate layers, and
+    // a single row can only carry one provenance while displaying both.
     row(
-        "  record",
-        format!(
-            "{}{}",
-            if plan.compress { "gzip" } else { "plain jsonl" },
-            if plan.spans {
-                ", repeated outcomes collapsed"
-            } else {
-                ", one row per probe"
-            }
-        ),
+        "  format",
+        if plan.compress {
+            "gzip".into()
+        } else {
+            "plain jsonl".into()
+        },
         &plan.provenance.render("compress"),
+    );
+    row(
+        "  detail",
+        if plan.spans {
+            "repeated outcomes collapsed".into()
+        } else {
+            "one row per probe".into()
+        },
+        &plan.provenance.render("spans"),
     );
 }
 

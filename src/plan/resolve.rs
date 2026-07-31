@@ -48,11 +48,10 @@ pub struct Overrides {
     pub output_dir: Option<PathBuf>,
     pub seed: Option<u64>,
     pub open_only: Option<bool>,
-    /// Write the record as framed gzip. Off unless asked for: a plain record is
-    /// greppable, and that is worth keeping as the default.
+    /// Write the record as framed gzip. On by default; `--no-compress` sets this false.
     pub compress: Option<bool>,
-    /// Collapse repetitive outcomes into spans. Off unless asked for: it trades
-    /// per-probe timestamps for size.
+    /// Collapse repetitive outcomes into spans. On by default; `--no-spans` sets this
+    /// false.
     pub spans: Option<bool>,
     pub allow_large_range: bool,
 }
