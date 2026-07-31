@@ -63,25 +63,7 @@ pub fn resolve(
     let mut prov = Provenance::default();
     let mut warnings = Vec::new();
 
-    // ── scan ────────────────────────────────────────────────────────────────
-    if let Some(name) = scan_name {
-        let known = files.scan_names();
-        if !known.contains(&name.to_string()) {
-            let mut e = ConfigError::new(format!("no such scan: `{name}`"));
-            if let Some(s) = suggest(name, known.iter().map(|s| s.as_str())) {
-                e = e.help(format!("did you mean `{s}`?"));
-            } else if known.is_empty() {
-                e = e.help(
-                    "no scans are defined.\n\
-                     run `scanr config init` to create an annotated scanr.toml,\n\
-                     or scan directly:  scanr run --targets 10.0.0.0/24 --ports 22,80,443",
-                );
-            } else {
-                e = e.help(format!("defined scans: {}", known.join(", ")));
-            }
-            return Err(e);
-        }
-    }
+    check_scan_exists(files, scan_name)?;
 
     let description = scan_name
         .and_then(|n| files.pick(|c| c.scans.get(n).and_then(|s| s.description.clone())))
@@ -99,145 +81,12 @@ pub fn resolve(
     prov.set("transport", transport_origin);
     let transport = resolve_transport(files, &transport_name)?;
 
-    // ── profile ─────────────────────────────────────────────────────────────
-    // When nothing selects a profile, follow the transport: a proxied scan wants the
-    // conservative proxy defaults, a direct one does not want their rate limit.
-    let default_profile = if transport.supports_remote_dns() {
-        DEFAULT_PROXY_PROFILE
-    } else {
-        DEFAULT_DIRECT_PROFILE
-    };
-    let (profile, profile_origin) = pick_name(
-        files,
-        scan_name,
-        ov.profile.clone(),
-        |c, n| c.scans.get(n).and_then(|s| s.profile.clone()),
-        |c| c.defaults.profile.clone(),
-        default_profile,
-    );
-    prov.set("profile", profile_origin);
+    let (profile, base) = resolve_profile(files, scan_name, ov, &transport, &mut prov)?;
 
-    let base = builtin_profile(&profile);
-    let user_defined = files.profile_names().contains(&profile);
-    if base.is_none() && !user_defined {
-        let mut names = files.profile_names();
-        names.extend(builtin_profile_names().into_iter().map(String::from));
-        let mut e = ConfigError::new(format!("no such profile: `{profile}`"));
-        if let Some(s) = suggest(&profile, names.iter().map(|s| s.as_str())) {
-            e = e.help(format!("did you mean `{s}`?"));
-        } else {
-            e = e.help(format!("available profiles: {}", names.join(", ")));
-        }
-        return Err(e);
-    }
-    // A user profile with a non-builtin name still needs numeric fallbacks; use the
-    // default built-in as the floor so every field has a defined value.
-    let base = base.or_else(|| builtin_profile(default_profile)).unwrap();
+    let timing = resolve_timing(files, scan_name, &profile, &base, ov, &mut prov)?;
 
-    // ── timing ──────────────────────────────────────────────────────────────
-    let timing = Timing {
-        concurrency: field(
-            &mut prov,
-            "concurrency",
-            ov.concurrency,
-            timing_source(files, scan_name, &profile, |p| p.concurrency),
-            base.timing.concurrency,
-            &profile,
-        ),
-        rate: field(
-            &mut prov,
-            "rate",
-            ov.rate,
-            timing_source(files, scan_name, &profile, |p| p.rate),
-            base.timing.rate,
-            &profile,
-        ),
-        retries: field(
-            &mut prov,
-            "retries",
-            ov.retries,
-            timing_source(files, scan_name, &profile, |p| p.retries),
-            base.timing.retries,
-            &profile,
-        ),
-        proxy_connect_timeout: duration_field(
-            &mut prov,
-            "proxy_connect_timeout",
-            None,
-            timing_source(files, scan_name, &profile, |p| {
-                p.proxy_connect_timeout.clone()
-            }),
-            base.timing.proxy_connect_timeout,
-            &profile,
-        )?,
-        handshake_timeout: duration_field(
-            &mut prov,
-            "handshake_timeout",
-            None,
-            timing_source(files, scan_name, &profile, |p| p.handshake_timeout.clone()),
-            base.timing.handshake_timeout,
-            &profile,
-        )?,
-        connect_timeout: duration_field(
-            &mut prov,
-            "connect_timeout",
-            ov.connect_timeout,
-            timing_source(files, scan_name, &profile, |p| p.connect_timeout.clone()),
-            base.timing.connect_timeout,
-            &profile,
-        )?,
-        retry_delay: duration_field(
-            &mut prov,
-            "retry_delay",
-            None,
-            timing_source(files, scan_name, &profile, |p| p.retry_delay.clone()),
-            base.timing.retry_delay,
-            &profile,
-        )?,
-    };
-
-    // ── dns ─────────────────────────────────────────────────────────────────
-    let (dns_requested, dns_origin) = match ov.dns {
-        Some(m) => (m, Origin::Cli),
-        None => {
-            let from_scan =
-                scan_name.and_then(|n| files.pick(|c| c.scans.get(n).and_then(|s| s.dns.clone())));
-            let from_transport = files.pick(|c| {
-                c.transports
-                    .get(&transport_name)
-                    .and_then(|t| t.dns.clone())
-            });
-            match from_scan.or(from_transport) {
-                Some((s, path)) => {
-                    let m = DnsMode::parse(&s).ok_or_else(|| {
-                        ConfigError::new(format!("unknown dns mode `{s}`")).at(path.clone())
-                    })?;
-                    (m, Origin::Transport(transport_name.clone(), path))
-                }
-                None => (DnsMode::Auto, Origin::Default),
-            }
-        }
-    };
-    prov.set("dns", dns_origin);
-
-    let dns_effective = match dns_requested {
-        DnsMode::Auto => {
-            if transport.supports_remote_dns() {
-                DnsMode::Transport
-            } else {
-                DnsMode::Local
-            }
-        }
-        DnsMode::Transport if !transport.supports_remote_dns() => {
-            return Err(ConfigError::new(format!(
-                "dns = \"transport\" requires a transport that resolves remotely, but `{}` is {}",
-                transport.name,
-                transport.type_name()
-            ))
-            .help("use dns = \"local\", or select a socks5 transport"));
-        }
-        other => other,
-    };
+    let (dns_requested, dns_effective) =
+        resolve_dns(files, scan_name, &transport, &transport_name, ov, &mut prov)?;
 
     // ── targets and ports ───────────────────────────────────────────────────
     // A pair scan names exact endpoints and bypasses matrix expansion. Targets and ports
@@ -293,58 +142,9 @@ pub fn resolve(
     }
 
     // ── remaining scalars ───────────────────────────────────────────────────
-    let output_dir = match &ov.output_dir {
-        Some(p) => {
-            prov.set("output_dir", Origin::Cli);
-            p.clone()
-        }
-        None => {
-            let from_scan = scan_name
-                .and_then(|n| files.pick(|c| c.scans.get(n).and_then(|s| s.output_dir.clone())));
-            match from_scan.or_else(|| files.pick(|c| c.defaults.output_dir.clone())) {
-                Some((d, path)) => {
-                    prov.set("output_dir", Origin::Defaults(path));
-                    expand_home(&d)
-                }
-                None => {
-                    prov.set("output_dir", Origin::Default);
-                    PathBuf::from(DEFAULT_OUTPUT_DIR)
-                }
-            }
-        }
-    };
-
-    let open_only = match ov.open_only {
-        Some(v) => {
-            prov.set("open_only", Origin::Cli);
-            v
-        }
-        None => {
-            let from_scan =
-                scan_name.and_then(|n| files.pick(|c| c.scans.get(n).and_then(|s| s.open_only)));
-            match from_scan.or_else(|| files.pick(|c| c.defaults.open_only)) {
-                Some((v, path)) => {
-                    prov.set("open_only", Origin::Defaults(path));
-                    v
-                }
-                None => {
-                    prov.set("open_only", Origin::Default);
-                    true
-                }
-            }
-        }
-    };
-
-    let seed = match ov.seed {
-        Some(s) => {
-            prov.set("seed", Origin::Cli);
-            s
-        }
-        None => {
-            prov.set("seed", Origin::Default);
-            random_seed()
-        }
-    };
+    let output_dir = resolve_output_dir(files, scan_name, ov, &mut prov);
+    let open_only = resolve_open_only(files, scan_name, ov, &mut prov);
+    let seed = resolve_seed(ov, &mut prov);
 
     let port_spec = port_spec_override.unwrap_or_else(|| PortSummary(&ports).to_string());
 
@@ -372,6 +172,267 @@ pub fn resolve(
     };
     add_operational_warnings(&mut plan, facts);
     Ok(plan)
+}
+
+/// Reject an unknown scan name early, with a suggestion when one is close.
+fn check_scan_exists(files: &Layered, scan_name: Option<&str>) -> Result<(), ConfigError> {
+    if let Some(name) = scan_name {
+        let known = files.scan_names();
+        if !known.contains(&name.to_string()) {
+            let mut e = ConfigError::new(format!("no such scan: `{name}`"));
+            if let Some(s) = suggest(name, known.iter().map(|s| s.as_str())) {
+                e = e.help(format!("did you mean `{s}`?"));
+            } else if known.is_empty() {
+                e = e.help(
+                    "no scans are defined.\n\
+                     run `scanr config init` to create an annotated scanr.toml,\n\
+                     or scan directly:  scanr run --targets 10.0.0.0/24 --ports 22,80,443",
+                );
+            } else {
+                e = e.help(format!("defined scans: {}", known.join(", ")));
+            }
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+/// Pick the profile and its numeric floor.
+///
+/// When nothing selects one, follow the transport: a proxied scan wants the conservative
+/// proxy defaults, a direct one does not want their rate limit.
+fn resolve_profile(
+    files: &Layered,
+    scan_name: Option<&str>,
+    ov: &Overrides,
+    transport: &ResolvedTransport,
+    prov: &mut Provenance,
+) -> Result<(String, crate::config::builtin::BuiltinProfile), ConfigError> {
+    // When nothing selects a profile, follow the transport: a proxied scan wants the
+    // conservative proxy defaults, a direct one does not want their rate limit.
+    let default_profile = if transport.supports_remote_dns() {
+        DEFAULT_PROXY_PROFILE
+    } else {
+        DEFAULT_DIRECT_PROFILE
+    };
+    let (profile, profile_origin) = pick_name(
+        files,
+        scan_name,
+        ov.profile.clone(),
+        |c, n| c.scans.get(n).and_then(|s| s.profile.clone()),
+        |c| c.defaults.profile.clone(),
+        default_profile,
+    );
+    prov.set("profile", profile_origin);
+
+    let base = builtin_profile(&profile);
+    let user_defined = files.profile_names().contains(&profile);
+    if base.is_none() && !user_defined {
+        let mut names = files.profile_names();
+        names.extend(builtin_profile_names().into_iter().map(String::from));
+        let mut e = ConfigError::new(format!("no such profile: `{profile}`"));
+        if let Some(s) = suggest(&profile, names.iter().map(|s| s.as_str())) {
+            e = e.help(format!("did you mean `{s}`?"));
+        } else {
+            e = e.help(format!("available profiles: {}", names.join(", ")));
+        }
+        return Err(e);
+    }
+    // A user profile with a non-builtin name still needs numeric fallbacks; use the
+    // default built-in as the floor so every field has a defined value.
+    let base = base.or_else(|| builtin_profile(default_profile)).unwrap();
+    Ok((profile, base))
+}
+
+/// The six timing knobs, each recording which layer supplied it.
+fn resolve_timing(
+    files: &Layered,
+    scan_name: Option<&str>,
+    profile: &str,
+    base: &crate::config::builtin::BuiltinProfile,
+    ov: &Overrides,
+    prov: &mut Provenance,
+) -> Result<Timing, ConfigError> {
+    let timing = Timing {
+        concurrency: field(
+            prov,
+            "concurrency",
+            ov.concurrency,
+            timing_source(files, scan_name, profile, |p| p.concurrency),
+            base.timing.concurrency,
+            profile,
+        ),
+        rate: field(
+            prov,
+            "rate",
+            ov.rate,
+            timing_source(files, scan_name, profile, |p| p.rate),
+            base.timing.rate,
+            profile,
+        ),
+        retries: field(
+            prov,
+            "retries",
+            ov.retries,
+            timing_source(files, scan_name, profile, |p| p.retries),
+            base.timing.retries,
+            profile,
+        ),
+        proxy_connect_timeout: duration_field(
+            prov,
+            "proxy_connect_timeout",
+            None,
+            timing_source(files, scan_name, profile, |p| {
+                p.proxy_connect_timeout.clone()
+            }),
+            base.timing.proxy_connect_timeout,
+            profile,
+        )?,
+        handshake_timeout: duration_field(
+            prov,
+            "handshake_timeout",
+            None,
+            timing_source(files, scan_name, profile, |p| p.handshake_timeout.clone()),
+            base.timing.handshake_timeout,
+            profile,
+        )?,
+        connect_timeout: duration_field(
+            prov,
+            "connect_timeout",
+            ov.connect_timeout,
+            timing_source(files, scan_name, profile, |p| p.connect_timeout.clone()),
+            base.timing.connect_timeout,
+            profile,
+        )?,
+        retry_delay: duration_field(
+            prov,
+            "retry_delay",
+            None,
+            timing_source(files, scan_name, profile, |p| p.retry_delay.clone()),
+            base.timing.retry_delay,
+            profile,
+        )?,
+    };
+    Ok(timing)
+}
+
+/// The requested DNS mode and what it resolves to for this transport (D15).
+fn resolve_dns(
+    files: &Layered,
+    scan_name: Option<&str>,
+    transport: &ResolvedTransport,
+    transport_name: &str,
+    ov: &Overrides,
+    prov: &mut Provenance,
+) -> Result<(DnsMode, DnsMode), ConfigError> {
+    let (dns_requested, dns_origin) = match ov.dns {
+        Some(m) => (m, Origin::Cli),
+        None => {
+            let from_scan =
+                scan_name.and_then(|n| files.pick(|c| c.scans.get(n).and_then(|s| s.dns.clone())));
+            let from_transport =
+                files.pick(|c| c.transports.get(transport_name).and_then(|t| t.dns.clone()));
+            match from_scan.or(from_transport) {
+                Some((s, path)) => {
+                    let m = DnsMode::parse(&s).ok_or_else(|| {
+                        ConfigError::new(format!("unknown dns mode `{s}`")).at(path.clone())
+                    })?;
+                    (m, Origin::Transport(transport_name.to_string(), path))
+                }
+                None => (DnsMode::Auto, Origin::Default),
+            }
+        }
+    };
+    prov.set("dns", dns_origin);
+
+    let dns_effective = match dns_requested {
+        DnsMode::Auto => {
+            if transport.supports_remote_dns() {
+                DnsMode::Transport
+            } else {
+                DnsMode::Local
+            }
+        }
+        DnsMode::Transport if !transport.supports_remote_dns() => {
+            return Err(ConfigError::new(format!(
+                "dns = \"transport\" requires a transport that resolves remotely, but `{}` is {}",
+                transport.name,
+                transport.type_name()
+            ))
+            .help("use dns = \"local\", or select a socks5 transport"));
+        }
+        other => other,
+    };
+    Ok((dns_requested, dns_effective))
+}
+
+fn resolve_output_dir(
+    files: &Layered,
+    scan_name: Option<&str>,
+    ov: &Overrides,
+    prov: &mut Provenance,
+) -> PathBuf {
+    match &ov.output_dir {
+        Some(p) => {
+            prov.set("output_dir", Origin::Cli);
+            p.clone()
+        }
+        None => {
+            let from_scan = scan_name
+                .and_then(|n| files.pick(|c| c.scans.get(n).and_then(|s| s.output_dir.clone())));
+            match from_scan.or_else(|| files.pick(|c| c.defaults.output_dir.clone())) {
+                Some((d, path)) => {
+                    prov.set("output_dir", Origin::Defaults(path));
+                    expand_home(&d)
+                }
+                None => {
+                    prov.set("output_dir", Origin::Default);
+                    PathBuf::from(DEFAULT_OUTPUT_DIR)
+                }
+            }
+        }
+    }
+}
+
+fn resolve_open_only(
+    files: &Layered,
+    scan_name: Option<&str>,
+    ov: &Overrides,
+    prov: &mut Provenance,
+) -> bool {
+    match ov.open_only {
+        Some(v) => {
+            prov.set("open_only", Origin::Cli);
+            v
+        }
+        None => {
+            let from_scan =
+                scan_name.and_then(|n| files.pick(|c| c.scans.get(n).and_then(|s| s.open_only)));
+            match from_scan.or_else(|| files.pick(|c| c.defaults.open_only)) {
+                Some((v, path)) => {
+                    prov.set("open_only", Origin::Defaults(path));
+                    v
+                }
+                None => {
+                    prov.set("open_only", Origin::Default);
+                    true
+                }
+            }
+        }
+    }
+}
+
+fn resolve_seed(ov: &Overrides, prov: &mut Provenance) -> u64 {
+    match ov.seed {
+        Some(s) => {
+            prov.set("seed", Origin::Cli);
+            s
+        }
+        None => {
+            prov.set("seed", Origin::Default);
+            random_seed()
+        }
+    }
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────

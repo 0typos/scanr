@@ -491,17 +491,7 @@ pub fn render_plan(plan: &ScanPlan, facts: &HostFacts, no_color: bool) -> String
     let style = Style::for_stream(std::io::stdout().is_terminal() && !no_color, no_color);
     let mut s = String::new();
 
-    let mut row = |k: &str, v: String, src: &str| {
-        // Only pad the value column when there is a provenance column to align to,
-        // otherwise every row without one carries trailing whitespace.
-        let line = if src.is_empty() {
-            format!("{k:<16}{v}")
-        } else {
-            format!("{k:<16}{v:<40}{}", style.dim(src))
-        };
-        s.push_str(line.trim_end());
-        s.push('\n');
-    };
+    let mut row = |k: &str, v: String, src: &str| plan_row(&mut s, &style, k, v, src);
 
     row("scan", plan.scan_name.clone(), "");
     if let Some(d) = &plan.description {
@@ -567,6 +557,32 @@ pub fn render_plan(plan: &ScanPlan, facts: &HostFacts, no_color: bool) -> String
         format!("randomized, seed {:016x}", plan.seed),
         &plan.provenance.render("seed"),
     );
+    render_plan_timing(&mut s, plan, &style);
+
+    render_plan_footer(&mut s, plan, facts, &style);
+    s
+}
+
+/// Projection, host facts, and any planning warnings — everything below the value rows.
+/// One aligned `key  value  provenance` line.
+///
+/// Free rather than a closure so the plan can be rendered in sections without each one
+/// re-deriving the layout.
+fn plan_row(s: &mut String, style: &Style, k: &str, v: String, src: &str) {
+    // Only pad the value column when there is a provenance column to align to,
+    // otherwise every row without one carries trailing whitespace.
+    let line = if src.is_empty() {
+        format!("{k:<16}{v}")
+    } else {
+        format!("{k:<16}{v:<40}{}", style.dim(src))
+    };
+    s.push_str(line.trim_end());
+    s.push('\n');
+}
+
+/// The knobs that decide how hard the scan pushes, and where each came from.
+fn render_plan_timing(s: &mut String, plan: &ScanPlan, style: &Style) {
+    let mut row = |k: &str, v: String, src: &str| plan_row(s, style, k, v, src);
     row(
         "concurrency",
         plan.timing.concurrency.to_string(),
@@ -611,7 +627,9 @@ pub fn render_plan(plan: &ScanPlan, facts: &HostFacts, no_color: bool) -> String
         plan.output_dir.display().to_string(),
         &plan.provenance.render("output_dir"),
     );
+}
 
+fn render_plan_footer(s: &mut String, plan: &ScanPlan, facts: &HostFacts, style: &Style) {
     s.push('\n');
     match plan.projected_duration() {
         Some(d) => s.push_str(&format!(
@@ -637,7 +655,6 @@ pub fn render_plan(plan: &ScanPlan, facts: &HostFacts, no_color: bool) -> String
             ));
         }
     }
-    s
 }
 
 fn truncate(s: &str, n: usize) -> String {
