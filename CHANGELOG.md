@@ -60,8 +60,11 @@ invited before then.
   as a natural completion.
 - Host diagnostics that name operational causes rather than errnos, with remediation
   derived from the sysctls actually present on the machine.
-- Four built-in profiles (`proxy-careful`, `proxy`, `direct`, `direct-fast`); the default
-  follows the transport rather than being fixed.
+- Seven built-in profiles; the default follows the transport rather than being fixed.
+  Three are for `ssh -D` (`ssh`, `ssh-fast`, `ssh-slow`), which behaves unlike a normal
+  SOCKS5 proxy: its listener is local, so the ephemeral-port rate cap does not apply, and
+  measured against OpenSSH 10.2p1 that cap alone made 4,000 probes take 80 s under
+  `proxy-careful` versus 0.16 s under `ssh`.
 - Shell completions for bash, zsh, fish, elvish, and PowerShell.
 
 ### Security

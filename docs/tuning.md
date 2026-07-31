@@ -97,7 +97,10 @@ Little's law an unreachable combination is easy to write: 2,000/s with a 1s time
 | `direct-fast` | 1s | LAN, latency known low |
 | `direct` | 2s | routed networks |
 | `proxy` | 5s | self-hosted proxy |
-| `proxy-careful` | 8s | rotating pools, `ssh -D`, unknown limits |
+| `proxy-careful` | 8s | rotating pools, unknown limits |
+| `ssh-fast` | 2s | `ssh -D` to a nearby server |
+| `ssh` | 6s | `ssh -D` over a typical internet link |
+| `ssh-slow` | 15s | `ssh -D` over a high-latency or congested link |
 
 Through a proxy the destination timeout covers *the proxy's* attempt to reach the
 destination, so it needs to exceed the round trip to the proxy plus whatever the proxy
@@ -213,6 +216,49 @@ about to print.
 Before this was fixed, all three loaded the whole record into memory first and needed
 **4.2 GB** for that 374 MB file — about 11× the file size. The tool could write a
 million-probe record on a laptop and then fail to read it back.
+
+## How it compares to nmap
+
+A `/24` × nmap's top 100 ports — 25,600 probes — with both tools doing unprivileged TCP
+connect scans, so the technique is identical. nmap 7.92, `-sT -T5 --min-rate 10000
+--max-retries 0 -Pn -n`.
+
+**Responsive hosts** (`127.0.0.0/24`, every port refused):
+
+| | wall | probes/s |
+|---|---|---|
+| scanr, default `direct` profile | **0.17 s** | 150,000 |
+| nmap `-T5` | 0.52 s | 49,000 |
+
+Both reported exactly the same 259 open ports. Six scanr runs spaced 2 s apart were
+0.17–0.18 s; run them back to back with no gap and one landed at 1.19 s, which is
+teardown pressure from the previous run rather than the scan itself.
+
+**Unresponsive hosts** (`192.0.2.0/24`, every probe times out) — here the comparison is
+really about timeouts, so it is worth being careful:
+
+| | wall |
+|---|---|
+| scanr `--profile direct-fast` (1 s timeout) | 13.10 s |
+| nmap `-T5` | 7.16 s |
+| scanr `--connect-timeout 300ms --concurrency 4096` | **2.23 s** |
+| scanr `--connect-timeout 150ms --concurrency 4096` | 1.18 s |
+
+nmap wins on the first line and it is not mysterious: `-T5` caps `max-rtt-timeout` at
+300 ms, while `direct-fast` waits a full second. Told to give up as fast as nmap does,
+scanr is **3.2× faster** — the same ratio as the responsive case. Neither tool reported
+anything open, which is correct for TEST-NET.
+
+The real difference is that **nmap adapts its timeout from observed round-trip times and
+scanr does not**. That is a deliberate choice — see "Adaptive tuning" under
+*Things that will not help* below — and it has a real cost — on an unfamiliar network nmap self-tunes and
+scanr needs you to set `--connect-timeout`. `scanr plan` projects the duration so the
+consequence is visible before you spend it.
+
+Caveats worth stating: this is loopback and TEST-NET on one machine, so it measures the
+tools rather than a network. As root, nmap's `-sS` SYN scan is a different and faster
+technique that scanr does not implement. And scanr is writing a complete JSONL record
+throughout, which nmap is not.
 
 ## Things that will not help
 

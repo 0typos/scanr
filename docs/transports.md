@@ -155,12 +155,46 @@ Inline passwords are rejected — see [security](security.md#credentials).
 
 ## `ssh -D` specifically
 
-Convenient and widely available, with two caveats worth knowing:
+Convenient and widely available. Use one of the `ssh` profiles rather than the proxy
+ones — measured against OpenSSH 10.2p1, 4,000 probes took **80 s** under `proxy-careful`
+and **0.16 s** under `ssh`, with every probe reported either way:
 
-- **`open_only` fidelity.** You learn which ports are open and nothing about why the
-  others are not.
-- It handled concurrency 512 with zero loss in testing, which was not expected. It is not
-  necessarily the weak link.
+```console
+scanr run --transport tunnel --profile ssh        # typical internet link
+scanr run --transport tunnel --profile ssh-fast   # nearby server, low latency
+scanr run --transport tunnel --profile ssh-slow   # high-latency or congested
+```
 
-Everything multiplexes as channels over a single TCP connection, so the SSH client can
-become CPU-bound on crypto before the proxy protocol is the constraint.
+Three things make `ssh -D` different from a normal SOCKS5 proxy:
+
+**The listener is local.** Every probe connects to `127.0.0.1`, which `tcp_tw_reuse = 2`
+exempts from the TIME_WAIT restriction, so the ~470/s ephemeral ceiling behind `proxy`'s
+`rate = 400` does not apply. That cap is the whole 80 s above: 4,000 probes at 50/s under
+`proxy-careful` is 80 s exactly, and at 400/s under `proxy` it is 10 s exactly. The `ssh`
+profiles set `rate = 0`.
+
+**The local round trip is free.** SOCKS negotiation measured 0.4–0.5 ms, and a *refused*
+destination also returns in 0.4 ms because `ssh -D` simply closes the channel. Only
+genuinely silent hosts ever cost `connect_timeout`. The `ssh` profiles keep the local
+timeouts short and spend the budget on the destination leg, which is the only one
+crossing the wire.
+
+**Concurrency saturates early, then falls off a cliff.** Every channel shares one TCP
+connection. Throughput was flat at ~28,500 probes/s from concurrency 32 through 128, then
+collapsed at 160 — three runs at each level, reproducible:
+
+| concurrency | 32 | 64 | 96 | 128 | 160 | 256 | 512 |
+|---|---|---|---|---|---|---|---|
+| probes/s | 28,571 | 28,571 | 28,571 | 25,000 | 1,852 | 1,869 | 1,770 |
+
+The cliff is a fixed ~1 s stall rather than a slower rate: at concurrency 160, scans of
+2,000 / 4,000 / 8,000 probes all cost about 1.1 s. So it amortises away on a big scan and
+dominates a small one — but since nothing above ~128 buys throughput, there is no reason
+to go there. All three `ssh` profiles stay under it, and a test enforces that.
+
+Concurrency across the three rises as the link gets *slower*, which is the opposite of
+the instinct: in-flight probes needed is roughly rate × RTT, so a long round trip needs
+more outstanding work to stay busy, not less. The cliff is the ceiling on that.
+
+**`open_only` fidelity** still applies: you learn which ports are open and nothing about
+why the others are not.

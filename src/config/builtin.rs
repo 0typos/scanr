@@ -20,9 +20,76 @@ const fn ms(n: u64) -> Duration {
 
 pub fn builtin_profiles() -> Vec<BuiltinProfile> {
     vec![
+        // ── ssh -D ──────────────────────────────────────────────────────────
+        //
+        // `ssh -D` differs from a normal SOCKS5 proxy in three ways that matter, all
+        // measured against OpenSSH 10.2p1:
+        //
+        // * **The listener is local.** Every probe connects to 127.0.0.1, which
+        //   `tcp_tw_reuse = 2` exempts from TIME_WAIT reuse, so the ~470/s ephemeral
+        //   ceiling behind `proxy`'s `rate = 400` simply does not apply. Capping the
+        //   rate here throttles the scan for nothing: 2,000 probes took 5.00 s under
+        //   that cap and 0.07 s without it.
+        // * **The local round trip is free.** SOCKS negotiation measured 0.4–0.5 ms, so
+        //   the multi-second `proxy_connect_timeout` and `handshake_timeout` the proxy
+        //   profiles carry are covering a network that is not there. Only the
+        //   destination connect crosses the wire.
+        // * **Concurrency saturates early and then hurts.** A single TCP connection
+        //   carries every channel. Throughput was flat at ~28,500 probes/s from
+        //   concurrency 32 to 128, then fell off a cliff at 160 — reproducibly, three
+        //   runs at each level. The cliff is a fixed ~1 s stall rather than a slower
+        //   rate: at concurrency 160, 2,000 / 4,000 / 8,000 probes all cost ~1.1 s.
+        //   Nothing above ~128 buys throughput, and it risks the stall.
+        //
+        // Concurrency across the three is chosen to cover round-trip delay rather than
+        // to be "careful": in-flight probes needed is roughly rate x RTT, so a *slower*
+        // link wants *more* in flight, not less — bounded by the measured cliff.
+        //
+        // A refused destination costs nothing (0.4 ms — `ssh -D` closes the channel with
+        // no reply), so `connect_timeout` is only ever paid by genuinely silent hosts.
+        BuiltinProfile {
+            name: "ssh-fast",
+            summary: "ssh -D to a nearby server (LAN, same DC), latency known low",
+            timing: Timing {
+                concurrency: 64,
+                rate: 0,
+                proxy_connect_timeout: ms(1_000),
+                handshake_timeout: ms(3_000),
+                connect_timeout: ms(2_000),
+                retries: 0,
+                retry_delay: ms(250),
+            },
+        },
+        BuiltinProfile {
+            name: "ssh",
+            summary: "ssh -D over a typical internet link",
+            timing: Timing {
+                concurrency: 96,
+                rate: 0,
+                proxy_connect_timeout: ms(2_000),
+                handshake_timeout: ms(5_000),
+                connect_timeout: ms(6_000),
+                retries: 1,
+                retry_delay: ms(500),
+            },
+        },
+        BuiltinProfile {
+            name: "ssh-slow",
+            summary: "ssh -D over a high-latency, congested, or long-haul link",
+            timing: Timing {
+                // More in flight to cover the round trip, still under the measured cliff.
+                concurrency: 128,
+                rate: 0,
+                proxy_connect_timeout: ms(3_000),
+                handshake_timeout: ms(10_000),
+                connect_timeout: ms(15_000),
+                retries: 1,
+                retry_delay: ms(1_000),
+            },
+        },
         BuiltinProfile {
             name: "proxy-careful",
-            summary: "rotating pools, ssh -D, or any proxy whose limits you do not know",
+            summary: "rotating pools, or any proxy whose limits you do not know",
             timing: Timing {
                 concurrency: 64,
                 rate: 50,
@@ -343,7 +410,7 @@ mod tests {
     #[test]
     fn builtin_profiles_are_distinct_and_sane() {
         let profiles = builtin_profiles();
-        assert_eq!(profiles.len(), 4);
+        assert_eq!(profiles.len(), 7);
         for p in &profiles {
             assert!(p.timing.concurrency >= 1, "{}", p.name);
             assert!(p.timing.retries <= 10, "{}", p.name);
@@ -365,6 +432,56 @@ mod tests {
                 p.timing.rate > 0 && p.timing.rate <= 470,
                 "{name} rate {} should be capped near the ephemeral budget",
                 p.timing.rate
+            );
+        }
+    }
+
+    /// The `ssh -D` listener is on loopback, which `tcp_tw_reuse = 2` exempts from the
+    /// TIME_WAIT reuse restriction, so the ephemeral ceiling that justifies `proxy`'s
+    /// rate cap does not apply. Measured: 4,000 probes took 80 s under `proxy-careful`
+    /// (rate 50) and 0.16 s under `ssh`, with every probe reported either way.
+    #[test]
+    fn ssh_profiles_are_not_rate_capped() {
+        for name in ["ssh", "ssh-fast", "ssh-slow"] {
+            let p = builtin_profile(name).unwrap();
+            assert_eq!(
+                p.timing.rate, 0,
+                "{name} must not inherit the remote-proxy ephemeral cap"
+            );
+        }
+    }
+
+    /// Throughput through one multiplexed SSH connection was flat from concurrency 32 to
+    /// 128 and fell off a reproducible cliff at 160 (OpenSSH 10.2p1). Nothing above that
+    /// buys throughput, so no `ssh` profile may wander past it.
+    #[test]
+    fn ssh_profiles_stay_below_the_measured_concurrency_cliff() {
+        for name in ["ssh", "ssh-fast", "ssh-slow"] {
+            let p = builtin_profile(name).unwrap();
+            assert!(
+                (1..=128).contains(&p.timing.concurrency),
+                "{name} concurrency {} is past the measured cliff",
+                p.timing.concurrency
+            );
+        }
+    }
+
+    /// The local SOCKS round trip measured 0.4-0.5 ms, so the multi-second local
+    /// timeouts the proxy profiles carry are covering a network that is not there.
+    #[test]
+    fn ssh_profiles_do_not_wait_seconds_on_a_local_socket() {
+        for name in ["ssh", "ssh-fast", "ssh-slow"] {
+            let p = builtin_profile(name).unwrap();
+            assert!(
+                p.timing.proxy_connect_timeout <= ms(3_000),
+                "{name} waits {:?} to reach a loopback listener",
+                p.timing.proxy_connect_timeout
+            );
+            // The destination connect is the only leg that crosses the wire, so it is
+            // the one that should dominate.
+            assert!(
+                p.timing.connect_timeout >= p.timing.proxy_connect_timeout,
+                "{name}: the local leg should not outlast the remote one"
             );
         }
     }
