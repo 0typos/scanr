@@ -32,6 +32,31 @@ struct RecordLine {
     event: Option<Value>,
 }
 
+/// Open a record, transparently decompressing a gzip one.
+///
+/// Detected by magic bytes rather than by extension, so a renamed file still reads and a
+/// `.gz` name that is not gzip does not silently produce nonsense.
+fn open_record(path: &Path) -> Result<Box<dyn BufRead>, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = File::open(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut magic = [0u8; 2];
+    let n = file
+        .read(&mut magic)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    file.rewind()
+        .or_else(|_| file.seek(SeekFrom::Start(0)).map(|_| ()))
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    if n == 2 && magic == [0x1f, 0x8b] {
+        // MultiGzDecoder, not GzDecoder: the writer emits one member per frame and a
+        // single-member decoder would stop after the first.
+        Ok(Box::new(BufReader::new(flate2::read::MultiGzDecoder::new(
+            file,
+        ))))
+    } else {
+        Ok(Box::new(BufReader::new(file)))
+    }
+}
+
 /// Iterate a record's events, parsing one line at a time and retaining none.
 ///
 /// A read failure — most often invalid UTF-8 — rejects the whole file rather than
@@ -39,37 +64,104 @@ struct RecordLine {
 /// `remainder` would then emit a confident endpoint list derived from a file it could
 /// not fully read, and exit 0 doing it. This matches what loading the whole file into a
 /// `String` did before.
+///
+/// The exception is a `.partial` file, which by definition the process never finished
+/// writing. There a stream that stops mid-way is the expected shape, and refusing it
+/// would defeat framing: the point of writing gzip in frames is that a killed scan still
+/// decodes up to its last completed frame.
 fn stream(path: &Path) -> Result<impl Iterator<Item = Result<RecordLine, String>>, String> {
-    let file = File::open(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut lines = open_record(path)?.lines().enumerate();
     let shown = path.display().to_string();
+    let truncation_expected = is_partial(path);
     let mut index = 0usize;
-    Ok(BufReader::new(file)
-        .lines()
-        .enumerate()
-        .filter_map(move |(i, line)| {
-            let text = match line {
-                Ok(t) => t,
-                Err(e) => return Some(Err(format!("cannot read {shown}: {e}"))),
-            };
-            if text.trim().is_empty() {
-                return None;
+    let mut finished = false;
+
+    Ok(std::iter::from_fn(move || {
+        if finished {
+            return None;
+        }
+        loop {
+            let (i, line) = lines.next()?;
+            match line {
+                Ok(text) => {
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                    let event = serde_json::from_str::<Value>(&text).ok();
+                    let this = index;
+                    if event.is_some() {
+                        index += 1;
+                    }
+                    return Some(Ok(RecordLine {
+                        line_no: i + 1,
+                        index: this,
+                        event,
+                    }));
+                }
+                Err(e) => {
+                    // Stop either way. A reader that has failed once keeps failing, and
+                    // polling it forever would hang instead of reporting.
+                    finished = true;
+                    let cut_short = matches!(
+                        e.kind(),
+                        std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::InvalidData
+                    );
+                    // `index > 0` so a file that is unreadable from the very first byte
+                    // is still an error rather than an empty success.
+                    if truncation_expected && cut_short && index > 0 {
+                        return None;
+                    }
+                    return Some(Err(format!("cannot read {shown}: {e}")));
+                }
             }
-            let event = serde_json::from_str::<Value>(&text).ok();
-            let this = index;
-            if event.is_some() {
-                index += 1;
-            }
-            Some(Ok(RecordLine {
-                line_no: i + 1,
-                index: this,
-                event,
-            }))
-        }))
+        }
+    }))
 }
 
 /// A file still named `.partial` means the process died before finalizing it.
 fn is_partial(path: &Path) -> bool {
     path.to_string_lossy().ends_with(".partial")
+}
+
+/// How much of the file's tail to read when looking for the terminal event.
+///
+/// The terminal event is the last line by construction, so this only has to be larger
+/// than one event. Generous, and still nothing next to the record.
+const TAIL_BYTES: u64 = 64 * 1024;
+
+/// The last event in the file, read from the end rather than by scanning forward.
+///
+/// Returns `None` for anything unexpected — a short file, a truncated last line, an
+/// unreadable tail. Every caller treats that as "no hint available" and falls back.
+fn read_last_event(path: &Path) -> Option<Value> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = File::open(path).ok()?;
+    {
+        // A gzip record cannot be seeked into, so its last line is found by decoding
+        // through. That is still far cheaper than parsing every event as JSON.
+        let mut magic = [0u8; 2];
+        if f.read(&mut magic).ok()? == 2 && magic == [0x1f, 0x8b] {
+            let mut last = None;
+            for line in open_record(path).ok()?.lines() {
+                let line = line.ok()?;
+                if !line.trim().is_empty() {
+                    last = Some(line);
+                }
+            }
+            return serde_json::from_str(&last?).ok();
+        }
+        f.rewind().ok()?;
+    }
+    let len = f.metadata().ok()?.len();
+    let take = len.min(TAIL_BYTES);
+    f.seek(SeekFrom::Start(len - take)).ok()?;
+    let mut buf = Vec::with_capacity(take as usize);
+    f.take(take).read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    // If the window started mid-line, the first fragment is discarded by taking the
+    // last complete line rather than the first.
+    let last = text.lines().rev().find(|l| !l.trim().is_empty())?;
+    serde_json::from_str(last).ok()
 }
 
 fn kind(v: &Value) -> &str {
@@ -701,6 +793,105 @@ pub fn summarize(path: &Path) -> Result<String, String> {
 /// for dropping resume in the first place. The record contains every probed pair, so the
 /// exact remainder was always derivable; only a way to express it was missing.
 pub fn remainder(path: &Path) -> Result<Remainder, String> {
+    // Fast path: the scan already knew what it had not done, so ask it rather than
+    // re-deriving the answer from a million probe rows.
+    if let Some(r) = remainder_from_hint(path)? {
+        return Ok(r);
+    }
+    remainder_by_scanning(path)
+}
+
+/// Reconstruct the outstanding endpoints from the terminal event alone.
+///
+/// The work counter issues indices in order, so everything never started is the
+/// contiguous range `[not_started_from, planned)`, and the only scattered part is the
+/// handful of probes that were in flight when the scan stopped. With the seed from
+/// `scan_config` that reproduces the outstanding endpoints exactly, reading two events
+/// instead of the whole record.
+///
+/// Returns `Ok(None)` whenever the hint is absent or does not agree with the counts —
+/// an older record, a scan too large to have tracked it, or a file whose terminal event
+/// cannot be trusted. The caller then does it the long way.
+fn remainder_from_hint(path: &Path) -> Result<Option<Remainder>, String> {
+    let Some(terminal) = read_last_event(path).filter(|e| TERMINALS.contains(&kind(e))) else {
+        return Ok(None);
+    };
+    let (Some(from), Some(abandoned)) = (
+        terminal["not_started_from"].as_u64(),
+        terminal["abandoned_indices"].as_array(),
+    ) else {
+        return Ok(None);
+    };
+    let counts = &terminal["counts"];
+    let (Some(planned), Some(not_started)) =
+        (counts["planned"].as_u64(), counts["not_started"].as_u64())
+    else {
+        return Ok(None);
+    };
+    // The hint has to agree with the accounting, or it is not a hint worth taking.
+    if planned.saturating_sub(from) != not_started
+        || abandoned.len() as u64 != counts["abandoned"].as_u64().unwrap_or(u64::MAX)
+    {
+        return Ok(None);
+    }
+
+    // Only the header is read from the front, and it is the first two lines.
+    let mut header = Vec::new();
+    for line in stream(path)?.take(4) {
+        if let Some(e) = line?.event {
+            header.push(e);
+        }
+    }
+    let Some(config) = header.into_iter().find(|e| kind(e) == "scan_config") else {
+        return Ok(None);
+    };
+    let Some(seed) = config["permutation"]["seed"]
+        .as_str()
+        .and_then(|s| u64::from_str_radix(s, 16).ok())
+    else {
+        return Ok(None);
+    };
+
+    let expected = expected_endpoints(&config, path)?;
+    if expected.len() as u64 != planned {
+        return Ok(None);
+    }
+
+    // Walk counter space, map through the permutation, then sort so the output matches
+    // the order the scanning path produces.
+    let perm = crate::plan::Permutation::new(planned.max(1), seed);
+    let mut indices: Vec<u64> = (from..planned)
+        .chain(abandoned.iter().filter_map(Value::as_u64))
+        .map(|raw| perm.apply(raw))
+        .collect();
+    indices.sort_unstable();
+
+    let mut endpoints = Vec::with_capacity(indices.len());
+    for i in indices {
+        let Some((t, p)) = expected.at(i) else {
+            return Ok(None);
+        };
+        endpoints.push(format_pair(&t, p));
+    }
+
+    let note = format!(
+        "{} of {} endpoints were not probed; re-run exactly those with:\n  \
+         scanr output remainder {} | scanr run --pairs -",
+        commas(endpoints.len() as u64),
+        commas(planned),
+        path.display()
+    );
+    Ok(Some(Remainder {
+        endpoints,
+        scan_id: config["scan_id"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        note,
+    }))
+}
+
+fn remainder_by_scanning(path: &Path) -> Result<Remainder, String> {
     // Only the probed set is retained, which is inherent to the question being asked.
     // The expected matrix is walked lazily rather than materialised: a /16 x 16 ports is
     // a million endpoints, and building that list to subtract from it was most of the
@@ -777,6 +968,23 @@ impl Expected {
         match self {
             Expected::Pairs(p) => p.len(),
             Expected::Matrix { targets, ports } => targets.len() * ports.len(),
+        }
+    }
+
+    /// The endpoint at a permuted probe index. Mirrors `ScanPlan::probe_at`, which is
+    /// what assigned the index in the first place.
+    fn at(&self, index: u64) -> Option<(String, u16)> {
+        match self {
+            Expected::Pairs(p) => p.get(index as usize).cloned(),
+            Expected::Matrix { targets, ports } => {
+                let per = ports.len() as u64;
+                if per == 0 {
+                    return None;
+                }
+                let t = targets.get((index / per) as usize)?;
+                let p = ports.get((index % per) as usize)?;
+                Some((t.to_string(), *p))
+            }
         }
     }
 
@@ -1271,6 +1479,139 @@ mod tests {
             assert!(err.contains("cannot read"), "{err}");
             assert!(err.contains("valid UTF-8"), "{err}");
         }
+    }
+
+    /// The terminal event's resume hint must produce exactly what re-reading every probe
+    /// row produces. If the two ever disagree the fast path is a liability, not a
+    /// shortcut.
+    #[test]
+    fn the_resume_hint_agrees_with_reading_every_row() {
+        const SEED: u64 = 0x00ff;
+        const PLANNED: u64 = 8;
+        let perm = crate::plan::Permutation::new(PLANNED, SEED);
+
+        // Raw indices 0..=3 completed, 4 was abandoned in flight, 5..8 never started.
+        let mut events = vec![
+            json!({"type":"scan_started","seq":0,"ts":"2026-07-30T12:00:00.000Z","scan_id":"c1","schema_version":1}),
+            json!({"type":"scan_config","seq":1,"ts":"2026-07-30T12:00:00.000Z","scan_id":"c1","scan_name":"s",
+                   "targets":{"spec":["10.0.0.0/29"],"exclude":[],"count":8,"mode":"matrix"},
+                   "ports":{"spec":"80","count":1},"probes_planned":8,
+                   "permutation":{"algorithm":"feistel4","seed":format!("{SEED:016x}")}}),
+        ];
+        for (n, raw) in (0..4u64).enumerate() {
+            let permuted = perm.apply(raw);
+            events.push(json!({
+                "type":"probe_result","seq":2+n,"ts":"2026-07-30T12:00:00.000Z","scan_id":"c1",
+                "probe_index":permuted,"target":format!("10.0.0.{permuted}"),"port":80,
+                "protocol":"tcp","state":"closed","source":"local_stack","attempts":1,
+                "attempt_states":["closed"],"timing_ms":{"total":1.0}
+            }));
+        }
+        events.push(
+            json!({"type":"scan_interrupted","seq":6,"ts":"2026-07-30T12:00:00.000Z","scan_id":"c1",
+               "termination":"signal",
+               "counts":{"planned":8,"started":5,"completed":4,"abandoned":1,"not_started":3,
+                         "open":0,"closed":4,"filtered":0,"error":0,"retried":0},
+               "not_started_from":5,"abandoned_indices":[4]}),
+        );
+
+        let d = tempfile::tempdir().unwrap();
+        let with_hint = write(d.path(), "hint.jsonl", &events);
+
+        // The same record with the hint removed, forcing the scanning path.
+        let mut stripped = events.clone();
+        let last = stripped.len() - 1;
+        stripped[last]
+            .as_object_mut()
+            .unwrap()
+            .retain(|k, _| k != "not_started_from" && k != "abandoned_indices");
+        let without = write(d.path(), "nohint.jsonl", &stripped);
+
+        let fast = remainder(&with_hint).unwrap();
+        let slow = remainder(&without).unwrap();
+        assert_eq!(fast.endpoints, slow.endpoints, "the two paths must agree");
+        assert_eq!(
+            fast.endpoints.len(),
+            4,
+            "one abandoned plus three never started"
+        );
+        // The notes differ only in the filename each was asked about.
+        let counted = |n: &str| n.split(';').next().unwrap().to_string();
+        assert_eq!(counted(&fast.note), counted(&slow.note));
+        assert!(fast.note.starts_with("4 of 8 endpoints"), "{}", fast.note);
+    }
+
+    /// A hint that disagrees with the counts is not trusted.
+    #[test]
+    fn an_inconsistent_resume_hint_falls_back_to_scanning() {
+        let d = tempfile::tempdir().unwrap();
+        let mut e = good_events();
+        e.remove(5);
+        e.remove(4);
+        e[4]["counts"] = json!({"planned":4,"started":2,"completed":2,"not_started":2,
+                                "abandoned":0,"open":1,"closed":1,"filtered":0,"error":0,"retried":0});
+        // Claims nothing is outstanding, which the counts contradict.
+        e[4]["not_started_from"] = json!(4);
+        e[4]["abandoned_indices"] = json!([]);
+        let p = write(d.path(), "bad_hint.jsonl", &e);
+        let r = remainder(&p).unwrap();
+        assert_eq!(
+            r.endpoints,
+            ["10.0.0.2:80", "10.0.0.3:80"],
+            "an untrustworthy hint must be ignored, not obeyed"
+        );
+    }
+
+    /// A killed scan's compressed record must still be readable up to its last frame.
+    ///
+    /// This is the whole reason the writer emits gzip in frames rather than as one
+    /// stream. Without it, turning on compression would quietly cost the `.partial`
+    /// guarantee — the record would be unreadable in exactly the case it matters.
+    #[test]
+    fn a_truncated_compressed_partial_reads_up_to_its_last_frame() {
+        use crate::output::JsonlWriter;
+
+        let d = tempfile::tempdir().unwrap();
+        let mut w = JsonlWriter::create(d.path(), "cut01", 1_700_000_000_000, true).unwrap();
+        w.emit("scan_started", json!({"schema_version": 1}))
+            .unwrap();
+        w.emit("scan_config", json!({"probes_planned": 20_000}))
+            .unwrap();
+        for i in 0..20_000u64 {
+            w.emit(
+                "probe_result",
+                json!({"target": format!("10.0.{}.{}", i / 256, i % 256), "port": 443,
+                       "state": "closed", "source": "local_stack", "protocol": "tcp",
+                       "attempts": 1, "attempt_states": ["closed"],
+                       "timing_ms": {"total": 1.0}, "probe_index": i}),
+            )
+            .unwrap();
+        }
+        let partial = w.partial_path().to_path_buf();
+        drop(w);
+
+        // Cut mid-frame, as a killed process would leave it.
+        let full = std::fs::read(&partial).unwrap();
+        let cut = d.path().join("cut.jsonl.gz.partial");
+        std::fs::write(&cut, &full[..full.len() - 4096]).unwrap();
+
+        let r = verify(&cut).expect("a truncated .partial must still be readable");
+        assert!(
+            r.events > 100,
+            "expected the earlier frames back, got {}",
+            r.events
+        );
+        assert!(
+            r.problems.iter().any(|p| p.contains(".partial suffix")),
+            "{:?}",
+            r.problems
+        );
+
+        // The same bytes under a finalized name are a corrupt record, not a partial one.
+        let final_name = d.path().join("cut.jsonl.gz");
+        std::fs::write(&final_name, &full[..full.len() - 4096]).unwrap();
+        let err = verify(&final_name).expect_err("a finalized record must decode fully");
+        assert!(err.contains("cannot read"), "{err}");
     }
 
     #[test]

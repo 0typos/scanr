@@ -248,6 +248,11 @@ struct OverrideArgs {
     #[arg(long)]
     all: bool,
 
+    /// Write the record as gzip. Roughly 20x smaller; `zcat`, `zless` and
+    /// `scanr output` read it unchanged.
+    #[arg(long)]
+    compress: bool,
+
     /// Permit target sets larger than 4,000,000 addresses
     #[arg(long)]
     allow_large_range: bool,
@@ -285,6 +290,7 @@ impl OverrideArgs {
             dns: self.dns,
             output_dir: self.output_dir.clone(),
             seed: self.seed,
+            compress: self.compress.then_some(true),
             open_only: if self.all {
                 Some(false)
             } else if self.open_only {

@@ -55,15 +55,93 @@ pub struct JsonlWriter {
     error: Option<String>,
 }
 
+/// Plaintext accumulated before a gzip member is emitted.
+///
+/// Large enough that the compressor sees repetition — the whole reason a record
+/// compresses ~20x is that consecutive lines are near-identical — and small enough that
+/// a killed process loses little.
+const FRAME_BYTES: usize = 256 * 1024;
+
+/// Appends gzip members to an inner writer, one per flush or per `FRAME_BYTES` of input.
+///
+/// Concatenated gzip members are themselves a valid gzip stream, so `zcat`, `gzip -d`
+/// and `zless` read the file with no special handling.
+///
+/// Framing is what preserves the `.partial` contract. A single gzip stream truncated by
+/// a killed process is unreadable past its start; framed, the record decodes up to the
+/// last completed member — the same guarantee an uncompressed buffer gives, and the
+/// reason critical events flush.
+struct GzFrames<W: Write> {
+    inner: W,
+    buf: Vec<u8>,
+}
+
+impl<W: Write> GzFrames<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            buf: Vec::with_capacity(FRAME_BYTES),
+        }
+    }
+
+    fn emit_frame(&mut self) -> std::io::Result<()> {
+        if self.buf.is_empty() {
+            return Ok(());
+        }
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&self.buf)?;
+        self.inner.write_all(&enc.finish()?)?;
+        self.buf.clear();
+        Ok(())
+    }
+}
+
+impl<W: Write> Write for GzFrames<W> {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(data);
+        if self.buf.len() >= FRAME_BYTES {
+            self.emit_frame()?;
+        }
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.emit_frame()?;
+        self.inner.flush()
+    }
+}
+
+impl<W: Write> Drop for GzFrames<W> {
+    fn drop(&mut self) {
+        // Without this a record whose writer is dropped without a final flush would end
+        // mid-frame and lose its tail.
+        let _ = self.emit_frame();
+    }
+}
+
 impl JsonlWriter {
-    pub fn create(dir: &Path, scan_id: &str, epoch_ms: u64) -> std::io::Result<Self> {
+    pub fn create(
+        dir: &Path,
+        scan_id: &str,
+        epoch_ms: u64,
+        compress: bool,
+    ) -> std::io::Result<Self> {
         std::fs::create_dir_all(dir)?;
-        let name = format!("scan-{epoch_ms}-{scan_id}.jsonl");
+        let name = if compress {
+            format!("scan-{epoch_ms}-{scan_id}.jsonl.gz")
+        } else {
+            format!("scan-{epoch_ms}-{scan_id}.jsonl")
+        };
         let final_path = dir.join(&name);
         let partial_path = dir.join(format!("{name}.partial"));
         let file = File::create(&partial_path)?;
+        let sink: Box<dyn Write + Send> = if compress {
+            Box::new(GzFrames::new(file))
+        } else {
+            Box::new(file)
+        };
         Ok(Self {
-            file: Some(BufWriter::with_capacity(64 * 1024, Box::new(file))),
+            file: Some(BufWriter::with_capacity(64 * 1024, sink)),
             partial_path,
             final_path,
             renames: true,
@@ -249,6 +327,99 @@ pub fn new_scan_id() -> String {
 }
 
 #[cfg(test)]
+mod compression_tests {
+    use super::*;
+    use std::io::Read as _;
+
+    fn write_record(dir: &Path, events: usize) -> PathBuf {
+        let mut w = JsonlWriter::create(dir, "gz001", 1_700_000_000_000, true).unwrap();
+        w.emit("scan_started", json!({"schema_version": SCHEMA_VERSION}))
+            .unwrap();
+        for i in 0..events {
+            // Repetitive by nature, which is why a record compresses at all.
+            w.emit(
+                "probe_result",
+                json!({"target": format!("10.0.{}.{}", i / 256, i % 256),
+                       "port": 443, "state": "closed", "source": "local_stack"}),
+            )
+            .unwrap();
+        }
+        w.emit_terminal("scan_completed", json!({"counts": {}}))
+            .unwrap();
+        w.finalize().unwrap()
+    }
+
+    #[test]
+    fn a_compressed_record_is_named_gz_and_round_trips() {
+        let d = tempfile::tempdir().unwrap();
+        let p = write_record(d.path(), 2000);
+        assert!(
+            p.to_string_lossy().ends_with(".jsonl.gz"),
+            "compressed records are named for what they are: {}",
+            p.display()
+        );
+
+        let mut out = String::new();
+        flate2::read::MultiGzDecoder::new(File::open(&p).unwrap())
+            .read_to_string(&mut out)
+            .expect("a finalized record decodes completely");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2002, "header + probes + terminal");
+        for l in &lines {
+            serde_json::from_str::<Value>(l).expect("every line is one JSON object");
+        }
+    }
+
+    /// The record must be written as several gzip members, not one stream. That is what
+    /// lets a killed scan still decode up to its last completed frame.
+    #[test]
+    fn the_record_is_written_in_frames() {
+        let d = tempfile::tempdir().unwrap();
+        let p = write_record(d.path(), 20_000);
+        let bytes = std::fs::read(&p).unwrap();
+        let members = bytes
+            .windows(3)
+            // gzip member header: magic 1f 8b, method 08 (deflate).
+            .filter(|w| w == b"\x1f\x8b\x08")
+            .count();
+        assert!(
+            members > 1,
+            "expected several frames, found {members} in {} bytes",
+            bytes.len()
+        );
+    }
+
+    #[test]
+    fn compression_actually_shrinks_the_record() {
+        let d = tempfile::tempdir().unwrap();
+        let gz = std::fs::metadata(write_record(d.path(), 5000))
+            .unwrap()
+            .len();
+
+        let d2 = tempfile::tempdir().unwrap();
+        let mut w = JsonlWriter::create(d2.path(), "pl001", 1_700_000_000_000, false).unwrap();
+        w.emit("scan_started", json!({"schema_version": SCHEMA_VERSION}))
+            .unwrap();
+        for i in 0..5000 {
+            w.emit(
+                "probe_result",
+                json!({"target": format!("10.0.{}.{}", i / 256, i % 256),
+                       "port": 443, "state": "closed", "source": "local_stack"}),
+            )
+            .unwrap();
+        }
+        w.emit_terminal("scan_completed", json!({"counts": {}}))
+            .unwrap();
+        let plain = std::fs::metadata(w.finalize().unwrap()).unwrap().len();
+
+        assert!(
+            plain > gz * 4,
+            "expected a large reduction, got {plain} -> {gz}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::probe::State;
@@ -265,7 +436,7 @@ mod tests {
     #[test]
     fn writes_partial_then_renames_on_terminal() {
         let dir = tempfile::tempdir().unwrap();
-        let mut w = JsonlWriter::create(dir.path(), "abcd1234", 1_700_000_000_000).unwrap();
+        let mut w = JsonlWriter::create(dir.path(), "abcd1234", 1_700_000_000_000, false).unwrap();
         assert!(w.partial_path().exists());
         assert!(
             w.partial_path()
@@ -293,7 +464,7 @@ mod tests {
     fn stays_partial_without_a_terminal_event() {
         // This is how a consumer detects that the process died mid-scan.
         let dir = tempfile::tempdir().unwrap();
-        let mut w = JsonlWriter::create(dir.path(), "dead", 1).unwrap();
+        let mut w = JsonlWriter::create(dir.path(), "dead", 1, false).unwrap();
         w.emit("scan_started", json!({})).unwrap();
         let p = w.finalize().unwrap();
         assert!(p.to_string_lossy().ends_with(".partial"));
@@ -302,7 +473,7 @@ mod tests {
     #[test]
     fn filename_carries_epoch_and_scan_id() {
         let dir = tempfile::tempdir().unwrap();
-        let w = JsonlWriter::create(dir.path(), "a3f19c02", 1_785_294_704_201).unwrap();
+        let w = JsonlWriter::create(dir.path(), "a3f19c02", 1_785_294_704_201, false).unwrap();
         assert_eq!(
             w.final_path().file_name().unwrap(),
             "scan-1785294704201-a3f19c02.jsonl"
@@ -312,7 +483,7 @@ mod tests {
     #[test]
     fn sequence_is_strictly_increasing() {
         let dir = tempfile::tempdir().unwrap();
-        let mut w = JsonlWriter::create(dir.path(), "s", 1).unwrap();
+        let mut w = JsonlWriter::create(dir.path(), "s", 1, false).unwrap();
         for i in 0..50 {
             w.emit("probe_result", json!({"port": i})).unwrap();
         }
@@ -332,7 +503,7 @@ mod tests {
     #[test]
     fn envelope_is_present_on_every_event() {
         let dir = tempfile::tempdir().unwrap();
-        let mut w = JsonlWriter::create(dir.path(), "envtest", 1).unwrap();
+        let mut w = JsonlWriter::create(dir.path(), "envtest", 1, false).unwrap();
         w.emit("scan_started", json!({"x": 1})).unwrap();
         w.emit_terminal("scan_completed", json!({})).unwrap();
         let path = w.finalize().unwrap();
@@ -349,7 +520,7 @@ mod tests {
     #[test]
     fn nothing_is_written_after_the_terminal_event() {
         let dir = tempfile::tempdir().unwrap();
-        let mut w = JsonlWriter::create(dir.path(), "t", 1).unwrap();
+        let mut w = JsonlWriter::create(dir.path(), "t", 1, false).unwrap();
         w.emit_terminal("scan_interrupted", json!({"signal": "SIGINT"}))
             .unwrap();
         w.emit("probe_result", json!({"port": 80})).unwrap();
@@ -423,7 +594,7 @@ mod tests {
     fn critical_events_are_flushed_immediately() {
         // A reader must be able to see the header while the scan is still running.
         let dir = tempfile::tempdir().unwrap();
-        let mut w = JsonlWriter::create(dir.path(), "flush", 1).unwrap();
+        let mut w = JsonlWriter::create(dir.path(), "flush", 1, false).unwrap();
         w.emit("scan_started", json!({})).unwrap();
         w.emit("scan_config", json!({"scan_name": "x"})).unwrap();
         let observed = std::fs::read_to_string(w.partial_path()).unwrap();
@@ -437,7 +608,7 @@ mod tests {
     #[test]
     fn body_fields_merge_into_the_envelope() {
         let dir = tempfile::tempdir().unwrap();
-        let mut w = JsonlWriter::create(dir.path(), "m", 1).unwrap();
+        let mut w = JsonlWriter::create(dir.path(), "m", 1, false).unwrap();
         w.emit_terminal(
             "scan_completed",
             json!({"duration_ms": 1234, "counts": {"open": 2}}),

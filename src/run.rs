@@ -89,7 +89,57 @@ pub struct RunOptions {
 
 /// One completed probe on its way from a worker to the writer.
 struct Completed {
+    /// The index the work counter issued, before the permutation was applied. Needed
+    /// alongside the permuted index in the record because the resume set is expressed in
+    /// counter space: the counter hands indices out in order, so what was never started
+    /// is a contiguous range there and a scattered mess anywhere else.
+    raw_index: u64,
     record: ProbeRecord,
+}
+
+/// Which issued probes reported back.
+///
+/// A bit per planned probe — 128 KB for a million-probe scan, against the 11 MB the scan
+/// already holds — so the terminal event can name exactly which probes were abandoned
+/// rather than only how many. `output remainder` then reconstructs the resume set from
+/// two events instead of re-reading the whole record.
+struct Reported {
+    bits: Vec<u64>,
+    planned: u64,
+}
+
+/// Above this the bitset would cost more than ~32 MB, so the terminal event omits the
+/// resume hint and `remainder` falls back to reading the probe rows.
+const MAX_TRACKED_PROBES: u64 = 256_000_000;
+
+impl Reported {
+    fn new(planned: u64) -> Option<Self> {
+        if planned > MAX_TRACKED_PROBES {
+            return None;
+        }
+        Some(Self {
+            bits: vec![0u64; (planned as usize).div_ceil(64).max(1)],
+            planned,
+        })
+    }
+
+    fn mark(&mut self, index: u64) {
+        if index < self.planned {
+            self.bits[(index / 64) as usize] |= 1 << (index % 64);
+        }
+    }
+
+    fn saw(&self, index: u64) -> bool {
+        index < self.planned && self.bits[(index / 64) as usize] & (1 << (index % 64)) != 0
+    }
+
+    /// Issued but never reported. Bounded in practice by how many probes were in flight
+    /// when the scan stopped, so this stays short even for a huge scan.
+    fn abandoned(&self, issued: u64) -> Vec<u64> {
+        (0..issued.min(self.planned))
+            .filter(|i| !self.saw(*i))
+            .collect()
+    }
 }
 
 /// Overrides for the two things `execute` would otherwise construct itself.
@@ -126,12 +176,11 @@ pub(crate) fn execute_with(
 
     let mut writer = match harness.writer {
         Some(w) => w,
-        None => JsonlWriter::create(&plan.output_dir, &scan_id, started_ms).map_err(|e| {
-            ScanError::Output {
+        None => JsonlWriter::create(&plan.output_dir, &scan_id, started_ms, plan.compress)
+            .map_err(|e| ScanError::Output {
                 path: plan.output_dir.clone(),
                 source: e,
-            }
-        })?,
+            })?,
     };
 
     // The header is a hard failure: a record without it cannot be interpreted, so there
@@ -175,6 +224,7 @@ pub(crate) fn execute_with(
         drain_budget: plan.timing.connect_timeout.min(MAX_DRAIN),
         progress_interval: harness.progress_interval.unwrap_or(PROGRESS_INTERVAL),
         total,
+        reported: Reported::new(total),
     }
     .run(&rx, &mut writer, &mut writer_error);
 
@@ -216,6 +266,10 @@ pub(crate) fn execute_with(
         interrupt_requested_at: collected.interrupt_requested_at,
         worker_panics,
         writer_error: writer_error.as_ref(),
+        resume: collected.reported.as_ref().map(|r| Resume {
+            not_started_from: counts.started,
+            abandoned_indices: r.abandoned(counts.started),
+        }),
     });
 
     let terminal_ok = writer.emit_terminal(termination.event_name(), body).is_ok();
@@ -356,12 +410,15 @@ struct Collector<'a> {
     drain_budget: Duration,
     progress_interval: Duration,
     total: u64,
+    /// `None` once the scan is too large to track a bit per probe.
+    reported: Option<Reported>,
 }
 
 /// What the collection loop produced.
 struct Collected {
     counts: Counts,
     interrupt_requested_at: Option<u64>,
+    reported: Option<Reported>,
 }
 
 impl Collector<'_> {
@@ -386,8 +443,11 @@ impl Collector<'_> {
 
         loop {
             match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(Completed { record }) => {
+                Ok(Completed { raw_index, record }) => {
                     counts.record(record.outcome.state, record.attempts);
+                    if let Some(r) = self.reported.as_mut() {
+                        r.mark(raw_index);
+                    }
                     if self.printer.should_print(&record.outcome) {
                         self.progress.clear();
                         self.printer.print(
@@ -442,6 +502,7 @@ impl Collector<'_> {
         Collected {
             counts,
             interrupt_requested_at,
+            reported: self.reported,
         }
     }
 
@@ -520,6 +581,20 @@ struct Terminal<'a> {
     interrupt_requested_at: Option<u64>,
     worker_panics: u32,
     writer_error: Option<&'a std::io::Error>,
+    /// Where the resume set starts, and which issued probes never reported.
+    resume: Option<Resume>,
+}
+
+/// Enough to reconstruct exactly what was not probed, without reading the probe rows.
+///
+/// The work counter hands indices out in order, so everything never started is the
+/// contiguous range `[not_started_from, planned)`. Only the probes that were issued and
+/// never reported are scattered, and there are at most as many of those as were in
+/// flight when the scan stopped. Together with the seed already in `scan_config`, this
+/// reproduces the outstanding endpoints exactly.
+struct Resume {
+    not_started_from: u64,
+    abandoned_indices: Vec<u64>,
 }
 
 fn terminal_body(t: &Terminal) -> serde_json::Value {
@@ -552,6 +627,12 @@ fn terminal_body(t: &Terminal) -> serde_json::Value {
     if let Some(e) = t.writer_error {
         body["error"] = json!(e.to_string());
         body["error_code"] = json!("writer_failure");
+    }
+    // Omitted for a scan too large to have tracked it, in which case `output remainder`
+    // falls back to reading every probe row.
+    if let Some(r) = &t.resume {
+        body["not_started_from"] = json!(r.not_started_from);
+        body["abandoned_indices"] = json!(r.abandoned_indices);
     }
     body
 }
@@ -631,7 +712,13 @@ fn worker(
             attempt_states,
         };
         // A send failure means the collector has gone; stop rather than spin.
-        if tx.send(Completed { record }).is_err() {
+        if tx
+            .send(Completed {
+                raw_index: index,
+                record,
+            })
+            .is_err()
+        {
             return;
         }
     }
@@ -756,7 +843,11 @@ fn config_event(plan: &ScanPlan, facts: &HostFacts) -> serde_json::Value {
             "retries": plan.timing.retries,
             "retry_delay_ms": plan.timing.retry_delay.as_millis() as u64,
         },
-        "output": { "dir": plan.output_dir.to_string_lossy(), "open_only": plan.open_only },
+        "output": {
+            "dir": plan.output_dir.to_string_lossy(),
+            "open_only": plan.open_only,
+            "compressed": plan.compress,
+        },
         "provenance": provenance,
         "host": {
             "ephemeral_range": facts.ephemeral_range.map(|(a, b)| vec![a, b]),

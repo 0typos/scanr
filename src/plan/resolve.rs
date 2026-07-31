@@ -48,6 +48,9 @@ pub struct Overrides {
     pub output_dir: Option<PathBuf>,
     pub seed: Option<u64>,
     pub open_only: Option<bool>,
+    /// Write the record as framed gzip. Off unless asked for: a plain record is
+    /// greppable, and that is worth keeping as the default.
+    pub compress: Option<bool>,
     pub allow_large_range: bool,
 }
 
@@ -144,6 +147,7 @@ pub fn resolve(
     // ── remaining scalars ───────────────────────────────────────────────────
     let output_dir = resolve_output_dir(files, scan_name, ov, &mut prov);
     let open_only = resolve_open_only(files, scan_name, ov, &mut prov);
+    let compress = resolve_compress(files, scan_name, ov, &mut prov);
     let seed = resolve_seed(ov, &mut prov);
 
     let port_spec = port_spec_override.unwrap_or_else(|| PortSummary(&ports).to_string());
@@ -166,6 +170,7 @@ pub fn resolve(
         resolved_hosts,
         seed,
         open_only,
+        compress,
         output_dir,
         provenance: prov,
         warnings,
@@ -388,6 +393,37 @@ fn resolve_output_dir(
                 None => {
                     prov.set("output_dir", Origin::Default);
                     PathBuf::from(DEFAULT_OUTPUT_DIR)
+                }
+            }
+        }
+    }
+}
+
+/// Framed gzip for the record. Defaults off: a scan record is a text file people grep,
+/// and turning that into a decision the tool makes for you is the kind of hidden
+/// behaviour this project avoids. `docs/tuning.md` says when to turn it on.
+fn resolve_compress(
+    files: &Layered,
+    scan_name: Option<&str>,
+    ov: &Overrides,
+    prov: &mut Provenance,
+) -> bool {
+    match ov.compress {
+        Some(v) => {
+            prov.set("compress", Origin::Cli);
+            v
+        }
+        None => {
+            let from_scan =
+                scan_name.and_then(|n| files.pick(|c| c.scans.get(n).and_then(|s| s.compress)));
+            match from_scan.or_else(|| files.pick(|c| c.defaults.compress)) {
+                Some((v, path)) => {
+                    prov.set("compress", Origin::Defaults(path));
+                    v
+                }
+                None => {
+                    prov.set("compress", Origin::Default);
+                    false
                 }
             }
         }

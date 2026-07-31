@@ -50,6 +50,11 @@ socket2 = "0.6"
 # Error definitions only.
 thiserror = "2"
 
+# Optional gzip framing for the scan record. `rust_backend` pinned explicitly rather
+# than taken by default: the zlib backends are C, and a musl-targeting C toolchain would
+# destroy the fully static build that makes the musl target worth having (D19).
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
 # sysctl/rlimit inspection, signal installation, getrandom. No std equivalent.
 libc = "0.2"
 

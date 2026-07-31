@@ -123,6 +123,7 @@ pub struct RawDefaults {
     pub transport: Option<String>,
     pub output_dir: Option<String>,
     pub open_only: Option<bool>,
+    pub compress: Option<bool>,
 }
 
 /// Timing knobs. Also inlineable on a scan, which is why this is its own type.
@@ -187,6 +188,7 @@ pub struct RawScan {
     pub ports: Option<StringOrVec>,
     pub exclude: Option<StringOrVec>,
     pub open_only: Option<bool>,
+    pub compress: Option<bool>,
     pub dns: Option<String>,
     pub output_dir: Option<String>,
     /// Inline timing overrides, same shape as a profile.
