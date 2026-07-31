@@ -248,19 +248,37 @@ struct OverrideArgs {
     #[arg(long)]
     all: bool,
 
-    /// Write the record as gzip. Roughly 20x smaller; `zcat`, `zless` and
+    /// Write the record as gzip (default). Roughly 20x smaller; `zcat`, `zless` and
     /// `scanr output` read it unchanged.
     #[arg(long)]
     compress: bool,
 
+    /// Write the record as plain JSONL, so it can be grepped directly
+    #[arg(long, conflicts_with = "compress")]
+    no_compress: bool,
+
     /// Collapse repetitive closed/filtered results into span events instead of one row
-    /// each. Much smaller records; drops per-probe timestamps for those results.
+    /// each (default). Much smaller records; drops per-probe timestamps for those.
     #[arg(long)]
     spans: bool,
+
+    /// Write one row per probe, keeping every timestamp
+    #[arg(long, conflicts_with = "spans")]
+    no_spans: bool,
 
     /// Permit target sets larger than 4,000,000 addresses
     #[arg(long)]
     allow_large_range: bool,
+}
+
+/// Resolve a `--thing` / `--no-thing` pair. `None` leaves it to configuration, which is
+/// what keeps the CLI an override layer rather than a second source of defaults.
+fn flag(on: bool, off: bool) -> Option<bool> {
+    match (on, off) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
+    }
 }
 
 fn duration_arg(s: &str) -> Result<Duration, String> {
@@ -295,8 +313,8 @@ impl OverrideArgs {
             dns: self.dns,
             output_dir: self.output_dir.clone(),
             seed: self.seed,
-            compress: self.compress.then_some(true),
-            spans: self.spans.then_some(true),
+            compress: flag(self.compress, self.no_compress),
+            spans: flag(self.spans, self.no_spans),
             open_only: if self.all {
                 Some(false)
             } else if self.open_only {
@@ -659,6 +677,21 @@ fn render_plan_timing(s: &mut String, plan: &ScanPlan, style: &Style) {
         "output",
         plan.output_dir.display().to_string(),
         &plan.provenance.render("output_dir"),
+    );
+    // Both change what the record contains, so they belong on the surface whose job is
+    // to say what the run will do before it does it.
+    row(
+        "  record",
+        format!(
+            "{}{}",
+            if plan.compress { "gzip" } else { "plain jsonl" },
+            if plan.spans {
+                ", repeated outcomes collapsed"
+            } else {
+                ", one row per probe"
+            }
+        ),
+        &plan.provenance.render("compress"),
     );
 }
 

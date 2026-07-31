@@ -16,7 +16,7 @@ completed in 2.31s — 0 open, 0 closed, 0 filtered, 64 error (64 of 64 probed)
 Look at the reason on a result to find out which case it is:
 
 ```console
-$ jq -r 'select(.type=="probe_result" and .state=="error") | .reason' scan-*.jsonl | sort | uniq -c
+$ zcat -f scan-*.jsonl* | jq -r 'select(.type=="probe_result" and .state=="error") | .reason' | sort | uniq -c
 ```
 
 ## `out of file descriptors`

@@ -71,7 +71,8 @@ keeps runs reproducible from a file rather than from shell history.
 --connect-timeout <dur>     --retries <n>
 --dns <auto|transport|local|disabled>
 --output-dir <path>         --seed <hex>
---open-only / --all         --compress              --spans
+--open-only / --all         --compress / --no-compress
+--spans / --no-spans
 --config <path>
 --verbose / -v              --quiet / -q
 --no-color                  --allow-large-range

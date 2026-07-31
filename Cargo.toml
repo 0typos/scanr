@@ -65,6 +65,8 @@ clap_mangen = "0.2"
 # Self-dependency so `cargo test` builds the library with the fixtures available while
 # `cargo build` and `cargo install` do not.
 scanr = { path = ".", features = ["testsupport"] }
+# Tests read records written with the default framed-gzip format.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [profile.release]
 opt-level = 3

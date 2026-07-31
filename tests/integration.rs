@@ -11,6 +11,24 @@ use serde_json::Value;
 
 const BIN: &str = env!("CARGO_BIN_EXE_scanr");
 
+/// Read a scan record, decompressing the default framed-gzip form.
+///
+/// Records are compressed unless a scan asks otherwise, so a test that reads one must
+/// cope with either shape — and reading the default shape is the point.
+fn record_text(path: &std::path::Path) -> String {
+    let bytes = std::fs::read(path).expect("record should be readable");
+    if bytes.starts_with(&[0x1f, 0x8b]) {
+        use std::io::Read as _;
+        let mut s = String::new();
+        flate2::read::MultiGzDecoder::new(&bytes[..])
+            .read_to_string(&mut s)
+            .expect("a finalized record decodes");
+        s
+    } else {
+        String::from_utf8(bytes).expect("record is UTF-8")
+    }
+}
+
 /// An IPv6 loopback listener, for the paths that only IPv6 reaches.
 fn open_port_v6() -> (TcpListener, SocketAddr) {
     let l = TcpListener::bind("[::1]:0").expect("IPv6 loopback should be available");
@@ -99,10 +117,12 @@ fn read_events(dir: &Path) -> Vec<Value> {
         .expect("output dir should exist")
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .find(|p| p.extension().is_some_and(|x| x == "jsonl"))
+        .find(|p| {
+            let n = p.file_name().unwrap_or_default().to_string_lossy();
+            n.starts_with("scan-") && !n.ends_with(".partial")
+        })
         .expect("a finalized .jsonl should exist");
-    std::fs::read_to_string(file)
-        .unwrap()
+    record_text(&file)
         .lines()
         .map(|l| serde_json::from_str(l).expect("valid JSON per line"))
         .collect()
@@ -146,6 +166,7 @@ fn adhoc_scan_writes_a_verifiable_record() {
         d.path(),
         &[
             "run",
+            "--no-spans",
             "--targets",
             "127.0.0.1",
             "--ports",
@@ -177,7 +198,10 @@ fn adhoc_scan_writes_a_verifiable_record() {
         .unwrap()
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .find(|p| p.extension().is_some_and(|x| x == "jsonl"))
+        .find(|p| {
+            let n = p.file_name().unwrap_or_default().to_string_lossy();
+            n.starts_with("scan-") && !n.ends_with(".partial")
+        })
         .unwrap();
     let v = scanr(d.path(), &["output", "verify", f.to_str().unwrap()]);
     assert_eq!(code(&v), 0, "{}", stdout(&v));
@@ -228,6 +252,7 @@ fn open_only_is_the_default_and_all_widens_it() {
         d.path(),
         &[
             "run",
+            "--no-spans",
             "--targets",
             "127.0.0.1",
             "--ports",
@@ -245,6 +270,7 @@ fn open_only_is_the_default_and_all_widens_it() {
         d.path(),
         &[
             "run",
+            "--no-spans",
             "--targets",
             "127.0.0.1",
             "--ports",
@@ -277,6 +303,7 @@ fn a_seed_makes_probe_order_reproducible() {
             d.path(),
             &[
                 "run",
+                "--no-spans",
                 "--targets",
                 "127.0.0.1",
                 "--ports",
@@ -295,10 +322,12 @@ fn a_seed_makes_probe_order_reproducible() {
             .unwrap()
             .filter_map(|e| e.ok())
             .map(|e| e.path())
-            .find(|p| p.extension().is_some_and(|x| x == "jsonl"))
+            .find(|p| {
+                let n = p.file_name().unwrap_or_default().to_string_lossy();
+                n.starts_with("scan-") && !n.ends_with(".partial")
+            })
             .unwrap();
-        let mut m: Vec<(u64, u64)> = std::fs::read_to_string(file)
-            .unwrap()
+        let mut m: Vec<(u64, u64)> = record_text(&file)
             .lines()
             .map(|l| serde_json::from_str::<Value>(l).unwrap())
             .filter(|e| e["type"] == "probe_result")
@@ -438,9 +467,12 @@ fn credentials_never_reach_the_record() {
         .unwrap()
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .find(|p| p.extension().is_some_and(|x| x == "jsonl"))
+        .find(|p| {
+            let n = p.file_name().unwrap_or_default().to_string_lossy();
+            n.starts_with("scan-") && !n.ends_with(".partial")
+        })
         .unwrap();
-    let body = std::fs::read_to_string(&file).unwrap();
+    let body = record_text(&file);
     assert!(
         !body.contains("s3cr3t-do-not-log"),
         "the password leaked into the scan record"
@@ -593,6 +625,7 @@ fn output_remainder_round_trips_into_a_rescan() {
         d.path(),
         &[
             "run",
+            "--no-spans",
             "--targets",
             "127.0.0.1,127.0.0.2",
             "--ports",
@@ -609,7 +642,10 @@ fn output_remainder_round_trips_into_a_rescan() {
         .unwrap()
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .find(|p| p.extension().is_some_and(|x| x == "jsonl"))
+        .find(|p| {
+            let n = p.file_name().unwrap_or_default().to_string_lossy();
+            n.starts_with("scan-") && !n.ends_with(".partial")
+        })
         .unwrap();
     let rem = scanr(d.path(), &["output", "remainder", file.to_str().unwrap()]);
     assert_eq!(code(&rem), 0, "{}", stderr(&rem));
@@ -623,7 +659,7 @@ fn output_remainder_round_trips_into_a_rescan() {
     // Now simulate an interrupted scan by dropping two probe_result lines, and check the
     // round trip re-probes exactly those endpoints and nothing else. This is the property
     // that justifies not having a `resume` command at all.
-    let text = std::fs::read_to_string(&file).unwrap();
+    let text = record_text(&file);
     let mut kept = Vec::new();
     let mut dropped = Vec::new();
     for line in text.lines() {
@@ -684,6 +720,7 @@ fn output_remainder_round_trips_into_a_rescan() {
         d.path(),
         &[
             "run",
+            "--no-spans",
             "--pairs",
             "resume.txt",
             "--output-dir",
@@ -698,10 +735,12 @@ fn output_remainder_round_trips_into_a_rescan() {
         .unwrap()
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .find(|p| p.extension().is_some_and(|x| x == "jsonl"))
+        .find(|p| {
+            let n = p.file_name().unwrap_or_default().to_string_lossy();
+            n.starts_with("scan-") && !n.ends_with(".partial")
+        })
         .unwrap();
-    let events: Vec<Value> = std::fs::read_to_string(file2)
-        .unwrap()
+    let events: Vec<Value> = record_text(&file2)
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
@@ -764,6 +803,88 @@ fn plan_describes_a_pair_scan_as_endpoints_not_a_matrix() {
     assert!(
         !s.contains("explicit host:port pairs)"),
         "the matrix rendering must not leak through: {s}"
+    );
+}
+
+/// The defaults are compressed and span-collapsed, and both must survive a round trip
+/// through the tools that read a record back.
+#[test]
+fn the_default_record_is_compressed_and_collapsed_and_still_verifies() {
+    let d = tempfile::tempdir().unwrap();
+    let (_l, open) = open_port();
+    let ports = format!("{},20000-20200", open.port());
+    let out = scanr(
+        d.path(),
+        &[
+            "run",
+            "--targets",
+            "127.0.0.1",
+            "--ports",
+            &ports,
+            "--output-dir",
+            "out",
+            "--all",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+
+    let file = std::fs::read_dir(d.path().join("out"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| {
+            let n = p.file_name().unwrap_or_default().to_string_lossy();
+            n.starts_with("scan-") && !n.ends_with(".partial")
+        })
+        .expect("a finalized record");
+
+    assert!(
+        file.to_string_lossy().ends_with(".jsonl.gz"),
+        "the default record is compressed: {}",
+        file.display()
+    );
+    assert_eq!(
+        &std::fs::read(&file).unwrap()[..2],
+        &[0x1f, 0x8b],
+        "and is really gzip, not just named so"
+    );
+
+    let events: Vec<Value> = record_text(&file)
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("valid JSON per line"))
+        .collect();
+    let spans: Vec<&Value> = events
+        .iter()
+        .filter(|e| e["type"] == "probe_span")
+        .collect();
+    assert!(!spans.is_empty(), "the closed ports should have collapsed");
+
+    // The open port is never collapsed, so it is still a row of its own.
+    let rows: Vec<&Value> = events
+        .iter()
+        .filter(|e| e["type"] == "probe_result")
+        .collect();
+    assert!(
+        rows.iter().any(|r| r["state"] == "open"),
+        "an open result always keeps its row"
+    );
+
+    // And the tools still agree the record is sound and complete.
+    let p = file.to_str().unwrap();
+    let v = scanr(d.path(), &["output", "verify", p]);
+    assert_eq!(code(&v), 0, "{}", stdout(&v));
+    assert!(
+        stdout(&v).contains("ok — record is complete"),
+        "{}",
+        stdout(&v)
+    );
+
+    let rem = scanr(d.path(), &["output", "remainder", p]);
+    assert_eq!(code(&rem), 0, "{}", stderr(&rem));
+    assert!(
+        stderr(&rem).contains("0 of 202 endpoints"),
+        "a complete scan has nothing outstanding: {}",
+        stderr(&rem)
     );
 }
 
@@ -861,6 +982,10 @@ fn writer_failure_exits_three_and_leaves_a_partial_file() {
     let mut cmd = Command::new(BIN);
     cmd.args([
         "run",
+        "--no-spans",
+        // The RLIMIT_FSIZE cap below only bites on a plain record; a compressed one
+        // of this size fits inside 4096 bytes and the write never fails.
+        "--no-compress",
         "--targets",
         "127.0.0.1",
         "--ports",
@@ -1029,6 +1154,7 @@ fn ipv6_direct_scan_classifies_correctly() {
         d.path(),
         &[
             "run",
+            "--no-spans",
             "--transport",
             "direct",
             "--targets",
@@ -1097,6 +1223,7 @@ fn ipv6_through_socks5_uses_the_atyp_ipv6_request() {
         d.path(),
         &[
             "run",
+            "--no-spans",
             "--transport",
             "fx",
             "--targets",
@@ -1132,6 +1259,7 @@ fn ipv6_cidr_expands_and_scans() {
         d.path(),
         &[
             "run",
+            "--no-spans",
             "--transport",
             "direct",
             "--targets",
