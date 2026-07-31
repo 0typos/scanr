@@ -42,6 +42,45 @@ pub fn now_rfc3339() -> String {
     rfc3339_ms(now_epoch_ms())
 }
 
+/// Does this string have the exact shape `rfc3339_ms` produces?
+///
+/// Deliberately a shape check, not a parser: D18 rejected a date library because we
+/// format one shape and never need a time value back. `verify` needs to know that a
+/// recorded `ts` is readable, which is a question about the string, not the instant.
+/// Ranges are checked so that `2026-13-45T99:99:99.999Z` is rejected.
+pub fn is_rfc3339_ms(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 24 {
+        return false;
+    }
+    let digits = |r: std::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);
+    if !(digits(0..4)
+        && digits(5..7)
+        && digits(8..10)
+        && digits(11..13)
+        && digits(14..16)
+        && digits(17..19)
+        && digits(20..23))
+    {
+        return false;
+    }
+    if !(b[4] == b'-'
+        && b[7] == b'-'
+        && b[10] == b'T'
+        && b[13] == b':'
+        && b[16] == b':'
+        && b[19] == b'.'
+        && b[23] == b'Z')
+    {
+        return false;
+    }
+    let n = |r: std::ops::Range<usize>| s[r].parse::<u32>().unwrap_or(u32::MAX);
+    let (mo, d, h, mi, sec) = (n(5..7), n(8..10), n(11..13), n(14..16), n(17..19));
+    // Leap seconds are permitted: we never emit one, but a record is not wrong for
+    // having come from a clock that does.
+    (1..=12).contains(&mo) && (1..=31).contains(&d) && h < 24 && mi < 60 && sec <= 60
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

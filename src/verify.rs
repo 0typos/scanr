@@ -224,6 +224,9 @@ pub fn verify(path: &Path) -> Result<VerifyReport, String> {
         }
     }
 
+    // Field values, not just structure.
+    check_values(&rec, &mut problems);
+
     notes.push(format!("{} probe results", commas(observed)));
     if rec.raw_lines != rec.events.len() {
         notes.push(format!("{} unparseable lines", rec.bad_lines.len()));
@@ -235,6 +238,175 @@ pub fn verify(path: &Path) -> Result<VerifyReport, String> {
         problems,
         notes,
     })
+}
+
+/// Accumulates value problems by kind rather than by row.
+///
+/// A systematically corrupt record — every row carrying the same defect — would
+/// otherwise emit one problem line per probe, which for a million-probe record is
+/// worse than useless.
+#[derive(Default)]
+struct ValueProblems {
+    /// kind -> (occurrences, first event index, first offending value)
+    seen: std::collections::BTreeMap<&'static str, (u64, usize, String)>,
+}
+
+impl ValueProblems {
+    fn note(&mut self, kind: &'static str, index: usize, value: impl std::fmt::Display) {
+        self.seen
+            .entry(kind)
+            .and_modify(|e| e.0 += 1)
+            .or_insert_with(|| (1, index, value.to_string()));
+    }
+
+    fn drain_into(self, problems: &mut Vec<String>) {
+        for (kind, (n, index, example)) in self.seen {
+            problems.push(format!(
+                "{} event(s) {kind} — first at event {index}: {example}",
+                commas(n)
+            ));
+        }
+    }
+}
+
+/// Validate the *values* in probe rows, not just the shape of the record.
+///
+/// `verify` originally checked structure alone — ordering, `seq`, count reconciliation,
+/// terminal uniqueness, credentials. A row carrying `"port": 65616` or
+/// `"state": "banana"` passed as "complete and internally consistent", and `remainder`
+/// then truncated that port and silently dropped a real endpoint from the resume set.
+/// Structure being right is not the same as the record being true.
+fn check_values(rec: &Record, problems: &mut Vec<String>) {
+    use crate::probe::{Source, State};
+
+    let states: Vec<&str> = [State::Open, State::Closed, State::Filtered, State::Error]
+        .iter()
+        .map(State::as_str)
+        .collect();
+    let sources: Vec<&str> = [
+        Source::LocalStack,
+        Source::ProxyReply,
+        Source::Timeout,
+        Source::Internal,
+    ]
+    .iter()
+    .map(Source::as_str)
+    .collect();
+
+    let planned = rec
+        .events
+        .iter()
+        .find(|e| kind(e) == "scan_config")
+        .and_then(|c| c["probes_planned"].as_u64());
+
+    let mut found = ValueProblems::default();
+
+    for (i, e) in rec.events.iter().enumerate() {
+        // Every event carries a timestamp, and it must be readable.
+        match e["ts"].as_str() {
+            None => found.note("have no `ts`", i, kind(e)),
+            Some(ts) if !crate::timefmt::is_rfc3339_ms(ts) => {
+                found.note("have a `ts` that is not RFC 3339", i, ts);
+            }
+            Some(_) => {}
+        }
+
+        if kind(e) != "probe_result" {
+            continue;
+        }
+
+        match e["port"].as_u64() {
+            None => found.note("have a missing or non-numeric `port`", i, &e["port"]),
+            Some(p) if p == 0 || p > u64::from(u16::MAX) => {
+                found.note("have a `port` outside 1-65535", i, p);
+            }
+            Some(_) => {}
+        }
+
+        match e["state"].as_str() {
+            Some(s) if states.contains(&s) => {}
+            other => found.note(
+                "have an unrecognised `state`",
+                i,
+                other.unwrap_or("(absent)"),
+            ),
+        }
+        match e["source"].as_str() {
+            Some(s) if sources.contains(&s) => {}
+            other => found.note(
+                "have an unrecognised `source`",
+                i,
+                other.unwrap_or("(absent)"),
+            ),
+        }
+        if e["protocol"].as_str() != Some("tcp") {
+            found.note("have a `protocol` other than `tcp`", i, &e["protocol"]);
+        }
+
+        // Retries are merged into one row (D10), so attempts is at least the one probe
+        // that produced it, and attempt_states holds exactly that many entries.
+        match e["attempts"].as_u64() {
+            None => found.note(
+                "have a missing or non-numeric `attempts`",
+                i,
+                &e["attempts"],
+            ),
+            Some(0) => found.note("have `attempts` of 0", i, 0),
+            Some(n) => {
+                if let Some(a) = e["attempt_states"].as_array()
+                    && a.len() as u64 != n
+                {
+                    found.note(
+                        "have an `attempt_states` length that disagrees with `attempts`",
+                        i,
+                        format!("attempts {n}, {} states", a.len()),
+                    );
+                }
+            }
+        }
+        if let Some(a) = e["attempt_states"].as_array()
+            && let Some(bad) = a
+                .iter()
+                .find(|s| !s.as_str().is_some_and(|s| states.contains(&s)))
+        {
+            found.note("have an unrecognised entry in `attempt_states`", i, bad);
+        }
+
+        // probe_index addresses a slot in the planned matrix, so it cannot name one
+        // outside it.
+        if let (Some(idx), Some(planned)) = (e["probe_index"].as_u64(), planned)
+            && idx >= planned
+        {
+            found.note(
+                "have a `probe_index` at or beyond `probes_planned`",
+                i,
+                format!("{idx} >= {planned}"),
+            );
+        }
+
+        if let Some(timing) = e["timing_ms"].as_object() {
+            for (phase, v) in timing {
+                match v.as_f64() {
+                    None => found.note("have a non-numeric timing", i, format!("{phase}={v}")),
+                    Some(ms) if ms < 0.0 || !ms.is_finite() => {
+                        found.note("have an impossible timing", i, format!("{phase}={ms}"));
+                    }
+                    Some(_) => {}
+                }
+            }
+            if !timing.contains_key("total") {
+                found.note("have no `timing_ms.total`", i, kind(e));
+            }
+        } else {
+            found.note(
+                "have a missing or malformed `timing_ms`",
+                i,
+                &e["timing_ms"],
+            );
+        }
+    }
+
+    found.drain_into(problems);
 }
 
 /// Walk a JSON value looking for a credential-shaped key with a real value.
@@ -478,10 +650,23 @@ pub fn remainder(path: &Path) -> Result<(Vec<String>, String), String> {
     };
 
     // Exactly what was reported, pair by pair.
+    //
+    // An out-of-range port means the record is corrupt, and it must be refused rather
+    // than narrowed: `p as u16` silently wrapped 65616 to 80, which both marked an
+    // endpoint as probed that never was and dropped the real one from the remainder.
+    // A resume driven by that output skipped endpoints with no indication.
     let mut probed: BTreeSet<(String, u16)> = BTreeSet::new();
     for e in rec.events.iter().filter(|e| kind(e) == "probe_result") {
         if let (Some(t), Some(p)) = (e["target"].as_str(), e["port"].as_u64()) {
-            probed.insert((t.to_string(), p as u16));
+            let port = u16::try_from(p).map_err(|_| {
+                format!(
+                    "{} records a probe of `{t}` on port {p}, which is not a valid TCP port; \
+                     the record is corrupt and its remainder cannot be derived safely \
+                     (run `scanr output verify` for the full picture)",
+                    path.display()
+                )
+            })?;
+            probed.insert((t.to_string(), port));
         }
     }
 
@@ -517,19 +702,32 @@ mod tests {
         p
     }
 
+    /// A record with every field a real one carries.
+    ///
+    /// It used to omit `source`, `protocol`, `attempts`, `attempt_states` and
+    /// `timing_ms`, and to use `"ts":"t"` — which was invisible while `verify` checked
+    /// structure only. A fixture that a real scan would never produce cannot support a
+    /// test called `accepts_a_well_formed_record`.
     fn good_events() -> Vec<Value> {
+        let probe = |seq: u64, idx: u64, target: &str, state: &str, source: &str| {
+            json!({"type":"probe_result","seq":seq,"ts":"2026-07-30T12:00:00.000Z","scan_id":"a1",
+                   "probe_index":idx,"target":target,"port":80,"protocol":"tcp",
+                   "state":state,"source":source,"service_label":"http",
+                   "attempts":1,"attempt_states":[state],
+                   "timing_ms":{"connect":1.5,"total":1.5}})
+        };
         vec![
-            json!({"type":"scan_started","seq":0,"ts":"t","scan_id":"a1","schema_version":1,"tool_version":"0.1.0"}),
-            json!({"type":"scan_config","seq":1,"ts":"t","scan_id":"a1","scan_name":"s",
+            json!({"type":"scan_started","seq":0,"ts":"2026-07-30T12:00:00.000Z","scan_id":"a1","schema_version":1,"tool_version":"0.1.0"}),
+            json!({"type":"scan_config","seq":1,"ts":"2026-07-30T12:00:00.000Z","scan_id":"a1","scan_name":"s",
                    "targets":{"spec":["10.0.0.0/30"],"exclude":[],"count":4},
                    "ports":{"spec":"80","count":1},"probes_planned":4,
                    "permutation":{"seed":"00000000000000ff"},
                    "transport":{"name":"direct","type":"direct","measured_fidelity":"full","password":null}}),
-            json!({"type":"probe_result","seq":2,"ts":"t","scan_id":"a1","target":"10.0.0.0","port":80,"state":"open","service_label":"http"}),
-            json!({"type":"probe_result","seq":3,"ts":"t","scan_id":"a1","target":"10.0.0.1","port":80,"state":"closed"}),
-            json!({"type":"probe_result","seq":4,"ts":"t","scan_id":"a1","target":"10.0.0.2","port":80,"state":"filtered"}),
-            json!({"type":"probe_result","seq":5,"ts":"t","scan_id":"a1","target":"10.0.0.3","port":80,"state":"error"}),
-            json!({"type":"scan_completed","seq":6,"ts":"t","scan_id":"a1","termination":"natural",
+            probe(2, 0, "10.0.0.0", "open", "local_stack"),
+            probe(3, 1, "10.0.0.1", "closed", "local_stack"),
+            probe(4, 2, "10.0.0.2", "filtered", "timeout"),
+            probe(5, 3, "10.0.0.3", "error", "internal"),
+            json!({"type":"scan_completed","seq":6,"ts":"2026-07-30T12:00:00.000Z","scan_id":"a1","termination":"natural",
                    "duration_ms":1234,
                    "counts":{"planned":4,"started":4,"completed":4,"not_started":0,
                              "open":1,"closed":1,"filtered":1,"error":1,"retried":0}}),
@@ -685,6 +883,116 @@ mod tests {
             "{:?}",
             r.problems
         );
+    }
+
+    /// The defect this guards: `verify` checked structure only, so a record could carry
+    /// an impossible port and be reported as "complete and internally consistent".
+    #[test]
+    fn rejects_a_port_outside_the_valid_range() {
+        let d = tempfile::tempdir().unwrap();
+        let mut e = good_events();
+        e[2]["port"] = json!(65616);
+        let p = write(d.path(), "badport.jsonl", &e);
+        let r = verify(&p).unwrap();
+        assert!(
+            r.problems.iter().any(|x| x.contains("`port` outside")),
+            "{:?}",
+            r.problems
+        );
+        assert!(!r.render().contains("ok — record is complete"));
+    }
+
+    /// The other half of the same defect: `remainder` truncated that port to `u16`,
+    /// 65616 became 80, and the endpoint that really was unprobed vanished from the
+    /// resume set with no indication.
+    #[test]
+    fn remainder_refuses_a_record_with_an_impossible_port() {
+        let d = tempfile::tempdir().unwrap();
+        let mut e = good_events();
+        e[2]["port"] = json!(65616);
+        let p = write(d.path(), "badport2.jsonl", &e);
+        let err = remainder(&p).expect_err("a corrupt port must not be silently narrowed");
+        assert!(err.contains("65616"), "{err}");
+        assert!(err.contains("not a valid TCP port"), "{err}");
+    }
+
+    #[test]
+    fn rejects_unrecognised_state_and_source() {
+        let d = tempfile::tempdir().unwrap();
+        let mut e = good_events();
+        e[2]["state"] = json!("banana");
+        e[3]["source"] = json!("vibes");
+        let p = write(d.path(), "badenum.jsonl", &e);
+        let r = verify(&p).unwrap();
+        assert!(
+            r.problems
+                .iter()
+                .any(|x| x.contains("unrecognised `state`")),
+            "{:?}",
+            r.problems
+        );
+        assert!(
+            r.problems
+                .iter()
+                .any(|x| x.contains("unrecognised `source`")),
+            "{:?}",
+            r.problems
+        );
+    }
+
+    #[test]
+    fn rejects_impossible_attempts_and_timings() {
+        let d = tempfile::tempdir().unwrap();
+        let mut e = good_events();
+        e[2]["attempts"] = json!(0);
+        e[3]["timing_ms"]["total"] = json!(-5.0);
+        e[4]["probe_index"] = json!(99);
+        let p = write(d.path(), "badvals.jsonl", &e);
+        let r = verify(&p).unwrap();
+        for expected in [
+            "`attempts` of 0",
+            "impossible timing",
+            "`probe_index` at or beyond",
+        ] {
+            assert!(
+                r.problems.iter().any(|x| x.contains(expected)),
+                "expected {expected:?} in {:?}",
+                r.problems
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_an_unreadable_timestamp() {
+        let d = tempfile::tempdir().unwrap();
+        let mut e = good_events();
+        e[2]["ts"] = json!("yesterday");
+        let p = write(d.path(), "badts.jsonl", &e);
+        let r = verify(&p).unwrap();
+        assert!(
+            r.problems.iter().any(|x| x.contains("not RFC 3339")),
+            "{:?}",
+            r.problems
+        );
+    }
+
+    /// A systematically corrupt record must not print one line per row.
+    #[test]
+    fn value_problems_are_aggregated_not_listed_per_row() {
+        let d = tempfile::tempdir().unwrap();
+        let mut e = good_events();
+        for (i, probe) in e.iter_mut().enumerate().skip(2).take(4) {
+            probe["port"] = json!(70000 + i as u64);
+        }
+        let p = write(d.path(), "manybad.jsonl", &e);
+        let r = verify(&p).unwrap();
+        let port_problems: Vec<_> = r
+            .problems
+            .iter()
+            .filter(|x| x.contains("`port` outside"))
+            .collect();
+        assert_eq!(port_problems.len(), 1, "{:?}", r.problems);
+        assert!(port_problems[0].contains('4'), "{}", port_problems[0]);
     }
 
     #[test]

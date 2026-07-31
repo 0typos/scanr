@@ -287,6 +287,49 @@ impl ScanPlan {
             self.probe_count() as f64 / self.timing.rate as f64,
         ))
     }
+
+    /// A minimal direct-transport plan over `127.0.0.1`, for tests that need to drive
+    /// `run::execute` rather than the resolver.
+    #[cfg(test)]
+    pub(crate) fn for_test(ports: Vec<u16>, concurrency: u32) -> Self {
+        Self {
+            scan_name: "test".into(),
+            description: None,
+            profile: "direct".into(),
+            transport: ResolvedTransport {
+                name: "direct".into(),
+                kind: TransportKind::Direct,
+                fidelity: Fidelity::Full,
+            },
+            timing: Timing {
+                concurrency,
+                rate: 0,
+                proxy_connect_timeout: Duration::from_millis(200),
+                handshake_timeout: Duration::from_millis(200),
+                connect_timeout: Duration::from_millis(200),
+                retries: 0,
+                retry_delay: Duration::ZERO,
+            },
+            dns_requested: DnsMode::Local,
+            dns_effective: DnsMode::Local,
+            targets: vec![Target::Addr("127.0.0.1".parse().unwrap())],
+            port_spec: ports
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            ports,
+            pairs: None,
+            target_specs: vec!["127.0.0.1".into()],
+            exclude_specs: vec![],
+            resolved_hosts: vec![],
+            seed: 1,
+            open_only: false,
+            output_dir: PathBuf::from("(unused)"),
+            provenance: Provenance::default(),
+            warnings: vec![],
+        }
+    }
 }
 
 #[cfg(test)]

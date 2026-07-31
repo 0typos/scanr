@@ -118,6 +118,9 @@ pub const WARNING_CODES: &[&str] = &[
     "ephemeral_pressure",
     "fd_pressure",
     "proxy_saturation",
+    // a scanr bug rather than an environmental condition, emitted just before the
+    // terminal event; forces `scan_failed`
+    "worker_panic",
 ];
 
 /// A condition that will degrade or invalidate a scan if it continues, detected while
