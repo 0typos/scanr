@@ -354,6 +354,37 @@ fn validate_transport_kind(
                 }
             }
         },
+        // Structure only. Whether the names resolve, form a cycle, or point at something
+        // that cannot carry a hop is decided by the resolver, which is the one place that
+        // can see every layer at once.
+        "chain" => {
+            if t.hops.as_ref().map(|h| h.items().len()).unwrap_or(0) == 0 {
+                errors.push(
+                    err_at(
+                        files,
+                        p,
+                        Some(table),
+                        "hops",
+                        format!("chain transport `{name}` needs at least one entry in `hops`"),
+                    )
+                    .help("hops = [\"first\", \"second\"] — each a socks5 transport, in order"),
+                );
+            }
+        }
+        "pool" => {
+            if t.members.as_ref().map(|m| m.items().len()).unwrap_or(0) == 0 {
+                errors.push(
+                    err_at(
+                        files,
+                        p,
+                        Some(table),
+                        "members",
+                        format!("pool transport `{name}` needs at least one entry in `members`"),
+                    )
+                    .help("members = [\"a\", \"b\"] — the proxies to spread work across"),
+                );
+            }
+        }
         "socks4" | "socks4a" => errors.push(
             err_at(
                 files,
@@ -375,7 +406,7 @@ fn validate_transport_kind(
                 "type",
                 format!("transport `{name}` is missing `type`"),
             )
-            .help("use `type = \"direct\"` or `type = \"socks5\"`"),
+            .help("use `type = \"direct\"`, `\"socks5\"`, `\"chain\"`, or `\"pool\"`"),
         ),
         other => {
             let mut e = err_at(
@@ -385,7 +416,7 @@ fn validate_transport_kind(
                 "type",
                 format!("unknown transport type `{other}`"),
             );
-            if let Some(s) = suggest(other, ["direct", "socks5"]) {
+            if let Some(s) = suggest(other, ["direct", "socks5", "chain", "pool"]) {
                 e = e.help(format!("did you mean `{s}`?"));
             }
             errors.push(e);

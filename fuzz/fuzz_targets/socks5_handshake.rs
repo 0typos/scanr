@@ -73,7 +73,10 @@ fuzz_target!(|data: &[u8]| {
     };
     let mut phases = Phases::default();
 
-    match client.negotiate(&mut peer, &mut phases, Instant::now()) {
+    // Credentials belong to the hop now, not the transport: a chain presents a different
+    // pair at each link. One hop is what a single proxy is.
+    let hop = client.hops()[0].clone();
+    match client.negotiate(&mut peer, &hop, &mut phases, Instant::now()) {
         Ok(()) => {
             // A completed handshake must have consumed a well-formed method selection.
             assert!(

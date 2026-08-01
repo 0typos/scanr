@@ -31,6 +31,23 @@ pub struct Timing {
     pub banner: Option<Banner>,
 }
 
+impl Timing {
+    /// A plain timing set for tests that need one but do not care what is in it.
+    #[cfg(test)]
+    pub fn for_test() -> Self {
+        Self {
+            concurrency: 4,
+            rate: 0,
+            proxy_connect_timeout: Duration::from_secs(1),
+            handshake_timeout: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(1),
+            retries: 0,
+            retry_delay: Duration::ZERO,
+            banner: None,
+        }
+    }
+}
+
 /// Limits for reading what an open service volunteers.
 ///
 /// One struct rather than a bool beside two numbers, so "off" is a state the type can
@@ -154,6 +171,19 @@ pub enum Fidelity {
 }
 
 impl Fidelity {
+    /// The less informative of two: what a caller can rely on when either might apply.
+    ///
+    /// Deliberately not an `Ord` derive. The variants are declared strongest-first, so a
+    /// derived `min` returns the *most* capable of a set — the exact opposite of "what
+    /// can I trust across all of these" — and it would have compiled without a murmur.
+    pub fn weakest(self, other: Fidelity) -> Fidelity {
+        match (self, other) {
+            (Fidelity::Unknown, _) | (_, Fidelity::Unknown) => Fidelity::Unknown,
+            (Fidelity::OpenOnly, _) | (_, Fidelity::OpenOnly) => Fidelity::OpenOnly,
+            _ => Fidelity::Full,
+        }
+    }
+
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "full" => Some(Fidelity::Full),
@@ -215,6 +245,23 @@ pub enum TransportKind {
         username: Option<String>,
         password: Option<Secret>,
     },
+    /// Several SOCKS5 servers traversed in order, each reached through the previous.
+    Chain {
+        hops: Vec<ResolvedHop>,
+    },
+    /// Several transports probed *across* rather than through.
+    Pool {
+        members: Vec<ResolvedTransport>,
+    },
+}
+
+/// One SOCKS5 server on a chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedHop {
+    pub name: String,
+    pub address: SocketAddr,
+    pub username: Option<String>,
+    pub password: Option<Secret>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,6 +276,8 @@ impl ResolvedTransport {
         match self.kind {
             TransportKind::Direct => "direct",
             TransportKind::Socks5 { .. } => "socks5",
+            TransportKind::Chain { .. } => "chain",
+            TransportKind::Pool { .. } => "pool",
         }
     }
 
@@ -247,6 +296,14 @@ impl ResolvedTransport {
                 Some(u) => format!("socks5 {address} (user {u}, password [redacted])"),
                 None => format!("socks5 {address}"),
             },
+            TransportKind::Chain { hops } => {
+                let path: Vec<String> = hops.iter().map(|h| h.address.to_string()).collect();
+                format!("chain of {} via {}", hops.len(), path.join(" -> "))
+            }
+            TransportKind::Pool { members } => {
+                let names: Vec<&str> = members.iter().map(|m| m.name.as_str()).collect();
+                format!("pool of {} across {}", members.len(), names.join(", "))
+            }
         }
     }
 }

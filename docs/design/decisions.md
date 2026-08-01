@@ -708,3 +708,46 @@ them cover the HTTP and TLS surface a passive read cannot reach.
 most standard thing that can be sent and it identifies a service definitively through the
 certificate, SNI and ALPN. It would still be an active probe and belongs behind its own
 flag, after the consent story above is written down properly.
+
+### D33 — Chains are one path; pools are many, and the record says which
+
+**Status:** accepted · **Alternatives:** chains only, pools with failover, round-robin
+
+Both were deferred at 0.1.0 and both are now here. They are different features that get
+confused because they both mean "more than one proxy".
+
+**A chain is the general case, so there is one code path.** `Socks5Transport` holds a
+list of hops and a single proxy is the one-hop degenerate case: greet hop N, ask it to
+CONNECT to hop N+1, speak SOCKS5 to N+1 over that tunnel, and only the last CONNECT names
+the destination. Writing a separate chain transport would have duplicated the handshake,
+the timeouts and the reply classification for no gain.
+
+Two consequences worth stating. **Fidelity is the weakest hop's** — one collapsing link
+flattens everything behind it, so a chain cannot claim what its first proxy manages. And
+**failures name their hop**: an intermediate CONNECT that fails is a fact about the chain,
+not a verdict on a port nothing ever reached, so it is reported as `error` with the hop
+index and address rather than as `closed`.
+
+**A pool is deterministic, not balanced.** Members are chosen by hashing the endpoint, so
+the same endpoint goes via the same proxy on every run. Round-robin would spread work
+marginally more evenly and would make a scan unreproducible, which is the property this
+tool exists to protect. FNV-1a rather than `DefaultHasher`, because the standard hasher is
+explicitly not stable across releases and an assignment that shifted under a toolchain
+upgrade would break exactly what the hashing is for.
+
+**And a pool is not failover.** A member that is down fails its share. Failover is the
+opposite of deterministic, and silently rerouting work would make the `via` field a lie.
+
+**`via` on every result** is what makes a mixed pool interpretable: a `closed` from a
+faithful member is real even when another member can only report `open_only`. Without it a
+single broken proxy is indistinguishable from a flaky network. It is `Arc<str>` because it
+is the same handful of names repeated across every probe, and `None` for a single proxy or
+a chain, where the config event already names the one path every probe took.
+
+**Fidelity has no `Ord`.** The variants are declared strongest-first, so a derived `min`
+returns the *most* capable of a set — the exact opposite of "what can I trust across all
+of these" — and it compiles without a murmur. `Fidelity::weakest` says what it means.
+
+**What this cost elsewhere.** The test fixture had to learn to relay: it replied to
+CONNECT and hung up, which no single-hop scan ever noticed because a connect scan sends
+nothing afterwards. A chain does — hop two's greeting has to travel through hop one.

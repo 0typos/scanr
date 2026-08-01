@@ -74,6 +74,13 @@ impl ProbeRecord {
             "timing_ms": timing,
         });
 
+        // Which pool member produced this. Absent for a single proxy or a chain, where
+        // the config event already names the one path every probe took — but for a pool
+        // it is the difference between "the network is flaky" and "member b is broken".
+        if let Some(member) = &self.outcome.via {
+            v["via"] = serde_json::json!(member.as_ref());
+        }
+
         // What the service said, recorded as it was sent.
         //
         // A JSON string when the bytes are valid UTF-8 — `serde_json` escapes control
@@ -115,6 +122,7 @@ mod tests {
                 },
                 pressure: None,
                 banner: None,
+                via: None,
             },
             attempts: 2,
             attempt_states: vec![State::Filtered, State::Open],

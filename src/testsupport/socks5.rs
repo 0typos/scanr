@@ -212,12 +212,16 @@ fn handle(mut s: TcpStream, behavior: Behavior, shutdown: Arc<AtomicBool>) -> st
         Behavior::AlwaysOpen => write_reply(&mut s, REP_SUCCEEDED)?,
         Behavior::Faithful | Behavior::Collapsing | Behavior::RequireAuth { .. } => {
             let collapsing = matches!(behavior, Behavior::Collapsing);
+            let mut upstream = None;
             let code = match dest {
                 None => REP_HOST_UNREACHABLE,
                 Some(ip) => {
                     let target = SocketAddr::new(ip, port);
                     match TcpStream::connect_timeout(&target, Duration::from_millis(500)) {
-                        Ok(_) => REP_SUCCEEDED,
+                        Ok(up) => {
+                            upstream = Some(up);
+                            REP_SUCCEEDED
+                        }
                         Err(e) if collapsing => {
                             let _ = e;
                             REP_GENERAL_FAILURE
@@ -232,10 +236,30 @@ fn handle(mut s: TcpStream, behavior: Behavior, shutdown: Arc<AtomicBool>) -> st
                 }
             };
             write_reply(&mut s, code)?;
+            // A real proxy relays once it has said `succeeded`; the fixture used to
+            // reply and hang up. Nothing noticed while every scan was one hop, because
+            // a connect scan never sends anything afterwards. A *chain* does: hop two's
+            // greeting has to travel through hop one, and a banner has to travel back.
+            if let Some(up) = upstream {
+                relay(s, up);
+            }
         }
         Behavior::DisconnectAt(_) | Behavior::NoAcceptableMethods => {}
     }
     Ok(())
+}
+
+/// Copy bytes both ways until either side is done.
+fn relay(client: TcpStream, upstream: TcpStream) {
+    let (Ok(mut c_rx), Ok(mut u_rx)) = (client.try_clone(), upstream.try_clone()) else {
+        return;
+    };
+    let (mut c_tx, mut u_tx) = (client, upstream);
+    let up = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut c_rx, &mut u_tx);
+    });
+    let _ = std::io::copy(&mut u_rx, &mut c_tx);
+    let _ = up.join();
 }
 
 fn write_reply(s: &mut TcpStream, code: u8) -> std::io::Result<()> {
