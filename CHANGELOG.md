@@ -40,6 +40,35 @@ invited before then.
   `chain` and `pool` joined `transport.type` within version 1 without a bump, which is the
   distinction the new table draws. A test pins the closed sets in both directions.
 
+### Security
+
+- **The scan record is now created mode 0600.** It was 0644 — a world-readable map of
+  what you scanned and what answered — while the tool simultaneously refused a
+  `password_file` that group or others could read. The `.partial` file carries the same
+  mode from the moment it exists, so there is no window at wider permissions.
+- **`password_file` is now checked on the descriptor it is read from.** Validation stat-ed
+  the path and resolution separately re-opened it, so the mode that was approved was not
+  necessarily the mode of the bytes that became the credential.
+- **All 31 GitHub Actions references are pinned to commit SHAs**, and `contents: write` is
+  scoped to the one job that publishes a release instead of being granted workflow-wide.
+  CI declares `contents: read` explicitly rather than inheriting the repository default.
+- **`unsafe_code` is denied crate-wide.** Each of the five blocks now carries an explicit
+  `#[allow(unsafe_code)]` and a safety comment stating the obligation it discharges; a
+  sixth cannot appear silently. One comment was wrong on its own terms — it described the
+  SIGINT handler as performing "only atomic stores" when it runs a compare-exchange loop.
+- **`docs/security.md` claimed three `unsafe` blocks when there were five**, omitting
+  `getentropy` and `signal`. A test now checks the doc against the source in both
+  directions.
+- **The threat model was silent on proxy chains.** A chain performs each hop's handshake
+  inside the previous hop's tunnel, so every hop sees the RFC 1929 credentials of every
+  hop after it. Documented, with the practical consequences.
+- **`build.rs` stamped the enclosing repository's commit** when the source tree had no
+  `.git` of its own — `git` searches upwards — so a vendored copy made a false provenance
+  claim in every record it produced. Reproduced, then fixed by requiring the repository
+  git finds to be this crate.
+- **`deny.toml` claimed duplicates could not arrive quietly while set to `warn`**, and one
+  already had. Now `deny`, with the single known duplicate listed and explained.
+
 ### Fixed
 
 - **`output verify` answered "I could not read it" and "I read it and it is bad" with the
