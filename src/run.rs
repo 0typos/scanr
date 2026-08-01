@@ -697,7 +697,11 @@ fn terminal_body(t: &Terminal) -> serde_json::Value {
         "graceful": !t.cancel.is_forced(),
         "counts": t.counts.to_json(),
         "duration_ms": t.duration.as_millis() as u64,
-        "exit_code": t.termination.exit_code(),
+        // Through the same helper the process exits by, and fed the writer failure, so a
+        // reader comparing `$?` against the record does not find them disagreeing. A
+        // writer that failed and then recovered enough to emit this event would otherwise
+        // record `0` for a run the shell saw exit `3`.
+        "exit_code": crate::cli::exit_code_for(t.termination, t.writer_error.is_some()),
     });
     // Recorded whenever an interrupt actually happened, not only when it won the label.
     // `Failed` outranks `Interrupted` deliberately — a crash needs investigating and the
