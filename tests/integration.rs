@@ -1346,9 +1346,8 @@ fn help_lists_the_documented_command_tree() {
 
 /// Write a config whose `services_file` renames a port the builtin table already knows,
 /// so a wrong precedence order is visible rather than merely unproven.
-fn services_fixture(d: &Path, extra: &str) -> SocketAddr {
-    let (_l, addr) = open_port();
-    std::mem::forget(_l);
+fn services_fixture(d: &Path, extra: &str) -> (TcpListener, SocketAddr) {
+    let (listener, addr) = open_port();
     std::fs::write(
         d.join("my-services"),
         // 8080 is `http-proxy` in the builtin table and usually `http-alt` in
@@ -1367,13 +1366,13 @@ fn services_fixture(d: &Path, extra: &str) -> SocketAddr {
         ),
     )
     .unwrap();
-    addr
+    (listener, addr)
 }
 
 #[test]
 fn a_configured_services_file_outranks_the_builtin_end_to_end() {
     let d = tempfile::tempdir().unwrap();
-    let addr = services_fixture(d.path(), "");
+    let (_l, addr) = services_fixture(d.path(), "");
 
     let out = scanr(
         d.path(),
@@ -1475,7 +1474,7 @@ fn unparseable_services_lines_warn_but_still_scan() {
 #[test]
 fn the_plan_names_its_label_sources() {
     let d = tempfile::tempdir().unwrap();
-    services_fixture(d.path(), "");
+    let _l = services_fixture(d.path(), "");
     let out = scanr(
         d.path(),
         &["plan", "--targets", "127.0.0.1", "--ports", "8080"],
@@ -1498,7 +1497,7 @@ fn the_plan_names_its_label_sources() {
 #[test]
 fn use_etc_services_false_makes_labels_host_independent() {
     let d = tempfile::tempdir().unwrap();
-    services_fixture(d.path(), "use_etc_services = false\n");
+    let _l = services_fixture(d.path(), "use_etc_services = false\n");
 
     // 8080 is `internal-api` in the fixture, `http-proxy` in the builtin, and usually
     // `http-alt` in /etc/services. 5432 is in the builtin. 70 is normally only in
@@ -1562,7 +1561,7 @@ fn use_etc_services_false_makes_labels_host_independent() {
 #[test]
 fn the_plan_marks_etc_services_as_declined() {
     let d = tempfile::tempdir().unwrap();
-    services_fixture(d.path(), "use_etc_services = false\n");
+    let _l = services_fixture(d.path(), "use_etc_services = false\n");
     let out = scanr(
         d.path(),
         &["plan", "--targets", "127.0.0.1", "--ports", "8080"],
@@ -1582,5 +1581,58 @@ fn the_plan_marks_etc_services_as_declined() {
     assert!(
         !line.contains("/etc/services ("),
         "declined, yet the layer contributed: {line}"
+    );
+}
+
+#[test]
+fn output_get_labels_span_rows_from_the_configured_table() {
+    // Rows that were collapsed into a `probe_span` have no `service_label` in the record,
+    // so `get` synthesises one. That is the only reason a read-only command needs a label
+    // table at all, and moving the install out of the shared `output` entry point once
+    // dropped it entirely without a single test noticing.
+    let d = tempfile::tempdir().unwrap();
+    let closed = closed_port();
+    std::fs::write(
+        d.path().join("my-services"),
+        format!("collapsed-svc  {}/tcp\n", closed.port()),
+    )
+    .unwrap();
+    std::fs::write(
+        d.path().join("scanr.toml"),
+        format!(
+            "version = 1\n[defaults]\noutput_dir = \"out\"\nservices_file = \"{}\"\n",
+            d.path().join("my-services").display()
+        ),
+    )
+    .unwrap();
+
+    let out = scanr(
+        d.path(),
+        &[
+            "run",
+            "--targets",
+            "127.0.0.1",
+            "--ports",
+            &closed.port().to_string(),
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+
+    let record = scanr::testsupport::find_record(&d.path().join("out")).expect("a record");
+    let got = scanr(
+        d.path(),
+        &[
+            "output",
+            "get",
+            "--states",
+            "closed",
+            record.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code(&got), 0, "{}", stderr(&got));
+    assert!(
+        stdout(&got).contains("collapsed-svc"),
+        "the span row should be labelled from the configured table: {}",
+        stdout(&got)
     );
 }

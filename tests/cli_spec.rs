@@ -202,15 +202,6 @@ fn the_documented_profiles_match_the_builtins() {
         })
         .collect();
 
-    let dur = |d: std::time::Duration| {
-        let ms = d.as_millis();
-        if ms.is_multiple_of(1000) {
-            format!("{}s", ms / 1000)
-        } else {
-            format!("{ms}ms")
-        }
-    };
-
     for p in builtin_profiles() {
         let row = rows.get(p.name).unwrap_or_else(|| {
             panic!(
@@ -230,7 +221,14 @@ fn the_documented_profiles_match_the_builtins() {
             format!("{}/s", p.timing.rate)
         };
         assert_eq!(row[2], rate, "{}: rate", p.name);
-        assert_eq!(row[3], dur(p.timing.connect_timeout), "{}: connect", p.name);
+        // The same renderer `scanr plan` prints these with, so the table cannot
+        // agree with the test while disagreeing with the tool.
+        assert_eq!(
+            row[3],
+            scanr::units::render_duration(p.timing.connect_timeout),
+            "{}: connect",
+            p.name
+        );
         assert_eq!(row[4], p.timing.retries.to_string(), "{}: retries", p.name);
     }
 
@@ -258,6 +256,9 @@ fn spell(n: usize) -> &'static str {
         6 => "Six",
         7 => "Seven",
         8 => "Eight",
-        _ => "some",
+        9 => "Nine",
+        // A fallback that returned a word the document would never contain made the
+        // failure read as "the prose is wrong" when the real cause is this list.
+        _ => panic!("add {n} to `spell` so the profile-count assertion stays meaningful"),
     }
 }

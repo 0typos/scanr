@@ -103,6 +103,11 @@ impl ResultPrinter {
     /// Widest state name (`filtered`).
     const STATE_W: usize = 8;
     /// Widest service label in the table (`kube-apiserver`).
+    /// Wide enough for the compiled-in labels, which is all this could be sized to.
+    ///
+    /// Labels now come from `/etc/services` or a user file as well, so a longer one is
+    /// possible and simply widens its own row — the explicit `GAP` below means a long
+    /// value pushes the next column right rather than colliding with it.
     const LABEL_W: usize = 14;
     /// `99999.9ms`
     const LATENCY_W: usize = 9;

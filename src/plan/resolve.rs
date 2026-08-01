@@ -380,10 +380,14 @@ fn resolve_dns(
 /// Build the port-label table from `defaults.services_file`, `/etc/services`, and the
 /// builtin, in that order.
 ///
+/// The single owner of that precedence. `cmd_output` resolves through this too, passing
+/// throwaway provenance and warnings, so the labels a record is read back with cannot
+/// drift from the ones it was written with.
+///
 /// A configured file that cannot be read is fatal: naming a path that is not there is a
 /// mistake, and silently scanning with different labels than asked for is worse than
 /// stopping. A missing `/etc/services` is not — "when it exists" is its whole contract.
-fn resolve_services(
+pub(crate) fn resolve_services(
     files: &Layered,
     prov: &mut Provenance,
     warnings: &mut Vec<PlanWarning>,

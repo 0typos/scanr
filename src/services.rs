@@ -27,11 +27,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// A source of labels, identified for the record.
+/// A *file* source of labels, identified for the record.
+///
+/// The builtin is not a variant: only file layers are recorded in `stats`, and giving it
+/// one meant a state the type allowed and the code could never produce. It appears in
+/// `provenance()` as a literal, always last.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Layer {
-    /// The compiled-in table.
-    Builtin,
     /// The host's `/etc/services`.
     Etc(PathBuf),
     /// A file named by `defaults.services_file`.
@@ -40,10 +42,8 @@ pub enum Layer {
 
 impl std::fmt::Display for Layer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Layer::Builtin => write!(f, "builtin"),
-            Layer::Etc(p) | Layer::Configured(p) => write!(f, "{}", p.display()),
-        }
+        let (Layer::Etc(p) | Layer::Configured(p)) = self;
+        write!(f, "{}", p.display())
     }
 }
 
@@ -84,12 +84,6 @@ pub struct ServiceTable {
     /// coverage for labels that match on every machine. Someone comparing two records
     /// needs to be able to tell which.
     etc_suppressed: bool,
-}
-
-impl Default for ServiceTable {
-    fn default() -> Self {
-        Self::builtin_only()
-    }
 }
 
 pub const ETC_SERVICES: &str = "/etc/services";
@@ -194,8 +188,12 @@ impl ServiceTable {
                     malformed += 1;
                     continue;
                 }
+                // First layer to claim a port keeps it, which is also what makes the
+                // first name on a line the canonical one. `entry` rather than
+                // `contains_key` + `insert` so the key is hashed once.
                 Ok(p) => {
-                    if self.learned.insert_if_absent(p, name) {
+                    if let std::collections::hash_map::Entry::Vacant(v) = self.learned.entry(p) {
+                        v.insert(name.into());
                         entries += 1;
                     }
                 }
@@ -253,7 +251,6 @@ impl ServiceTable {
             .iter()
             .map(|s| {
                 let name = match &s.layer {
-                    Layer::Builtin => "builtin".to_string(),
                     // Spelled in full: "services (5862)" for /etc/services reads like
                     // some file called `services`.
                     Layer::Etc(p) => p.display().to_string(),
@@ -264,10 +261,13 @@ impl ServiceTable {
                         .map(|f| f.to_string_lossy().into_owned())
                         .unwrap_or_else(|| p.display().to_string()),
                 };
-                format!("{name} ({})", s.entries)
+                format!("{name} ({})", crate::units::commas(s.entries as u64))
             })
             .collect();
-        parts.push(format!("builtin ({})", self.builtin_contribution()));
+        parts.push(format!(
+            "builtin ({})",
+            crate::units::commas(self.builtin_contribution() as u64)
+        ));
         let mut s = parts.join(" + ");
         if self.etc_suppressed {
             s.push_str(" [/etc/services off]");
@@ -291,7 +291,7 @@ impl ServiceTable {
             .collect();
         // Always last, always present: every table ends here.
         layers.push(serde_json::json!({
-            "source": Layer::Builtin.to_string(),
+            "source": "builtin",
             "entries": self.builtin_contribution(),
             "malformed": 0,
         }));
@@ -301,24 +301,6 @@ impl ServiceTable {
             // true here, and the layer's absence says the rest.
             "use_etc_services": !self.etc_suppressed,
         })
-    }
-}
-
-/// `HashMap::insert` overwrites and `entry().or_insert()` allocates the key's value
-/// eagerly on every line. This does neither, and reports whether it took.
-trait InsertIfAbsent {
-    fn insert_if_absent(&mut self, port: u16, name: &str) -> bool;
-}
-
-impl InsertIfAbsent for HashMap<u16, Box<str>> {
-    fn insert_if_absent(&mut self, port: u16, name: &str) -> bool {
-        match self.entry(port) {
-            std::collections::hash_map::Entry::Occupied(_) => false,
-            std::collections::hash_map::Entry::Vacant(v) => {
-                v.insert(name.into());
-                true
-            }
-        }
     }
 }
 
@@ -387,8 +369,11 @@ fn builtin(port: u16) -> Option<&'static str> {
     })
 }
 
-/// Ports the builtin layer knows, for the record's provenance. Asserted against the
-/// table itself in the tests, so it cannot drift.
+/// Ports in the compiled-in table. Asserted against the table itself in the tests, so it
+/// cannot drift.
+///
+/// Not what the record reports for the builtin layer — that is `builtin_contribution()`,
+/// which excludes ports a file layer already claimed.
 pub const BUILTIN_PORTS: usize = 59;
 
 // ── the process-wide table ──────────────────────────────────────────────────
@@ -424,14 +409,19 @@ pub fn service_label(port: u16) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
-    fn tmp(name: &str, body: &str) -> PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!("scanr-services-{name}-{}", std::process::id()));
-        let mut f = std::fs::File::create(&p).expect("create fixture");
-        f.write_all(body.as_bytes()).expect("write fixture");
-        p
+    /// A fixture file in its own temporary directory.
+    ///
+    /// The returned `TempDir` must be held for the life of the test; dropping it removes
+    /// the file. That is the point: the hand-rolled version this replaced built a path
+    /// from the pid and relied on a trailing `remove_file` in each test, which never ran
+    /// when an assertion failed — leaving fixtures behind for the next run to collide
+    /// with, under names that had to be kept unique by hand.
+    fn tmp(name: &str, body: impl AsRef<[u8]>) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(name);
+        std::fs::write(&path, body).expect("write fixture");
+        (dir, path)
     }
 
     const ETC: &str = "\
@@ -464,30 +454,28 @@ http-alt        8080/tcp        webcache
 
     #[test]
     fn a_services_file_supplies_ports_the_builtin_lacks() {
-        let etc = tmp("gopher", ETC);
+        let (_etc_dir, etc) = tmp("gopher", ETC);
         let t = ServiceTable::resolve(None, Some(&etc)).expect("fixture is readable");
         // 70 is in no builtin arm.
         assert_eq!(t.lookup(70), Some("gopher"));
         // ...and the builtin still answers underneath it.
         assert_eq!(t.lookup(5432), Some("postgresql"));
-        let _ = std::fs::remove_file(&etc);
     }
 
     #[test]
     fn etc_services_outranks_the_builtin() {
-        let etc = tmp("outranks", ETC);
+        let (_etc_dir, etc) = tmp("outranks", ETC);
         let t = ServiceTable::resolve(None, Some(&etc)).expect("fixture is readable");
         // The builtin calls 8080 http-proxy; this file calls it http-alt. The file wins,
         // which is the whole point of reading it.
         assert_eq!(builtin(8080), Some("http-proxy"));
         assert_eq!(t.lookup(8080), Some("http-alt"));
-        let _ = std::fs::remove_file(&etc);
     }
 
     #[test]
     fn a_configured_file_outranks_etc_services() {
-        let etc = tmp("prec-etc", ETC);
-        let mine = tmp(
+        let (_etc_dir, etc) = tmp("prec-etc", ETC);
+        let (_mine_dir, mine) = tmp(
             "prec-mine",
             "internal-api   8080/tcp\nbuild-cache    9099/tcp\n",
         );
@@ -508,48 +496,42 @@ http-alt        8080/tcp        webcache
             layers,
             vec![mine.display().to_string(), etc.display().to_string()]
         );
-
-        let _ = std::fs::remove_file(&etc);
-        let _ = std::fs::remove_file(&mine);
     }
 
     #[test]
     fn udp_rows_are_skipped_without_being_called_broken() {
         // Roughly half of a real /etc/services is udp. Counting those as malformed would
         // make every scan warn about the system's own file.
-        let etc = tmp("udp", ETC);
+        let (_etc_dir, etc) = tmp("udp", ETC);
         let t = ServiceTable::resolve(None, Some(&etc)).expect("fixture is readable");
         assert_eq!(t.layers()[0].malformed, 0, "udp is not a parse failure");
         assert_eq!(t.lookup(53), Some("domain"));
-        let _ = std::fs::remove_file(&etc);
     }
 
     #[test]
     fn the_first_name_for_a_port_is_the_canonical_one() {
         // Aliases follow the canonical name on the line, and duplicate lines for one
         // port list the preferred spelling first.
-        let f = tmp("first-wins", "www 80/tcp\nhttp 80/tcp\n");
+        let (_f_dir, f) = tmp("first-wins", "www 80/tcp\nhttp 80/tcp\n");
         let t = ServiceTable::resolve(Some(&f), None).expect("fixture is readable");
         assert_eq!(t.lookup(80), Some("www"));
         assert_eq!(t.layers()[0].entries, 1, "the second line adds nothing");
-        let _ = std::fs::remove_file(&f);
     }
 
     #[test]
     fn comments_and_blank_lines_are_not_entries() {
-        let f = tmp(
+        let (_f_dir, f) = tmp(
             "comments",
             "\n# a comment\n\nssh 22/tcp   # trailing\n   \n",
         );
         let t = ServiceTable::resolve(Some(&f), None).expect("fixture is readable");
         assert_eq!(t.layers()[0].entries, 1);
         assert_eq!(t.layers()[0].malformed, 0);
-        let _ = std::fs::remove_file(&f);
     }
 
     #[test]
     fn unparseable_lines_are_counted_not_fatal() {
-        let f = tmp(
+        let (_f_dir, f) = tmp(
             "malformed",
             "ssh 22/tcp\nlonely\nnoslash 80\nbadport 99999/tcp\nzero 0/tcp\n",
         );
@@ -559,14 +541,13 @@ http-alt        8080/tcp        webcache
         assert_eq!(stat.entries, 1);
         assert_eq!(stat.malformed, 4, "lonely, noslash, 99999, and 0");
         assert_eq!(t.malformed().count(), 1, "one layer to warn about");
-        let _ = std::fs::remove_file(&f);
     }
 
     #[test]
     fn an_nmap_services_file_parses() {
         // Same first two columns, plus a frequency. Worth supporting: it is the obvious
         // file to reach for, and it has far more ports than /etc/services.
-        let f = tmp("nmap", "http 80/tcp 0.484143\nkerberos-sec 88/udp 0.001\n");
+        let (_f_dir, f) = tmp("nmap", "http 80/tcp 0.484143\nkerberos-sec 88/udp 0.001\n");
         let t = ServiceTable::resolve(Some(&f), None).expect("fixture is readable");
         assert_eq!(t.lookup(80), Some("http"));
         assert_eq!(
@@ -574,7 +555,6 @@ http-alt        8080/tcp        webcache
             0,
             "the frequency column is just an alias"
         );
-        let _ = std::fs::remove_file(&f);
     }
 
     #[test]
@@ -610,8 +590,8 @@ http-alt        8080/tcp        webcache
 
     #[test]
     fn provenance_names_every_layer_in_priority_order() {
-        let etc = tmp("prov-etc", ETC);
-        let mine = tmp("prov-mine", "internal-api 8080/tcp\nlonely\n");
+        let (_etc_dir, etc) = tmp("prov-etc", ETC);
+        let (_mine_dir, mine) = tmp("prov-mine", "internal-api 8080/tcp\nlonely\n");
         let t = ServiceTable::resolve(Some(&mine), Some(&etc)).expect("fixtures are readable");
 
         let p = t.provenance();
@@ -621,14 +601,11 @@ http-alt        8080/tcp        webcache
         assert_eq!(layers[0]["malformed"], 1);
         assert_eq!(layers[1]["source"], etc.display().to_string());
         assert_eq!(layers[2]["source"], "builtin");
-
-        let _ = std::fs::remove_file(&etc);
-        let _ = std::fs::remove_file(&mine);
     }
 
     #[test]
     fn summary_reads_left_to_right_by_priority() {
-        let etc = tmp("sum-etc", ETC);
+        let (_etc_dir, etc) = tmp("sum-etc", ETC);
         let t = ServiceTable::resolve(None, Some(&etc)).expect("fixture is readable");
         let s = t.summary();
         assert!(s.contains(" + "), "{s}");
@@ -639,7 +616,6 @@ http-alt        8080/tcp        webcache
             s.ends_with(&format!("builtin ({})", BUILTIN_PORTS - 4)),
             "{s}"
         );
-        let _ = std::fs::remove_file(&etc);
     }
 
     /// The documented meaning of `entries` is "what this layer contributed", so the rows
@@ -648,8 +624,8 @@ http-alt        8080/tcp        webcache
     /// `/etc/services` claims 57 of its 59.
     #[test]
     fn layer_entries_account_for_every_port_exactly_once() {
-        let etc = tmp("sum-inv-etc", ETC);
-        let mine = tmp(
+        let (_etc_dir, etc) = tmp("sum-inv-etc", ETC);
+        let (_mine_dir, mine) = tmp(
             "sum-inv-mine",
             "internal-api 8080/tcp\nbuild-cache 9099/tcp\n",
         );
@@ -666,9 +642,6 @@ http-alt        8080/tcp        webcache
             reported, answerable,
             "the layer rows must sum to the ports the table answers for"
         );
-
-        let _ = std::fs::remove_file(&etc);
-        let _ = std::fs::remove_file(&mine);
     }
 
     #[test]
@@ -700,7 +673,7 @@ http-alt        8080/tcp        webcache
         // The parser reads a file the user chose but did not necessarily write — an
         // /etc/services from a distro, an nmap-services from the internet. It should
         // account for junk, not fall over on it.
-        let f = tmp(
+        let (_f_dir, f) = tmp(
             "pathological",
             "\u{0}/tcp\n///\n80/tcp\nname 80/tcp/extra\n \t \n\
              x -1/tcp\nx 65536/tcp\nx 22/TCP\nx 22/tcp\u{7f}\n#\n\u{1f600} 81/tcp\n",
@@ -715,23 +688,19 @@ http-alt        8080/tcp        webcache
         );
         // And the port that follows a bad line is unaffected by it.
         assert!(t.layers()[0].malformed > 0);
-        let _ = std::fs::remove_file(&f);
     }
 
     #[test]
     fn a_non_utf8_configured_file_is_rejected_not_ignored() {
-        let mut p = std::env::temp_dir();
-        p.push(format!("scanr-services-binary-{}", std::process::id()));
-        std::fs::write(&p, [0xff, 0xfe, 0x00, 0x01]).expect("write fixture");
+        let (_dir, p) = tmp("binary", [0xff, 0xfe, 0x00, 0x01]);
         let err = ServiceTable::resolve(Some(&p), None)
             .expect_err("a file that is not text was not the file they meant");
         assert!(err.to_string().contains("UTF-8"), "{err}");
-        let _ = std::fs::remove_file(&p);
     }
 
     #[test]
     fn declining_etc_services_leaves_the_configured_file_and_the_builtin() {
-        let mine = tmp("decline", "internal-api 8080/tcp\n");
+        let (_mine_dir, mine) = tmp("decline", "internal-api 8080/tcp\n");
         let t = ServiceTable::resolve_from_host(Some(&mine), false).expect("fixture is readable");
 
         assert_eq!(
@@ -751,8 +720,6 @@ http-alt        8080/tcp        webcache
             "{}",
             t.summary()
         );
-
-        let _ = std::fs::remove_file(&mine);
     }
 
     #[test]
