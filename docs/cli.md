@@ -167,11 +167,15 @@ you get plain, unaligned text; `--no-color` and `NO_COLOR` turn colour off expli
 |---|---|
 | 0 | completed naturally, including when nothing was open |
 | 1 | usage or configuration error; nothing was scanned |
-| 2 | the scan failed after starting |
+| 2 | the scan failed after starting; for `output verify`, the record has problems |
 | 3 | the record could not be written |
 | 130 | interrupted by SIGINT; the record was finalized |
 
 Finding no open ports is a successful scan, not an error.
+
+`output verify` distinguishes the two ways it can fail to say "ok": `1` means it could
+not read the record, `2` means it read it and found problems. A caller that treats any
+non-zero as "bad record" would otherwise report a mistyped path as corruption.
 
 ## Non-interactive by default
 

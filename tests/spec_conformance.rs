@@ -297,6 +297,47 @@ fn spec_warning_codes_match_the_code() {
     }
 }
 
+/// The closed enumerations must stay closed, and the spec must list exactly them.
+///
+/// `state` and `source` are the two fields a consumer is invited to `match` on
+/// exhaustively, so widening either is a schema break rather than a normal additive
+/// change. This fails in both directions: adding a variant without bumping the version,
+/// and documenting a value the code cannot emit. The open-ended sets are deliberately not
+/// pinned here — `transport.type` gained `chain` and `pool` within version 1, which is the
+/// distinction the spec table exists to draw.
+#[test]
+fn the_closed_enumerations_match_the_spec() {
+    use scanr::probe::{Source, State};
+    let doc = spec("output-schema.md");
+
+    let states: Vec<&str> = State::ALL.iter().map(|s| s.as_str()).collect();
+    assert_eq!(
+        states,
+        ["open", "closed", "filtered", "error"],
+        "`state` is documented as a closed set; widening it is a schema_version bump"
+    );
+
+    let sources = [
+        Source::LocalStack,
+        Source::ProxyReply,
+        Source::Timeout,
+        Source::Internal,
+    ];
+    let sources: Vec<&str> = sources.iter().map(|s| s.as_str()).collect();
+    assert_eq!(
+        sources,
+        ["local_stack", "proxy_reply", "timeout", "internal"],
+        "`source` is documented as a closed set; widening it is a schema_version bump"
+    );
+
+    for v in states.iter().chain(sources.iter()) {
+        assert!(
+            doc.contains(&format!("`{v}`")),
+            "closed-set value `{v}` is not documented in docs/output-schema.md"
+        );
+    }
+}
+
 #[test]
 fn spec_json_examples_are_valid_json() {
     // A spec whose examples do not parse cannot be trusted by someone writing a

@@ -34,6 +34,12 @@ fn build_version() -> &'static str {
 pub const EXIT_OK: u8 = 0;
 pub const EXIT_USAGE: u8 = 1;
 pub const EXIT_SCAN_FAILED: u8 = 2;
+/// `output verify` only: the record was read and found wanting.
+///
+/// Shares its number with `EXIT_SCAN_FAILED` because the commands are disjoint — nothing
+/// scans and verifies in one invocation — and both mean "the thing you asked about is
+/// broken", as against `1` for "your invocation was".
+pub const EXIT_RECORD_PROBLEMS: u8 = 2;
 pub const EXIT_WRITER_FAILED: u8 = 3;
 pub const EXIT_INTERRUPTED: u8 = 130;
 
@@ -1160,10 +1166,15 @@ fn cmd_output(cli: &Cli, cmd: &OutputCmd) -> Result<u8, ConfigError> {
         OutputCmd::Verify { file } => {
             let report = crate::verify::verify(file).map_err(ConfigError::new)?;
             let _ = write!(std::io::stdout(), "{}", report.render());
+            // "I checked and it is bad" is not "I could not check". Both were `1`, so a
+            // caller could not tell a corrupt record from a path it got wrong — and for a
+            // verification tool that is the distinction the exit code exists to carry. An
+            // unreadable file still returns `1` through the error path above, as a usage
+            // error does everywhere else.
             Ok(if report.problems.is_empty() {
                 EXIT_OK
             } else {
-                EXIT_USAGE
+                EXIT_RECORD_PROBLEMS
             })
         }
         OutputCmd::Results {
@@ -1243,6 +1254,37 @@ fn cmd_output_results(
     }
 
     let hits = crate::verify::get(file, &q).map_err(ConfigError::new)?;
+
+    // A name filter that found nothing is worth explaining. Host filters compare against
+    // the target text the scan recorded and are deliberately not resolved — the record is
+    // read offline, and a scan using transport-side DNS never resolved the name here in
+    // the first place. So `--hosts localhost` against a record of `127.0.0.1` is an empty
+    // result that looks exactly like "nothing was open", which is the wrong conclusion.
+    // A typo in `--states` is already a loud error for the same reason.
+    if hits.is_empty() {
+        let names: Vec<&str> = q
+            .hosts
+            .iter()
+            .filter_map(|h| match h {
+                crate::net::TargetSpec::Host(n) => Some(n.as_str()),
+                _ => None,
+            })
+            .collect();
+        if !names.is_empty() {
+            let _ = writeln!(
+                std::io::stderr(),
+                "note: no results for {}. Host filters match the target text the scan \
+                 recorded and are not resolved, so a name matches only if the scan was \
+                 given that name — try the address instead.",
+                names
+                    .iter()
+                    .map(|n| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+
     let mut out = std::io::stdout().lock();
     if let Some(how) = format.handoff() {
         if how.feeds_a_tool() {

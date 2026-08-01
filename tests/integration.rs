@@ -1104,7 +1104,9 @@ fn writer_failure_exits_three_and_leaves_a_partial_file() {
     let partial = entries.iter().find(|n| n.ends_with(".partial")).unwrap();
     let path = d.path().join("out").join(partial);
     let v = scanr(d.path(), &["output", "verify", path.to_str().unwrap()]);
-    assert_eq!(code(&v), 1, "verify should reject it: {}", stdout(&v));
+    // 2, not 1: the record was read and found wanting. 1 is reserved for not being able
+    // to read it at all, so a caller can tell a corrupt record from a mistyped path.
+    assert_eq!(code(&v), 2, "verify should reject it: {}", stdout(&v));
     let so = stdout(&v);
     assert!(so.contains(".partial suffix"), "{so}");
     assert!(so.contains("no terminal event"), "{so}");
