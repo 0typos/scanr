@@ -4,10 +4,10 @@ Distribution is prebuilt static binaries attached to a GitHub release. The crate
 marked `publish = false` and is not pushed to crates.io; remove that line if that ever
 changes.
 
-> The workflows in `.github/workflows/` were written without a remote to run them
-> against and are therefore **unverified**. Expect to iterate on the first push and the
-> first tag. Everything below has been checked locally except the workflow runs
-> themselves.
+> `ci.yml` has gated every commit on `main` and is proven. `release.yml`'s build matrix
+> has run green via `workflow_dispatch`, covering compilation, the dirty-tree check,
+> packaging and artifact upload. Two things only a real tag can reach — the `publish` job
+> and the tag-versus-`--version` comparison — were first exercised by v0.1.0.
 
 ## Checklist
 

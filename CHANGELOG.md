@@ -15,7 +15,7 @@ into a semver `1.0` commitment. `1.0.0` is reserved until at least one external 
 parsed a record and told us what the format is missing. Schema feedback is explicitly
 invited before then.
 
-## [Unreleased]
+## [0.1.0] - 2026-08-01
 
 ### Added
 
