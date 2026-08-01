@@ -129,6 +129,53 @@ fn stream(path: &Path) -> Result<impl Iterator<Item = Result<RecordLine, String>
     }))
 }
 
+/// Write a record out as plain JSONL, decompressing a gzip one on the way.
+///
+/// Exists because compression is the default, and the shell tool that would otherwise do
+/// this is not portable: `zcat -f`'s pass-through of uncompressed input is a GNU
+/// extension, and macOS ships BSD gzip. The tool already sniffs the format for its own
+/// commands, so exposing that costs nothing and makes every documented `jq` recipe work
+/// the same everywhere.
+///
+/// Byte-faithful and streaming: the record is copied through, not parsed and re-emitted,
+/// so it stays valid for a consumer even if this build would not have written it that
+/// way.
+pub fn cat(path: &Path, out: &mut dyn std::io::Write) -> Result<(), String> {
+    use std::io::Read;
+
+    let mut reader = open_record(path)?;
+    let truncation_expected = is_partial(path);
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut wrote = false;
+
+    loop {
+        let n = match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            // A `.partial` file is expected to stop mid-way; see `stream`.
+            Err(e)
+                if truncation_expected
+                    && wrote
+                    && matches!(
+                        e.kind(),
+                        std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::InvalidData
+                    ) =>
+            {
+                break;
+            }
+            Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+        };
+        match out.write_all(&buf[..n]) {
+            Ok(()) => wrote = true,
+            // `scanr output cat big.jsonl.gz | head` closes the pipe early. That is the
+            // reader saying "enough", not a failure of ours.
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
+            Err(e) => return Err(format!("cannot write: {e}")),
+        }
+    }
+    Ok(())
+}
+
 /// A file still named `.partial` means the process died before finalizing it.
 fn is_partial(path: &Path) -> bool {
     path.to_string_lossy().ends_with(".partial")

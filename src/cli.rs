@@ -166,6 +166,8 @@ enum OutputCmd {
     Verify { file: PathBuf },
     /// Print targets that were not fully probed, for feeding back into --targets
     Remainder { file: PathBuf },
+    /// Write the record as plain JSONL, decompressing it if needed
+    Cat { file: PathBuf },
 }
 
 // `PowerShell` trips enum_variant_names, but the name is the shell's, not ours.
@@ -969,6 +971,11 @@ fn cmd_output(_cli: &Cli, cmd: &OutputCmd) -> Result<u8, ConfigError> {
             } else {
                 EXIT_USAGE
             })
+        }
+        OutputCmd::Cat { file } => {
+            let mut out = std::io::stdout().lock();
+            crate::verify::cat(file, &mut out).map_err(ConfigError::new)?;
+            Ok(EXIT_OK)
         }
         OutputCmd::Remainder { file } => {
             let rem = crate::verify::remainder(file).map_err(ConfigError::new)?;
