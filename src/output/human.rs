@@ -317,6 +317,7 @@ mod tests {
             },
             pressure: None,
             banner: None,
+            via: None,
         }
     }
 

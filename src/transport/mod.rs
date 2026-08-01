@@ -5,6 +5,7 @@
 //! landed where it did (D1), given SOCKS5 is the primary path.
 
 pub mod direct;
+pub mod pool;
 pub mod socks5;
 
 use std::fmt;
@@ -73,6 +74,21 @@ pub fn build(resolved: &crate::plan::types::ResolvedTransport) -> Box<dyn Transp
             username.clone(),
             password.as_ref().map(|s| s.expose().to_string()),
             resolved.fidelity,
+        )),
+        TransportKind::Chain { hops } => Box::new(socks5::Socks5Transport::chained(
+            resolved.name.clone(),
+            hops.iter()
+                .map(|h| socks5::Hop {
+                    address: h.address,
+                    username: h.username.clone(),
+                    password: h.password.as_ref().map(|s| s.expose().to_string()),
+                })
+                .collect(),
+            resolved.fidelity,
+        )),
+        TransportKind::Pool { members } => Box::new(pool::PoolTransport::new(
+            resolved.name.clone(),
+            members.iter().map(build).collect(),
         )),
     }
 }

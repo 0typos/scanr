@@ -138,6 +138,77 @@ held connections without complaint while losing 48% of probes in a churning scan
 same concurrency, because it keeps closed connections in its table long enough for a
 continuously-reconnecting scanner to exceed the cap.
 
+## Chains
+
+Several proxies traversed in order, each reached through the one before it:
+
+```toml
+[transports.bastion]
+type = "socks5"
+address = "10.0.0.1:1080"
+
+[transports.inner]
+type = "socks5"
+address = "192.168.50.1:1080"
+
+[transports.deep]
+type = "chain"
+hops = ["bastion", "inner"]     # traversed left to right
+```
+
+Every hop must be a `socks5` transport — a chain is built out of CONNECTs, and a direct
+transport has nothing to CONNECT *through*. Each hop carries its own credentials.
+
+**A chain is only as honest as its weakest link.** One hop that collapses reply codes
+flattens everything behind it, so the chain reports its weakest hop's fidelity and
+`transport test` measures the path end to end rather than just the first proxy.
+
+When a link fails, the reason names which one:
+
+```
+hop 1 (10.0.0.1:1080) refused to reach hop 2 (192.168.50.1:1080): reply 0x02
+```
+
+Without that, every chain failure reads as one anonymous proxy error and finding the
+broken link means bisecting by hand. The record stores every hop, so it stays answerable
+afterwards.
+
+## Pools
+
+Several proxies probed *across* rather than through:
+
+```toml
+[transports.spread]
+type = "pool"
+members = ["exit-a", "exit-b", "exit-c"]
+```
+
+Two things this buys. Local **ephemeral ports** are budgeted per four-tuple, not per
+host — a port in `TIME_WAIT` against proxy A is still available against proxy B — so
+distinct proxy addresses multiply the ~470/s ceiling roughly linearly. And each proxy
+brings its own **connection cap**, which is usually what binds first.
+
+Assignment is deterministic: an endpoint is hashed to a member, so the same endpoint goes
+via the same proxy on every run and a result can be reproduced rather than re-rolled.
+Every result records which member produced it:
+
+```console
+$ scanr output results --states open --format json rec.jsonl.gz | jq -r .via
+exit-a
+exit-c
+```
+
+That is the difference between "the network is flaky" and "exit-b is broken".
+
+**A pool is not failover.** A member that is down fails its share of the work rather than
+having it taken over — failover is the opposite of deterministic, and reproducibility is
+the property being protected. The pool reports its weakest member's fidelity, and
+`transport test` refuses a pool and tells you to test the members individually, because
+one report cannot honestly describe N different paths.
+
+Pools take proxies, not the direct transport: mixing one in would send some probes
+unproxied without saying which.
+
 ## Authentication
 
 RFC 1929 username/password. It authenticates you to the proxy; **it does not encrypt

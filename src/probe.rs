@@ -96,9 +96,21 @@ pub struct ProbeOutcome {
     /// anything. Raw: never decoded here, because what a service sends is its choice and
     /// interpreting it is the reader's job.
     pub banner: Option<Vec<u8>>,
+    /// Which pool member produced this, when the transport was a pool.
+    ///
+    /// `None` for a single proxy or a chain, where the `scan_config` event already names
+    /// the one path every probe took. An `Arc` because it is the same handful of strings
+    /// repeated across every probe in the scan.
+    pub via: Option<std::sync::Arc<str>>,
 }
 
 impl ProbeOutcome {
+    /// Name the pool member that produced this.
+    pub fn via(mut self, name: std::sync::Arc<str>) -> Self {
+        self.via = Some(name);
+        self
+    }
+
     /// Attach what the service volunteered, if anything.
     pub fn with_banner(mut self, banner: Option<Vec<u8>>) -> Self {
         self.banner = banner;
@@ -113,6 +125,7 @@ impl ProbeOutcome {
             phases,
             pressure: None,
             banner: None,
+            via: None,
         }
     }
 
@@ -124,6 +137,7 @@ impl ProbeOutcome {
             phases,
             pressure: None,
             banner: None,
+            via: None,
         }
     }
 

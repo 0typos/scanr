@@ -114,7 +114,24 @@ pub fn measure(
     known_closed: Option<&str>,
     calibrate: bool,
 ) -> Result<FidelityReport, String> {
-    let (address, username, password) = match &transport.kind {
+    // A pool is N independent paths with N fidelities; one report cannot describe it
+    // honestly, and averaging them would be worse than refusing.
+    if let TransportKind::Pool { members } = &transport.kind {
+        let names: Vec<&str> = members.iter().map(|m| m.name.as_str()).collect();
+        return Err(format!(
+            "`{}` is a pool of {} transports, each with its own fidelity.\n\
+             Test them individually: {}",
+            transport.name,
+            members.len(),
+            names
+                .iter()
+                .map(|n| format!("scanr transport test {n}"))
+                .collect::<Vec<_>>()
+                .join("\n             ")
+        ));
+    }
+    let (client, address) = match &transport.kind {
+        TransportKind::Pool { .. } => unreachable!("refused above"),
         TransportKind::Direct => {
             return Ok(FidelityReport {
                 transport: transport.name.clone(),
@@ -136,19 +153,33 @@ pub fn measure(
             username,
             password,
         } => (
+            Socks5Transport::new(
+                transport.name.clone(),
+                *address,
+                username.clone(),
+                password.as_ref().map(|s| s.expose().to_string()),
+                Fidelity::Unknown,
+            ),
             *address,
-            username.clone(),
-            password.as_ref().map(|s| s.expose().to_string()),
+        ),
+        // End to end, through every hop. Testing only the first would report what that
+        // proxy can distinguish, which is not what any result down the chain will show:
+        // one collapsing link anywhere flattens everything behind it.
+        TransportKind::Chain { hops } => (
+            Socks5Transport::chained(
+                transport.name.clone(),
+                hops.iter()
+                    .map(|h| crate::transport::socks5::Hop {
+                        address: h.address,
+                        username: h.username.clone(),
+                        password: h.password.as_ref().map(|s| s.expose().to_string()),
+                    })
+                    .collect(),
+                Fidelity::Unknown,
+            ),
+            hops[0].address,
         ),
     };
-
-    let client = Socks5Transport::new(
-        transport.name.clone(),
-        address,
-        username.clone(),
-        password,
-        Fidelity::Unknown,
-    );
 
     // Calibration needs a destination the proxy can definitely reach. Using the proxy's
     // own listening socket seemed obvious and fails against real software: dante refuses
@@ -176,7 +207,7 @@ pub fn measure(
             ("known-closed", closed_dest, "closed", timing),
             ("blackholed", blackhole, "filtered", &short),
         ],
-        username.is_some(),
+        client.hops()[0].username.is_some(),
     );
 
     let closed_reply = checks

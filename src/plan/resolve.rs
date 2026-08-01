@@ -721,6 +721,36 @@ fn duration_field(
 }
 
 fn resolve_transport(files: &Layered, name: &str) -> Result<ResolvedTransport, ConfigError> {
+    resolve_transport_at(files, name, &mut Vec::new())
+}
+
+/// `visiting` is the path taken to get here, so a config that references itself is
+/// reported as the cycle it is rather than recursing until the stack gives out.
+fn resolve_transport_at(
+    files: &Layered,
+    name: &str,
+    visiting: &mut Vec<String>,
+) -> Result<ResolvedTransport, ConfigError> {
+    if let Some(at) = visiting.iter().position(|v| v == name) {
+        let mut loop_path = visiting[at..].to_vec();
+        loop_path.push(name.to_string());
+        return Err(ConfigError::new(format!(
+            "transport `{name}` contains itself: {}",
+            loop_path.join(" -> ")
+        ))
+        .help("a chain's hops and a pool's members must eventually reach real proxies"));
+    }
+    visiting.push(name.to_string());
+    let out = resolve_transport_inner(files, name, visiting);
+    visiting.pop();
+    out
+}
+
+fn resolve_transport_inner(
+    files: &Layered,
+    name: &str,
+    visiting: &mut Vec<String>,
+) -> Result<ResolvedTransport, ConfigError> {
     let found = files.pick(|c| c.transports.get(name).cloned());
     let Some((raw, path)) = found else {
         if name == DEFAULT_TRANSPORT {
@@ -784,6 +814,88 @@ fn resolve_transport(files: &Layered, name: &str) -> Result<ResolvedTransport, C
                     username: raw.username.clone(),
                     password,
                 },
+                fidelity,
+            })
+        }
+        Some("chain") => {
+            let names = raw.hops.as_ref().map(|h| h.items()).unwrap_or_default();
+            if names.is_empty() {
+                return Err(ConfigError::new(format!(
+                    "chain transport `{name}` needs at least one entry in `hops`"
+                ))
+                .at(path));
+            }
+            let mut hops = Vec::with_capacity(names.len());
+            for hop_name in &names {
+                let resolved = resolve_transport_at(files, hop_name, visiting)?;
+                // Only SOCKS5 can carry another hop: a chain is built out of CONNECTs,
+                // and a direct transport has nothing to CONNECT *through*.
+                let TransportKind::Socks5 {
+                    address,
+                    username,
+                    password,
+                } = resolved.kind
+                else {
+                    return Err(ConfigError::new(format!(
+                        "chain `{name}` names `{hop_name}`, which is a {} transport",
+                        resolved.type_name()
+                    ))
+                    .at(path.clone())
+                    .help("every hop of a chain must be a `socks5` transport"));
+                };
+                hops.push(ResolvedHop {
+                    name: hop_name.to_string(),
+                    address,
+                    username,
+                    password,
+                });
+            }
+            // One collapsing link flattens everything behind it, so the path can only
+            // claim what its weakest hop can.
+            let fidelity = names
+                .iter()
+                .map(|n| {
+                    resolve_transport_at(files, n, visiting)
+                        .map(|t| t.fidelity)
+                        .unwrap_or(Fidelity::Unknown)
+                })
+                .fold(Fidelity::Full, Fidelity::weakest);
+            Ok(ResolvedTransport {
+                name: name.to_string(),
+                kind: TransportKind::Chain { hops },
+                fidelity,
+            })
+        }
+        Some("pool") => {
+            let names = raw.members.as_ref().map(|m| m.items()).unwrap_or_default();
+            if names.is_empty() {
+                return Err(ConfigError::new(format!(
+                    "pool transport `{name}` needs at least one entry in `members`"
+                ))
+                .at(path));
+            }
+            let mut members = Vec::with_capacity(names.len());
+            for member in &names {
+                let resolved = resolve_transport_at(files, member, visiting)?;
+                if matches!(resolved.kind, TransportKind::Direct) {
+                    return Err(ConfigError::new(format!(
+                        "pool `{name}` names the direct transport `{member}`"
+                    ))
+                    .at(path.clone())
+                    .help(
+                        "a pool spreads work across proxies; mixing in a direct path \
+                         would send some probes unproxied without saying which",
+                    ));
+                }
+                members.push(resolved);
+            }
+            let fidelity = members
+                .iter()
+                .map(|m| m.fidelity)
+                .fold(Fidelity::Full, Fidelity::weakest);
+            Ok(ResolvedTransport {
+                name: name.to_string(),
+                kind: TransportKind::Pool { members },
                 fidelity,
             })
         }
@@ -1279,6 +1391,95 @@ ports = ["80", "443"]
 targets = ["lab"]
 ports = ["web"]
 "#;
+
+    const TWO_PROXIES: &str = r#"
+version = 1
+[transports.a]
+type = "socks5"
+address = "127.0.0.1:1080"
+fidelity = "full"
+[transports.b]
+type = "socks5"
+address = "127.0.0.1:1081"
+fidelity = "open_only"
+"#;
+
+    fn transport_of(text: &str, name: &str) -> Result<ResolvedTransport, ConfigError> {
+        resolve_transport(&files(&[(Layer::Project, text)]), name)
+    }
+
+    /// One collapsing link flattens everything behind it, so a chain can only claim what
+    /// its weakest hop can — not what the first one happens to manage.
+    #[test]
+    fn a_chain_inherits_its_weakest_hop() {
+        let cfg =
+            format!("{TWO_PROXIES}\n[transports.c]\ntype = \"chain\"\nhops = [\"a\", \"b\"]\n");
+        let t = transport_of(&cfg, "c").expect("resolves");
+        assert_eq!(t.fidelity, Fidelity::OpenOnly, "weakest hop, not the first");
+        let TransportKind::Chain { hops } = &t.kind else {
+            panic!("expected a chain, got {:?}", t.kind)
+        };
+        assert_eq!(hops.len(), 2);
+        assert_eq!(hops[0].name, "a");
+    }
+
+    #[test]
+    fn a_pool_inherits_its_weakest_member() {
+        let cfg =
+            format!("{TWO_PROXIES}\n[transports.p]\ntype = \"pool\"\nmembers = [\"a\", \"b\"]\n");
+        let t = transport_of(&cfg, "p").expect("resolves");
+        assert_eq!(t.fidelity, Fidelity::OpenOnly);
+    }
+
+    /// A chain is built out of CONNECTs, and a direct transport has nothing to CONNECT
+    /// through — so this has to be caught rather than producing a chain that cannot work.
+    #[test]
+    fn a_chain_refuses_a_non_socks5_hop() {
+        let cfg = format!(
+            "{TWO_PROXIES}\n[transports.c]\ntype = \"chain\"\nhops = [\"a\", \"direct\"]\n"
+        );
+        let e = transport_of(&cfg, "c").expect_err("direct cannot be a hop");
+        assert!(e.to_string().contains("direct"), "{e}");
+    }
+
+    /// A pool mixing in a direct path would send some probes unproxied without saying
+    /// which, which is the one thing this tool must never do quietly.
+    #[test]
+    fn a_pool_refuses_the_direct_transport() {
+        let cfg = format!(
+            "{TWO_PROXIES}\n[transports.p]\ntype = \"pool\"\nmembers = [\"a\", \"direct\"]\n"
+        );
+        let e = transport_of(&cfg, "p").expect_err("direct cannot be pooled");
+        assert!(e.to_string().contains("direct"), "{e}");
+    }
+
+    /// Without the visited set this recurses until the stack gives out.
+    #[test]
+    fn a_transport_that_contains_itself_is_reported_not_hung() {
+        for cfg in [
+            "version = 1\n[transports.c]\ntype = \"chain\"\nhops = [\"c\"]\n".to_string(),
+            format!(
+                "{TWO_PROXIES}\n[transports.p]\ntype = \"pool\"\nmembers = [\"a\", \"q\"]\n\
+                     [transports.q]\ntype = \"pool\"\nmembers = [\"p\"]\n"
+            ),
+        ] {
+            let name = if cfg.contains("[transports.q]") {
+                "p"
+            } else {
+                "c"
+            };
+            let e = transport_of(&cfg, name).expect_err("a cycle must be refused");
+            assert!(e.to_string().contains("contains itself"), "{e}");
+        }
+    }
+
+    #[test]
+    fn an_empty_chain_or_pool_is_refused() {
+        let chain = format!("{TWO_PROXIES}\n[transports.c]\ntype = \"chain\"\nhops = []\n");
+        assert!(transport_of(&chain, "c").is_err());
+        let pool = format!("{TWO_PROXIES}\n[transports.p]\ntype = \"pool\"\nmembers = []\n");
+        assert!(transport_of(&pool, "p").is_err());
+    }
 
     #[test]
     fn resolves_a_named_scan() {

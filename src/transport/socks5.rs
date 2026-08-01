@@ -8,6 +8,12 @@
 //! SOCKS4/4a are deliberately unsupported (D4) — four reply codes cannot express the
 //! difference between a closed port and a filtered one.
 
+// Several helpers here return a finished `ProbeOutcome` through the `Err` channel: a
+// failed handshake still classifies the probe, which is the point. Boxing it to satisfy
+// the size lint would allocate once per failed probe — once per probe, on a scan through
+// a dead proxy.
+#![allow(clippy::result_large_err)]
+
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
@@ -53,11 +59,23 @@ pub fn reply_name(code: u8) -> &'static str {
     }
 }
 
+/// One SOCKS5 server on the path to the destination.
+#[derive(Clone, Debug)]
+pub struct Hop {
+    pub address: SocketAddr,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
+
+/// A SOCKS5 path: one server, or a chain of them.
+///
+/// A chain is the general case and a single proxy is the one-hop degenerate case, so
+/// there is one code path rather than two. Each hop is reached *through* the tunnel the
+/// previous one opened: greet hop N, ask it to CONNECT to hop N+1, then speak SOCKS5 to
+/// hop N+1 over that tunnel. The last CONNECT names the destination.
 pub struct Socks5Transport {
     name: String,
-    address: SocketAddr,
-    username: Option<String>,
-    password: Option<String>,
+    hops: Vec<Hop>,
     fidelity: Fidelity,
 }
 
@@ -75,35 +93,51 @@ impl Socks5Transport {
         password: Option<String>,
         fidelity: Fidelity,
     ) -> Self {
+        Self::chained(
+            name,
+            vec![Hop {
+                address,
+                username,
+                password,
+            }],
+            fidelity,
+        )
+    }
+
+    /// A path of one or more hops. Panics on an empty list, which the resolver refuses.
+    pub fn chained(name: String, hops: Vec<Hop>, fidelity: Fidelity) -> Self {
+        assert!(!hops.is_empty(), "a SOCKS5 path needs at least one hop");
         Self {
             name,
-            address,
-            username,
-            password,
+            hops,
             fidelity,
         }
     }
 
+    /// The first hop — what a probe actually opens a socket to.
     pub fn address(&self) -> SocketAddr {
-        self.address
+        self.hops[0].address
+    }
+
+    pub fn hops(&self) -> &[Hop] {
+        &self.hops
     }
 
     /// A second handle on the same proxy, for issuing concurrent probes.
     pub fn clone_for_probe(&self) -> Self {
         Self {
             name: self.name.clone(),
-            address: self.address,
-            username: self.username.clone(),
-            password: self.password.clone(),
+            hops: self.hops.clone(),
             fidelity: self.fidelity,
         }
     }
 
     pub fn probe_detailed(&self, dest: &Destination, timing: &Timing) -> DetailedOutcome {
         let started = Instant::now();
+        let first = self.hops[0].address;
 
-        // ── phase 1: reach the proxy ────────────────────────────────────────
-        let stream = match TcpStream::connect_timeout(&self.address, timing.proxy_connect_timeout) {
+        // ── reach the first hop ─────────────────────────────────────────────
+        let stream = match TcpStream::connect_timeout(&first, timing.proxy_connect_timeout) {
             Ok(s) => s,
             Err(e) => {
                 let phases = Phases {
@@ -113,7 +147,7 @@ impl Socks5Transport {
                     total: started.elapsed(),
                 };
                 return DetailedOutcome {
-                    outcome: proxy_unreachable(&e, self.address, phases),
+                    outcome: proxy_unreachable(&e, first, phases),
                     reply_code: None,
                 };
             }
@@ -124,11 +158,6 @@ impl Socks5Transport {
         let mut s = stream;
         let _ = s.set_nodelay(true);
 
-        // ── phase 2: greeting and authentication ────────────────────────────
-        let handshake_start = Instant::now();
-        if let Err(o) = set_timeouts(&s, timing.handshake_timeout) {
-            return detailed(o, None);
-        }
         let mut phases = Phases {
             proxy_connect: Some(proxy_connect),
             handshake: None,
@@ -136,13 +165,34 @@ impl Socks5Transport {
             total: started.elapsed(),
         };
 
-        if let Err(o) = self.negotiate(&mut s, &mut phases, started) {
-            return detailed(o, None);
+        // ── walk the path ───────────────────────────────────────────────────
+        //
+        // Each hop is greeted over the tunnel the previous one opened, then asked to
+        // CONNECT to the next. Only the final CONNECT names the destination, and only
+        // its reply says anything about that destination — an intermediate failure is a
+        // fact about the chain, so it is reported as such rather than as a verdict on a
+        // port nothing ever reached.
+        let handshake_start = Instant::now();
+        let last = self.hops.len() - 1;
+        for (i, hop) in self.hops.iter().enumerate() {
+            if let Err(o) = set_timeouts(&s, timing.handshake_timeout) {
+                return detailed(o, None);
+            }
+            if let Err(o) = self.negotiate(&mut s, hop, &mut phases, started) {
+                return detailed(self.blame_hop(o, i), None);
+            }
+            if i == last {
+                break;
+            }
+            // Ask this hop for a tunnel to the next one.
+            let next = Destination::Addr(self.hops[i + 1].address);
+            if let Err(o) = self.open_tunnel(&mut s, &next, &mut phases, started, i) {
+                return detailed(o, None);
+            }
         }
-        let handshake = handshake_start.elapsed();
-        phases.handshake = Some(handshake);
+        phases.handshake = Some(handshake_start.elapsed());
 
-        // ── phase 3: CONNECT ────────────────────────────────────────────────
+        // ── the CONNECT that names the destination ──────────────────────────
         // The reply waits on the proxy's own connection to the destination, so this
         // phase gets the destination budget rather than the handshake budget.
         if let Err(o) = set_timeouts(&s, timing.connect_timeout) {
@@ -180,6 +230,67 @@ impl Socks5Transport {
         }
     }
 
+    /// CONNECT from one hop to the next, failing the whole path if it will not.
+    fn open_tunnel<S: Read + Write>(
+        &self,
+        s: &mut S,
+        next: &Destination,
+        phases: &mut Phases,
+        started: Instant,
+        from: usize,
+    ) -> Result<(), ProbeOutcome> {
+        let request = build_connect_request(next);
+        if let Err(e) = s.write_all(&request) {
+            phases.total = started.elapsed();
+            return Err(self.blame_hop(io_failure(&e, "extending the chain", *phases), from));
+        }
+        match read_reply(s) {
+            Ok(REP_SUCCEEDED) => Ok(()),
+            Ok(code) => {
+                phases.total = started.elapsed();
+                Err(ProbeOutcome::new(
+                    State::Error,
+                    Source::ProxyReply,
+                    format!(
+                        "hop {} ({}) refused to reach hop {} ({}): reply 0x{code:02x}",
+                        from + 1,
+                        self.hops[from].address,
+                        from + 2,
+                        self.hops[from + 1].address
+                    ),
+                    *phases,
+                ))
+            }
+            Err(e) => {
+                phases.total = started.elapsed();
+                Err(self.blame_hop(
+                    io_failure(&e, "reading the chain's CONNECT reply", *phases),
+                    from,
+                ))
+            }
+        }
+    }
+
+    /// Name the hop a failure happened at.
+    ///
+    /// Without this every chain failure reads as one anonymous proxy error, and finding
+    /// which link is down means bisecting the chain by hand.
+    fn blame_hop(&self, mut o: ProbeOutcome, index: usize) -> ProbeOutcome {
+        if self.hops.len() > 1 {
+            let at = format!(
+                " (at hop {} of {}, {})",
+                index + 1,
+                self.hops.len(),
+                self.hops[index].address
+            );
+            o.reason = Some(match o.reason {
+                Some(r) => format!("{r}{at}"),
+                None => format!("chain failed{at}"),
+            });
+        }
+        o
+    }
+
     /// Greeting, method selection, and optional authentication.
     ///
     /// Generic over the stream so a fuzz harness can drive the whole exchange with
@@ -189,10 +300,11 @@ impl Socks5Transport {
     pub fn negotiate<S: Read + Write>(
         &self,
         s: &mut S,
+        hop: &Hop,
         phases: &mut Phases,
         started: Instant,
     ) -> Result<(), ProbeOutcome> {
-        let want_auth = self.username.is_some();
+        let want_auth = hop.username.is_some();
         let greeting: Vec<u8> = if want_auth {
             vec![VERSION, 2, METHOD_NONE, METHOD_USERPASS]
         } else {
@@ -222,7 +334,7 @@ impl Socks5Transport {
         match resp[1] {
             METHOD_NONE => Ok(()),
             METHOD_USERPASS => {
-                let (Some(user), pass) = (self.username.as_ref(), self.password.as_deref()) else {
+                let (Some(user), pass) = (hop.username.as_ref(), hop.password.as_deref()) else {
                     phases.total = started.elapsed();
                     return Err(ProbeOutcome::new(
                         State::Error,
@@ -575,6 +687,91 @@ mod tests {
             Some(p.into()),
             Fidelity::Unknown,
         )
+    }
+
+    fn chain(fixtures: &[&Socks5Fixture]) -> Socks5Transport {
+        Socks5Transport::chained(
+            "chain".into(),
+            fixtures
+                .iter()
+                .map(|f| Hop {
+                    address: f.addr(),
+                    username: None,
+                    password: None,
+                })
+                .collect(),
+            Fidelity::Full,
+        )
+    }
+
+    /// The whole point of a chain: hop two is greeted *through* hop one, and only the
+    /// last CONNECT names the destination.
+    #[test]
+    fn a_two_hop_chain_reaches_the_destination() {
+        let (_g, open) = open_listener();
+        let a = Socks5Fixture::start(Behavior::Faithful);
+        let b = Socks5Fixture::start(Behavior::Faithful);
+        let o = chain(&[&a, &b]).probe(&Destination::Addr(open), &timing());
+        assert_eq!(o.state, State::Open, "{:?}", o.reason);
+        assert_eq!(o.source, Source::ProxyReply);
+    }
+
+    /// A closed port is still distinguishable through two faithful hops — the reply code
+    /// travels back down the chain intact.
+    #[test]
+    fn a_chain_still_carries_the_refused_reply() {
+        let closed = closed_port();
+        let a = Socks5Fixture::start(Behavior::Faithful);
+        let b = Socks5Fixture::start(Behavior::Faithful);
+        let o = chain(&[&a, &b]).probe(&Destination::Addr(closed), &timing());
+        assert_eq!(o.state, State::Closed, "{:?}", o.reason);
+    }
+
+    /// Three hops, because two could pass by accident on an off-by-one.
+    #[test]
+    fn a_three_hop_chain_reaches_the_destination() {
+        let (_g, open) = open_listener();
+        let a = Socks5Fixture::start(Behavior::Faithful);
+        let b = Socks5Fixture::start(Behavior::Faithful);
+        let c = Socks5Fixture::start(Behavior::Faithful);
+        let o = chain(&[&a, &b, &c]).probe(&Destination::Addr(open), &timing());
+        assert_eq!(o.state, State::Open, "{:?}", o.reason);
+    }
+
+    /// A broken link is a fact about the chain, not a verdict on a port nothing reached.
+    /// Without the hop index every chain failure reads as one anonymous proxy error.
+    #[test]
+    fn a_failure_names_the_hop_it_happened_at() {
+        let (_g, open) = open_listener();
+        let a = Socks5Fixture::start(Behavior::Faithful);
+        let dead = Socks5Fixture::start(Behavior::Faithful);
+        let dead_addr = dead.addr();
+        drop(dead); // nothing is listening at hop two any more
+
+        let t = Socks5Transport::chained(
+            "chain".into(),
+            vec![
+                Hop {
+                    address: a.addr(),
+                    username: None,
+                    password: None,
+                },
+                Hop {
+                    address: dead_addr,
+                    username: None,
+                    password: None,
+                },
+            ],
+            Fidelity::Full,
+        );
+        let o = t.probe(&Destination::Addr(open), &timing());
+        assert_eq!(o.state, State::Error, "a dead link is not a port verdict");
+        let reason = o.reason.unwrap_or_default();
+        assert!(reason.contains("hop 1"), "must name the hop: {reason}");
+        assert!(
+            reason.contains(&dead_addr.to_string()),
+            "and the next address: {reason}"
+        );
     }
 
     #[test]

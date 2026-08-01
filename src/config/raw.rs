@@ -175,6 +175,11 @@ pub struct RawTransport {
     /// operator. Declaring it is what turns the "not measured" warning off, and it
     /// keeps the fact in version control rather than in a hidden cache (D8).
     pub fidelity: Option<String>,
+    /// `type = "chain"`: SOCKS5 transports traversed in order, each reached through the
+    /// one before it.
+    pub hops: Option<StringOrVec>,
+    /// `type = "pool"`: transports probed across rather than through.
+    pub members: Option<StringOrVec>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

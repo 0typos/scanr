@@ -115,6 +115,7 @@ The one you will mostly consume.
 | `reason` | free text when not open; `null` when open |
 | `resolved_address` | `null` for hostname targets under transport DNS |
 | `service_label` | a guess from the port number, **not a fingerprint**; `null` if unknown. Layered — see below |
+| `via` | which pool member produced this result; absent unless the transport was a pool |
 | `banner` | what the service volunteered, when `--banner` is on and it said anything. Absent otherwise |
 | `banner_hex` | the same bytes in hex, used instead of `banner` when they are not valid UTF-8 |
 | `banner_bytes` | how many bytes were read |
