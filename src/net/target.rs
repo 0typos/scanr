@@ -259,6 +259,41 @@ impl TargetSpec {
     /// a release build reported that `::/0` "covers 1 addresses" and would have let it
     /// past a count-based limit check. The range arm had the same flaw for a range
     /// spanning the whole address space.
+    /// Does this spec cover `target`, without expanding it?
+    ///
+    /// Matching rather than expanding is what lets a filter name a `/16` without
+    /// materialising 65,536 addresses to compare against.
+    pub fn matches(&self, target: &str) -> bool {
+        if let TargetSpec::Host(h) = self {
+            return h.eq_ignore_ascii_case(target);
+        }
+        let Ok(ip) = target.parse::<IpAddr>() else {
+            return false;
+        };
+        match self {
+            TargetSpec::Addr(a) => *a == ip,
+            TargetSpec::Cidr { base, prefix } => {
+                if base.is_ipv4() != ip.is_ipv4() {
+                    return false;
+                }
+                let width = if ip.is_ipv4() { 32 } else { 128 };
+                let host_bits = width - u32::from(*prefix);
+                // A /0 shifts by the full width, which would overflow.
+                let mask = if host_bits >= 128 {
+                    0
+                } else {
+                    u128::MAX << host_bits
+                };
+                to_u128(ip) & mask == to_u128(*base) & mask
+            }
+            TargetSpec::Range { start, end } => {
+                start.is_ipv4() == ip.is_ipv4()
+                    && (to_u128(*start)..=to_u128(*end)).contains(&to_u128(ip))
+            }
+            TargetSpec::Host(_) => unreachable!("handled above"),
+        }
+    }
+
     pub fn count(&self) -> u128 {
         match self {
             TargetSpec::Addr(_) | TargetSpec::Host(_) => 1,
@@ -666,6 +701,37 @@ mod tests {
         ] {
             assert!(matches!(parse_target(h), Ok(TargetSpec::Host(_))), "{h}");
         }
+    }
+
+    #[test]
+    fn specs_match_without_expanding() {
+        let m = |spec: &str, t: &str| parse_target(spec).unwrap().matches(t);
+
+        assert!(m("10.0.0.5", "10.0.0.5"));
+        assert!(!m("10.0.0.5", "10.0.0.6"));
+
+        assert!(m("10.0.0.0/24", "10.0.0.255"));
+        assert!(!m("10.0.0.0/24", "10.0.1.0"));
+        // A /16 must match by arithmetic, not by expanding 65,536 addresses.
+        assert!(m("10.20.0.0/16", "10.20.30.40"));
+        assert!(!m("10.20.0.0/16", "10.21.0.1"));
+        // /0 shifts by the full width; it must not overflow.
+        assert!(m("0.0.0.0/0", "203.0.113.9"));
+
+        assert!(m("10.0.0.5-10.0.0.9", "10.0.0.7"));
+        assert!(!m("10.0.0.5-10.0.0.9", "10.0.0.4"));
+
+        assert!(m("app.internal", "app.internal"));
+        assert!(
+            m("APP.internal", "app.internal"),
+            "hostnames are case-insensitive"
+        );
+        assert!(!m("app.internal", "10.0.0.1"));
+
+        // Families never cross.
+        assert!(!m("10.0.0.0/8", "::1"));
+        assert!(m("2001:db8::/32", "2001:db8::dead"));
+        assert!(!m("2001:db8::/32", "2001:db9::1"));
     }
 
     #[test]

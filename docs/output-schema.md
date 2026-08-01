@@ -237,6 +237,37 @@ limitation: `open` is never collapsed into a span, so it is the one state guaran
 have a row per probe. Totals for the other states come from the terminal event's
 `counts`, which `summarize` already prints.
 
+## Looking up results
+
+`output get` filters the record, and — unlike `jq` over `probe_result` — it expands
+spans, so a collapsed `closed` is still findable:
+
+```console
+$ scanr output get scan-*.jsonl.gz --states open
+10.0.0.2:8080/tcp   open      local_stack  http-proxy
+10.0.0.3:8080/tcp   open      local_stack  http-proxy
+2 result(s)
+
+$ scanr output get scan-*.jsonl.gz --hosts 10.0.0.0/24 --ports 22,443 --states closed,filtered
+$ scanr output get scan-*.jsonl.gz --states open --json | jq -r .target
+```
+
+| flag | accepts |
+|---|---|
+| `--hosts` | IPs, CIDR blocks, ranges, hostnames — the same forms as `--targets`, repeatable |
+| `--ports` | `80`, `1-1024`, lists — the same forms as `--ports` |
+| `--states` | `open`, `closed`, `filtered`, `error`, comma-separated |
+| `--json` | JSON Lines instead of the table |
+
+Omit a flag and it matches everything. An unknown state is an error rather than a query
+that silently matches nothing.
+
+Host filters match **without expanding**, so `--hosts 10.0.0.0/8` costs nothing.
+
+Results reconstructed from a span carry `"collapsed": true` in JSON output and have no
+`timing_ms` — the span keeps only aggregate timing, and inventing a per-probe number
+would be worse than omitting it. The count goes to stderr, so stdout stays pipe-clean.
+
 ## Recipes
 
 `scanr output cat` writes the record as plain JSONL whichever format it is in, so these

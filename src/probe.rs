@@ -17,6 +17,14 @@ pub enum State {
 }
 
 impl State {
+    /// The defined states, so a filter can reject a typo instead of silently matching
+    /// nothing.
+    pub const ALL: [State; 4] = [State::Open, State::Closed, State::Filtered, State::Error];
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.as_str() == s)
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             State::Open => "open",
