@@ -128,6 +128,9 @@ pub struct RawDefaults {
     /// A file of `name port/proto` lines to label ports from, ahead of `/etc/services`
     /// and the builtin table. `~` is expanded.
     pub services_file: Option<String>,
+    /// Read `/etc/services` for port labels. Default true. Set false for labels that
+    /// depend only on this config and the binary, and so match on every machine.
+    pub use_etc_services: Option<bool>,
 }
 
 /// Timing knobs. Also inlineable on a scan, which is why this is its own type.

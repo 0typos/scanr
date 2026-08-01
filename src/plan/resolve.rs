@@ -395,12 +395,24 @@ fn resolve_services(
     }
     let path = configured.map(|(v, _)| expand_home(&v));
 
-    let table = crate::services::ServiceTable::resolve_from_host(path.as_deref()).map_err(|e| {
-        ConfigError::new(format!("services_file: {e}")).help(
-            "point defaults.services_file at a readable /etc/services-format file, \
+    let use_etc = match files.pick(|c| c.defaults.use_etc_services) {
+        Some((v, path)) => {
+            prov.set("use_etc_services", Origin::Defaults(path));
+            v
+        }
+        None => {
+            prov.set("use_etc_services", Origin::Default);
+            true
+        }
+    };
+
+    let table = crate::services::ServiceTable::resolve_from_host(path.as_deref(), use_etc)
+        .map_err(|e| {
+            ConfigError::new(format!("services_file: {e}")).help(
+                "point defaults.services_file at a readable /etc/services-format file, \
              or remove the key to use /etc/services and the builtin table",
-        )
-    })?;
+            )
+        })?;
 
     // Not fatal: a file that mostly parses is still better than no file, and refusing a
     // scan over a few stray lines in someone's /etc/services would be absurd. Say so

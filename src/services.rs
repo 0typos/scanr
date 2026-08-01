@@ -77,6 +77,13 @@ pub struct ServiceTable {
     /// costs nothing to carry and cannot be shadowed by accident.
     learned: HashMap<u16, Box<str>>,
     stats: Vec<LayerStats>,
+    /// `/etc/services` was declined by config rather than missing.
+    ///
+    /// Both end with the layer absent from `stats`, but they are different situations:
+    /// one is a container without the file, the other is a deliberate trade of label
+    /// coverage for labels that match on every machine. Someone comparing two records
+    /// needs to be able to tell which.
+    etc_suppressed: bool,
 }
 
 impl Default for ServiceTable {
@@ -94,6 +101,7 @@ impl ServiceTable {
         Self {
             learned: HashMap::new(),
             stats: Vec::new(),
+            etc_suppressed: false,
         }
     }
 
@@ -130,10 +138,25 @@ impl ServiceTable {
         Ok(t)
     }
 
-    /// The layered table for ordinary use, reading the real `/etc/services`.
-    pub fn resolve_from_host(configured: Option<&Path>) -> Result<Self, ServiceFileError> {
+    /// The layered table for ordinary use, reading the real `/etc/services` unless the
+    /// config has opted out.
+    ///
+    /// Opting out is how a caller buys back the reproducibility that reading the host's
+    /// file costs (D31): with `use_etc` false the labels depend only on the config and
+    /// the binary, so two machines agree by construction.
+    pub fn resolve_from_host(
+        configured: Option<&Path>,
+        use_etc: bool,
+    ) -> Result<Self, ServiceFileError> {
         let etc = Path::new(ETC_SERVICES);
-        Self::resolve(configured, etc.exists().then_some(etc))
+        let mut t = Self::resolve(configured, (use_etc && etc.exists()).then_some(etc))?;
+        t.etc_suppressed = !use_etc;
+        Ok(t)
+    }
+
+    /// Whether `/etc/services` was declined rather than simply absent.
+    pub fn etc_suppressed(&self) -> bool {
+        self.etc_suppressed
     }
 
     /// Parse one `/etc/services`-format file into the table.
@@ -226,7 +249,11 @@ impl ServiceTable {
             })
             .collect();
         parts.push(format!("builtin ({BUILTIN_PORTS})"));
-        parts.join(" + ")
+        let mut s = parts.join(" + ");
+        if self.etc_suppressed {
+            s.push_str(" [/etc/services off]");
+        }
+        s
     }
 
     /// What goes in the record's `config` event, so a reader can explain why two scans
@@ -249,7 +276,12 @@ impl ServiceTable {
             "entries": BUILTIN_PORTS,
             "malformed": 0,
         }));
-        serde_json::json!({ "layers": layers })
+        serde_json::json!({
+            "layers": layers,
+            // False means declined; a host that simply has no /etc/services still reads
+            // true here, and the layer's absence says the rest.
+            "use_etc_services": !self.etc_suppressed,
+        })
     }
 }
 
@@ -641,6 +673,68 @@ http-alt        8080/tcp        webcache
             .expect_err("a file that is not text was not the file they meant");
         assert!(err.to_string().contains("UTF-8"), "{err}");
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn declining_etc_services_leaves_the_configured_file_and_the_builtin() {
+        let mine = tmp("decline", "internal-api 8080/tcp\n");
+        let t = ServiceTable::resolve_from_host(Some(&mine), false).expect("fixture is readable");
+
+        assert_eq!(
+            t.lookup(8080),
+            Some("internal-api"),
+            "the custom file still applies"
+        );
+        assert_eq!(t.lookup(22), Some("ssh"), "and the builtin underneath it");
+        // 70 is in /etc/services on this machine and in neither other layer.
+        assert_eq!(t.lookup(70), None, "the host file was not consulted");
+
+        assert_eq!(t.layers().len(), 1, "only the configured layer contributed");
+        assert!(t.etc_suppressed());
+        assert_eq!(t.provenance()["use_etc_services"], false);
+        assert!(
+            t.summary().contains("[/etc/services off]"),
+            "{}",
+            t.summary()
+        );
+
+        let _ = std::fs::remove_file(&mine);
+    }
+
+    #[test]
+    fn declining_is_distinguishable_from_the_file_being_absent() {
+        // Both leave the layer out of `stats`; only the flag separates them, and a
+        // record with no /etc/services layer is ambiguous without it.
+        let absent = ServiceTable::resolve(None, Some(Path::new("/nonexistent/etc/services")))
+            .expect("absence is fine");
+        assert!(
+            !absent.etc_suppressed(),
+            "missing is not the same as declined"
+        );
+        assert_eq!(absent.provenance()["use_etc_services"], true);
+        assert!(!absent.summary().contains("off"), "{}", absent.summary());
+
+        let declined = ServiceTable::resolve_from_host(None, false).expect("no file to read");
+        assert!(declined.etc_suppressed());
+        assert_eq!(declined.layers().len(), 0);
+        // Same empty layer list, different explanation.
+        assert_ne!(
+            absent.provenance()["use_etc_services"],
+            declined.provenance()["use_etc_services"]
+        );
+    }
+
+    #[test]
+    fn declining_makes_labels_independent_of_the_host() {
+        // The reproducibility that reading /etc/services costs, bought back: this is the
+        // same table on any machine, which is the entire reason the knob exists.
+        let t = ServiceTable::resolve_from_host(None, false).expect("no file to read");
+        assert_eq!(
+            t.lookup(8080),
+            Some("http-proxy"),
+            "the builtin's answer, everywhere"
+        );
+        assert_eq!(t.lookup(70), None);
     }
 
     #[test]

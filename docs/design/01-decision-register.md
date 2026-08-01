@@ -576,3 +576,20 @@ machine.
 The parser also accepts `nmap-services`, whose extra frequency column parses as an
 alias. That was not a design goal, but it is the obvious file to reach for and it costs
 nothing to allow.
+
+**Amended: `use_etc_services`.** The reproducibility cost above is opt-out. Setting
+`defaults.use_etc_services = false` drops the middle layer, leaving labels that depend
+only on the config and the binary — identical on every machine, which is what a scan
+compared across a Linux runner and a laptop wants. The configured file and the builtin
+still apply, so it costs coverage rather than control.
+
+Declining is recorded separately from the file simply being absent. Both leave the layer
+out of `service_labels.layers`, but they are different situations — a container without
+the file, versus a deliberate trade — so `service_labels.use_etc_services` states which,
+and `plan` marks the row `[/etc/services off]`.
+
+That distinction is also what makes the rendering testable. A first version of the test
+asserted only that the marker appeared, and passed against a build that ignored the flag
+entirely: the row read `/etc/services (5862) ... [/etc/services off]`, contradicting
+itself, and nothing objected. The test now requires the marker *and* the layer's
+absence, and fails without the fix.

@@ -124,7 +124,8 @@ therefore records exactly which layers produced them:
     {"source": "/home/me/.config/scanr/services", "entries": 12,   "malformed": 0},
     {"source": "/etc/services",                   "entries": 5862, "malformed": 0},
     {"source": "builtin",                         "entries": 59,   "malformed": 0}
-  ]
+  ],
+  "use_etc_services": true
 }
 ```
 
@@ -133,6 +134,10 @@ the table's size without double-counting a port two layers both mention. `malfor
 counts lines the parser gave up on; UDP and SCTP rows are skipped without being counted,
 since roughly half of a real `/etc/services` is UDP. A layer that contributed nothing is
 absent; `builtin` is always last and always present.
+
+`use_etc_services` is `false` only when the config declined the host layer. A machine
+that simply has no `/etc/services` still reports `true`, and the layer's absence from
+the list says the rest — the two cases are otherwise indistinguishable.
 
 Two records that label a port differently can be reconciled from this field alone.
 

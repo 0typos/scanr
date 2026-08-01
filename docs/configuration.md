@@ -88,6 +88,23 @@ ports it mentions. Three lines does not cost you the other 5,000.
 A file that cannot be read stops the scan — if you named it, you meant it. Lines that
 do not parse are counted and warned about, and the scan continues.
 
+If you need labels that match on every machine — comparing a scan from a CI runner
+against one from a laptop, say — drop the host layer:
+
+```toml
+[defaults]
+use_etc_services = false
+```
+
+Labels then depend only on your config and the binary. You lose coverage, not control:
+your own file and the builtin table both still apply. It matters more often than it
+sounds: this machine's `/etc/services` calls 5432 `postgres` where the builtin says
+`postgresql`, and that is enough to break a naive diff of two records.
+
+The record distinguishes *declined* from *absent* — `service_labels.use_etc_services` —
+because a container with no `/etc/services` and a config that turned it off otherwise
+look identical.
+
 This is still a guess from the port number, never a fingerprint: nothing connects to the
 service or reads a banner. Port 4444 is `krb524` to every layer and is essentially never
 Kerberos. Every record states which files produced its labels, so scans from two
