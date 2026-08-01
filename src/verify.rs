@@ -1805,24 +1805,38 @@ pub enum Handoff {
     Nmap,
 }
 
-/// Render results for another tool to consume.
+impl Handoff {
+    /// Whether this shape is meant to be piped into another scanner.
+    ///
+    /// Lives beside the shapes rather than at the call site, so a second caller of
+    /// `handoff` inherits the "you probably wanted --states open" warning instead of
+    /// having to remember it. `Json` is data, and filtering it is the reader's business.
+    pub fn feeds_a_tool(self) -> bool {
+        matches!(self, Handoff::Nmap | Handoff::List)
+    }
+}
+
+/// Write results for another tool to consume.
+///
+/// Streams to the sink rather than returning a `String`: `get` already holds every
+/// matching row, and buffering the rendered form beside it doubled that for no gain —
+/// a locked stdout flushes per line anyway.
 ///
 /// The point of this is division of labour, not completeness. `scanr` is good at finding
 /// open ports quickly through a proxy; `nmap -sV` is good at saying what is behind them,
 /// on the strength of a signature database two decades deep. Handing it the ~0.1% of
 /// endpoints that answered is far faster than letting it scan everything, and far better
 /// than reimplementing its database badly (D32).
-pub fn handoff(hits: &[Hit], how: Handoff) -> String {
-    let mut s = String::new();
+pub fn handoff(hits: &[Hit], how: Handoff, out: &mut impl std::io::Write) -> std::io::Result<()> {
     match how {
         Handoff::Json => {
             for h in hits {
-                let _ = writeln!(s, "{}", h.to_json());
+                writeln!(out, "{}", h.to_json())?;
             }
         }
         Handoff::List => {
             for h in hits {
-                let _ = writeln!(s, "{}", format_pair(&h.target, h.port));
+                writeln!(out, "{}", format_pair(&h.target, h.port))?;
             }
         }
         Handoff::Nmap => {
@@ -1844,11 +1858,16 @@ pub fn handoff(hits: &[Hit], how: Handoff) -> String {
                 let p: Vec<String> = ports.iter().map(u16::to_string).collect();
                 // -Pn because scanr already established these are up; -n because it
                 // already resolved them. Both stop nmap redoing finished work.
-                let _ = writeln!(s, "nmap -sV -Pn -n -p {} {}", p.join(","), group.join(" "));
+                writeln!(
+                    out,
+                    "nmap -sV -Pn -n -p {} {}",
+                    p.join(","),
+                    group.join(" ")
+                )?;
             }
         }
     }
-    s
+    Ok(())
 }
 
 /// Endpoints that were not probed, suitable for `scanr run --pairs -`.
@@ -3316,6 +3335,13 @@ mod tests {
         assert_eq!(ssh["ports"][0], 22);
     }
 
+    /// `handoff` writes to a sink; the tests want the text.
+    fn rendered(hits: &[Hit], how: Handoff) -> String {
+        let mut buf = Vec::new();
+        handoff(hits, how, &mut buf).expect("a Vec sink cannot fail");
+        String::from_utf8(buf).expect("handoff output is UTF-8")
+    }
+
     fn hit(target: &str, port: u16, state: &str) -> Hit {
         Hit {
             target: target.into(),
@@ -3340,7 +3366,7 @@ mod tests {
             hit("10.0.0.10", 22, "open"),
             hit("10.0.0.10", 80, "open"),
         ];
-        let out = handoff(&hits, Handoff::Nmap);
+        let out = rendered(&hits, Handoff::Nmap);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 2, "two distinct port sets: {out}");
         assert!(
@@ -3362,7 +3388,7 @@ mod tests {
     #[test]
     fn the_list_handoff_is_one_endpoint_per_line() {
         let hits = vec![hit("10.0.0.2", 443, "open"), hit("::1", 22, "open")];
-        let out = handoff(&hits, Handoff::List);
+        let out = rendered(&hits, Handoff::List);
         assert_eq!(out, "10.0.0.2:443\n[::1]:22\n", "IPv6 must be bracketed");
     }
 

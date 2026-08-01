@@ -85,6 +85,12 @@ A few that are not self-explanatory:
   Off by default. Only services that greet first say anything — SSH, SMTP, FTP, POP3,
   IMAP, MySQL — so an empty banner means "said nothing unprompted", not "nothing there".
   HTTP and anything behind TLS greet nobody.
+
+  `banner_timeout` (default 500ms) is the *ceiling*, not the wait. A greeting arrives
+  about one round trip after connect, so the actual wait scales off this host's measured
+  connect time and only approaches the ceiling on genuinely slow paths. That matters:
+  concurrency is the worker-thread count with no queue, so a worker waiting on a silent
+  port is a worker issuing no probes.
 - `--resumed-from` records which scan is being continued. You rarely type it: `remainder`
   emits it as a `# resumed-from:` comment and `run` picks it up from the pipe.
 

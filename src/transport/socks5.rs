@@ -166,10 +166,11 @@ impl Socks5Transport {
                 // Through a proxy the tunnel *is* the connection to the destination, so
                 // reading a greeting off it works exactly as it does directly. Banner
                 // grabbing is one of the few capabilities a proxy does not cost us.
-                let banner = (outcome.state == State::Open)
-                    .then_some(timing.banner.as_ref())
-                    .flatten()
-                    .and_then(|o| super::read_banner(&s, o));
+                let banner = timing
+                    .banner
+                    .as_ref()
+                    .filter(|_| outcome.state == State::Open)
+                    .and_then(|o| super::read_banner(&s, o, connect_elapsed));
                 DetailedOutcome {
                     outcome: outcome.with_banner(banner),
                     reply_code: Some(code),

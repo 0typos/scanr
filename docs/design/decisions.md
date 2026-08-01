@@ -660,6 +660,16 @@ to a reader.
 **Off by default.** It changes what the scan does to a target, so it is asked for. Same
 reasoning as every other knob here: clear limits over hidden magic.
 
+**The timeout is a ceiling, not a wait.** A flat 500 ms looked harmless and was not:
+concurrency here is the worker-thread count with no queue, so a worker parked in `read`
+issues nothing while it waits — and the ports that pay the full wait are exactly the ones
+that yield nothing, since a silent open port is the common case. At a 1% open rate and a
+1 ms probe that turned into a multiple of the whole scan's duration, and on `direct-fast`
+the wait was 1.67x that profile's entire connect budget. The wait now scales off the
+probe's own measured connect (a greeting arrives about one round trip after the
+connection is established), floored so a sub-millisecond connect still leaves room, and
+capped by the configured value so the knob still means the most it will ever wait.
+
 **Limits.** 1024 bytes by default, hard-capped at 4096: a greeting is tens of bytes (SSH
 ~40, SMTP ~100) and the cap exists so one hostile service cannot inflate a record. 500 ms,
 because a service that volunteers a greeting does it immediately — this is a read on an

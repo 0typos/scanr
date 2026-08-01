@@ -93,17 +93,24 @@ pub fn build(resolved: &crate::plan::types::ResolvedTransport) -> Box<dyn Transp
 /// One read, bounded by `opts.timeout` and `opts.bytes`. Greetings arrive in a single
 /// segment — the protocols above all write theirs with one `write()` — so looping would
 /// buy truncation resistance nobody needs at the cost of a second timeout to wait out.
-pub fn read_banner(stream: &TcpStream, opts: &Banner) -> Option<Vec<u8>> {
+pub fn read_banner(stream: &TcpStream, opts: &Banner, connect: Duration) -> Option<Vec<u8>> {
     use std::io::Read;
 
-    stream.set_read_timeout(Some(opts.timeout)).ok()?;
-    let mut buf = vec![0u8; opts.bytes as usize];
+    // Scaled off this host's own connect rather than the flat ceiling; see
+    // `Banner::wait_for` for why a worker parked here is expensive.
+    stream.set_read_timeout(Some(opts.wait_for(connect))).ok()?;
+    let mut buf = vec![0u8; opts.bytes() as usize];
     // A timeout, a reset, or a server that simply says nothing all land here, and all
     // three mean the same thing to a reader: it volunteered nothing.
     let n = (&*stream).read(&mut buf).ok()?;
-    buf.truncate(n);
-    (!buf.is_empty()).then_some(buf)
+    // `to_vec` rather than `truncate`: a 23-byte greeting should not carry a kilobyte of
+    // capacity through the channel and into the record.
+    (n > 0).then(|| buf[..n].to_vec())
 }
+
+/// Bytes written to a probed service. Zero, and this is the constant the record cites —
+/// so the passivity claim and the code that would falsify it cannot drift apart.
+pub const BANNER_SENT_BYTES: u64 = 0;
 
 /// Close a probe socket with `SO_LINGER{on,0}` so it sends RST instead of FIN and skips
 /// TIME_WAIT entirely (D9).

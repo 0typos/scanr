@@ -55,7 +55,7 @@ impl Transport for DirectTransport {
                 let banner = timing
                     .banner
                     .as_ref()
-                    .and_then(|o| super::read_banner(&stream, o));
+                    .and_then(|o| super::read_banner(&stream, o, elapsed));
                 close_without_time_wait(&stream);
                 ProbeOutcome::open(phases, Source::LocalStack).with_banner(banner)
             }

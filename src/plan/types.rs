@@ -35,13 +35,69 @@ pub struct Timing {
 ///
 /// One struct rather than a bool beside two numbers, so "off" is a state the type can
 /// express and every probe site has one thing to check.
+///
+/// Fields are private and `new` is the only way in, so the caps below are the type's
+/// guarantee rather than an agreement between two modules. A zero timeout is refused
+/// there: the kernel reads it as "no timeout", which would park a worker on a silent
+/// port forever.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Banner {
-    /// Cap on what is read and recorded.
-    pub bytes: u32,
-    /// A service that volunteers a greeting does so immediately; this is a read on a
-    /// connection that is already established, not another connect.
-    pub timeout: Duration,
+    bytes: u32,
+    timeout: Duration,
+}
+
+/// Enough for every greeting a real service sends: SSH is ~40 bytes, SMTP ~100.
+pub const DEFAULT_BANNER_BYTES: u32 = 1024;
+
+/// A hostile service can send as much as you will read. 4 KiB per open port is the most
+/// this will put in a record.
+pub const MAX_BANNER_BYTES: u32 = 4096;
+
+/// The ceiling on waiting for a greeting, not the wait itself — see [`Banner::wait_for`].
+pub const DEFAULT_BANNER_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Never wait less than this, however fast the connect was.
+const MIN_BANNER_WAIT: Duration = Duration::from_millis(50);
+
+impl Banner {
+    pub fn new(bytes: u32, timeout: Duration) -> Result<Self, String> {
+        if bytes == 0 || bytes > MAX_BANNER_BYTES {
+            return Err(format!(
+                "banner_bytes must be between 1 and {MAX_BANNER_BYTES}, got {bytes}"
+            ));
+        }
+        if timeout.is_zero() {
+            return Err("banner_timeout must be greater than zero".into());
+        }
+        Ok(Self { bytes, timeout })
+    }
+
+    pub fn bytes(&self) -> u32 {
+        self.bytes
+    }
+
+    /// The configured ceiling, for the plan and the record.
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    /// How long to actually wait, given what the connect to this host cost.
+    ///
+    /// A greeting arrives about one round trip after the connection is established, so
+    /// on a 2 ms LAN the useful wait is a few milliseconds and the configured ceiling is
+    /// two hundred times longer than it needs to be. That matters more than it sounds:
+    /// concurrency here *is* the worker-thread count with no queue behind it, so a worker
+    /// parked in `read` issues no probes at all while it waits. The ports that pay the
+    /// full ceiling are exactly the ones that yield nothing — a silent open port, which
+    /// HTTP and everything behind TLS are — so a flat 500 ms turned a 1% open rate into a
+    /// multiple of the whole scan's duration.
+    ///
+    /// Scaled off the measured connect instead, floored so a sub-millisecond connect
+    /// still leaves room, and capped by the configured timeout so the knob still means
+    /// what it says: the most this will ever wait.
+    pub fn wait_for(&self, connect: Duration) -> Duration {
+        (connect * 3).max(MIN_BANNER_WAIT).min(self.timeout)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -420,5 +476,66 @@ mod tests {
         assert_eq!(p.render("concurrency"), "builtin");
         p.set("concurrency", Origin::Cli);
         assert_eq!(p.render("concurrency"), "cli");
+    }
+}
+
+#[cfg(test)]
+mod banner_tests {
+    use super::*;
+
+    /// The caps are the type's guarantee, not an agreement between two modules.
+    #[test]
+    fn the_limits_are_enforced_by_the_constructor() {
+        assert!(
+            Banner::new(0, DEFAULT_BANNER_TIMEOUT).is_err(),
+            "zero bytes reads nothing"
+        );
+        assert!(Banner::new(MAX_BANNER_BYTES + 1, DEFAULT_BANNER_TIMEOUT).is_err());
+        assert!(Banner::new(MAX_BANNER_BYTES, DEFAULT_BANNER_TIMEOUT).is_ok());
+        // The kernel reads a zero read-timeout as "no timeout", which would park a worker
+        // on a silent port for the life of the scan.
+        assert!(
+            Banner::new(1024, Duration::ZERO).is_err(),
+            "zero timeout blocks forever"
+        );
+    }
+
+    /// Concurrency here is the worker-thread count with no queue, so a worker waiting on
+    /// a silent port issues no probes at all. A greeting arrives about one round trip
+    /// after connect, so the wait should follow the measured connect rather than a flat
+    /// ceiling that is two hundred times longer on a LAN.
+    #[test]
+    fn the_wait_follows_the_measured_connect() {
+        let b = Banner::new(1024, Duration::from_millis(500)).unwrap();
+
+        // A fast connect gets the floor, not half a second.
+        assert_eq!(
+            b.wait_for(Duration::from_millis(1)),
+            Duration::from_millis(50)
+        );
+        // A slow one scales up...
+        assert_eq!(
+            b.wait_for(Duration::from_millis(40)),
+            Duration::from_millis(120)
+        );
+        // ...but never past the configured ceiling, which is what the knob promises.
+        assert_eq!(
+            b.wait_for(Duration::from_millis(400)),
+            Duration::from_millis(500)
+        );
+        assert_eq!(
+            b.wait_for(Duration::from_secs(30)),
+            Duration::from_millis(500)
+        );
+    }
+
+    /// A ceiling below the floor still means the ceiling: the setting is the maximum.
+    #[test]
+    fn a_tight_ceiling_is_still_respected() {
+        let b = Banner::new(1024, Duration::from_millis(10)).unwrap();
+        assert_eq!(
+            b.wait_for(Duration::from_millis(1)),
+            Duration::from_millis(10)
+        );
     }
 }

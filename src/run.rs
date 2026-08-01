@@ -895,9 +895,11 @@ fn config_event(plan: &ScanPlan, facts: &HostFacts) -> serde_json::Value {
             None => json!({ "enabled": false }),
             Some(b) => json!({
                 "enabled": true,
-                "sent_bytes": 0,
-                "max_bytes": b.bytes,
-                "timeout_ms": b.timeout.as_millis() as u64,
+                // Sourced from the read itself, so the claim and the code that would
+                // falsify it live in one file.
+                "sent_bytes": crate::transport::BANNER_SENT_BYTES,
+                "max_bytes": b.bytes(),
+                "timeout_ms": b.timeout().as_millis() as u64,
             }),
         },
         "output": {

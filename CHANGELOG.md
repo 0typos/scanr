@@ -96,7 +96,9 @@ invited before then.
 
 - **`--banner` reads what open services volunteer**, without sending anything — the record
   states `banner.sent_bytes: 0`. Off by default; 1024 bytes and 500 ms by default,
-  tunable per profile via `banner_bytes` and `banner_timeout`. Only services that greet
+  tunable per profile via `banner_bytes` and `banner_timeout` — which is a ceiling, not a
+  fixed wait: the read scales off each host's measured connect time, because a worker
+  waiting on a silent port is a worker issuing no probes. Only services that greet
   first say anything, so HTTP and anything behind TLS stay silent; an absent banner means
   "said nothing unprompted", not "nothing there". Banners reach the screen as printable
   ASCII only, because a terminal acts on escape sequences and the bytes belong to the

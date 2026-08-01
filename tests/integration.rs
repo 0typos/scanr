@@ -74,16 +74,25 @@ fn stderr(o: &Output) -> String {
 }
 
 /// An accepting listener held open for the duration of the test.
-fn open_port() -> (TcpListener, SocketAddr) {
+/// A listener that greets on connect, the way SSH and SMTP do. An empty greeting is a
+/// service that accepts and volunteers nothing.
+fn greeting_port(greeting: &'static [u8]) -> (TcpListener, SocketAddr) {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let a = l.local_addr().unwrap();
     let l2 = l.try_clone().unwrap();
     std::thread::spawn(move || {
-        for s in l2.incoming() {
-            drop(s);
+        for mut s in l2.incoming().flatten() {
+            use std::io::Write;
+            let _ = s.write_all(greeting);
         }
     });
     (l, a)
+}
+
+fn open_port() -> (TcpListener, SocketAddr) {
+    // A service that accepts and says nothing — writing zero bytes and dropping is the
+    // same thing to a client as dropping.
+    greeting_port(b"")
 }
 
 fn closed_port() -> SocketAddr {
@@ -93,13 +102,17 @@ fn closed_port() -> SocketAddr {
     a
 }
 
-fn read_events(dir: &Path) -> Vec<Value> {
-    let results = dir.join("out");
-    let file = scanr::testsupport::find_record(&results).expect("a finalized .jsonl should exist");
-    scanr::testsupport::record_text(&file)
+fn events_in(dir: &Path) -> Vec<Value> {
+    let rec = scanr::testsupport::find_record(dir)
+        .unwrap_or_else(|| panic!("no record under {}", dir.display()));
+    scanr::testsupport::record_text(&rec)
         .lines()
         .map(|l| serde_json::from_str(l).expect("valid JSON per line"))
         .collect()
+}
+
+fn read_events(dir: &Path) -> Vec<Value> {
+    events_in(&dir.join("out"))
 }
 
 #[test]
@@ -1659,15 +1672,6 @@ fn summarize_and_results_agree_about_a_spanned_record() {
 
 // ── banner grabbing ─────────────────────────────────────────────────────────
 
-fn events_in(dir: &Path) -> Vec<Value> {
-    let rec = scanr::testsupport::find_record(dir)
-        .unwrap_or_else(|| panic!("no record under {}", dir.display()));
-    scanr::testsupport::record_text(&rec)
-        .lines()
-        .map(|l| serde_json::from_str(l).expect("valid JSON per line"))
-        .collect()
-}
-
 fn probes(events: &[Value]) -> impl Iterator<Item = &Value> {
     events.iter().filter(|e| e["type"] == "probe_result")
 }
@@ -1677,21 +1681,6 @@ fn config_of(events: &[Value]) -> &Value {
         .iter()
         .find(|e| e["type"] == "scan_config")
         .expect("a scan_config")
-}
-
-/// A listener that greets on connect, the way SSH and SMTP do.
-fn greeting_port(greeting: &'static [u8]) -> (TcpListener, SocketAddr) {
-    let l = TcpListener::bind("127.0.0.1:0").unwrap();
-    let a = l.local_addr().unwrap();
-    let l2 = l.try_clone().unwrap();
-    std::thread::spawn(move || {
-        for s in l2.incoming().flatten() {
-            use std::io::Write;
-            let mut s = s;
-            let _ = s.write_all(greeting);
-        }
-    });
-    (l, a)
 }
 
 #[test]
