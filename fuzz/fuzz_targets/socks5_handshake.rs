@@ -76,7 +76,7 @@ fuzz_target!(|data: &[u8]| {
     // Credentials belong to the hop now, not the transport: a chain presents a different
     // pair at each link. One hop is what a single proxy is.
     let hop = client.hops()[0].clone();
-    match client.negotiate(&mut peer, &hop, &mut phases, Instant::now()) {
+    match client.negotiate(&mut peer, &hop, &mut phases, Instant::now(), None) {
         Ok(()) => {
             // A completed handshake must have consumed a well-formed method selection.
             assert!(
@@ -84,7 +84,7 @@ fuzz_target!(|data: &[u8]| {
                 "accepted a greeting that was not SOCKS5: {body:?}"
             );
             // Whatever remains is the CONNECT reply; parsing it must also be safe.
-            let _ = read_reply(&mut peer);
+            let _ = read_reply(&mut peer, None);
         }
         Err(outcome) => {
             // A failure must always be reportable: a state, and a reason a human can read.

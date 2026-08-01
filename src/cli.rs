@@ -410,10 +410,13 @@ static SIGINT_COUNT: AtomicU8 = AtomicU8::new(0);
 /// Async-signal-safe: touches one atomic and nothing else. No allocation, no locks,
 /// no formatting.
 extern "C" fn on_sigint(_sig: libc::c_int) {
-    let n = SIGINT_COUNT.load(Ordering::Relaxed);
-    if n < 2 {
-        SIGINT_COUNT.store(n + 1, Ordering::SeqCst);
-    }
+    // One atomic operation, not a load and a separate store. The same handler serves
+    // SIGINT and SIGTERM, so a SIGTERM can nest inside a running SIGINT handler on the
+    // same thread: both read 0, both store 1, and the user's escalation to forced is lost.
+    // `fetch_update` lowers to a CAS loop — no allocation, no lock, still signal-safe.
+    let _ = SIGINT_COUNT.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+        Some(n.saturating_add(1))
+    });
 }
 
 fn install_signal_handler() {

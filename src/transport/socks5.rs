@@ -188,7 +188,10 @@ impl Socks5Transport {
             if let Err(o) = set_timeouts(&s, timing.handshake_timeout) {
                 return detailed(o, None);
             }
-            if let Err(o) = self.negotiate(&mut s, hop, &mut phases, started) {
+            // Each phase gets its own wall-clock deadline, so a peer cannot extend the
+            // budget by trickling.
+            let hs_deadline = Some(Instant::now() + timing.handshake_timeout);
+            if let Err(o) = self.negotiate(&mut s, hop, &mut phases, started, hs_deadline) {
                 return detailed(self.blame_hop(o, i), None);
             }
             if i == last {
@@ -202,7 +205,7 @@ impl Socks5Transport {
                 return detailed(o, None);
             }
             let next = Destination::Addr(self.hops[i + 1].address);
-            if let Err(o) = self.open_tunnel(&mut s, &next, &mut phases, started, i) {
+            if let Err(o) = self.open_tunnel(&mut s, &next, &mut phases, started, i, timing) {
                 return detailed(o, None);
             }
         }
@@ -221,7 +224,7 @@ impl Socks5Transport {
             return detailed(io_failure(&e, "sending CONNECT request", phases), None);
         }
 
-        let reply = read_reply(&mut s);
+        let reply = read_reply(&mut s, Some(connect_start + timing.connect_timeout));
         let connect_elapsed = connect_start.elapsed();
         phases.connect = Some(connect_elapsed);
         phases.total = started.elapsed();
@@ -254,13 +257,14 @@ impl Socks5Transport {
         phases: &mut Phases,
         started: Instant,
         from: usize,
+        timing: &Timing,
     ) -> Result<(), ProbeOutcome> {
         let request = build_connect_request(next);
         if let Err(e) = s.write_all(&request) {
             phases.total = started.elapsed();
             return Err(self.blame_hop(io_failure(&e, "extending the chain", *phases), from));
         }
-        match read_reply(s) {
+        match read_reply(s, Some(Instant::now() + timing.connect_timeout)) {
             Ok(REP_SUCCEEDED) => Ok(()),
             Ok(code) => {
                 phases.total = started.elapsed();
@@ -337,6 +341,7 @@ impl Socks5Transport {
         hop: &Hop,
         phases: &mut Phases,
         started: Instant,
+        deadline: Option<Instant>,
     ) -> Result<(), ProbeOutcome> {
         let want_auth = hop.username.is_some();
         let greeting: Vec<u8> = if want_auth {
@@ -350,7 +355,8 @@ impl Socks5Transport {
             .map_err(|e| fail(&e, "sending SOCKS5 greeting", phases))?;
 
         let mut resp = [0u8; 2];
-        read_exact(s, &mut resp).map_err(|e| fail(&e, "reading method selection", phases))?;
+        read_exact(s, &mut resp, deadline)
+            .map_err(|e| fail(&e, "reading method selection", phases))?;
 
         if resp[0] != VERSION {
             phases.total = started.elapsed();
@@ -377,7 +383,7 @@ impl Socks5Transport {
                         *phases,
                     ));
                 };
-                self.authenticate(s, user, pass.unwrap_or(""), phases, started)
+                self.authenticate(s, user, pass.unwrap_or(""), phases, started, deadline)
             }
             METHOD_UNACCEPTABLE => {
                 phases.total = started.elapsed();
@@ -411,6 +417,7 @@ impl Socks5Transport {
         pass: &str,
         phases: &mut Phases,
         started: Instant,
+        deadline: Option<Instant>,
     ) -> Result<(), ProbeOutcome> {
         if user.len() > 255 || pass.len() > 255 {
             phases.total = started.elapsed();
@@ -433,7 +440,7 @@ impl Socks5Transport {
             .map_err(|e| io_failure(&e, "sending SOCKS5 credentials", *phases))?;
 
         let mut resp = [0u8; 2];
-        read_exact(s, &mut resp)
+        read_exact(s, &mut resp, deadline)
             .map_err(|e| io_failure(&e, "reading authentication reply", *phases))?;
 
         // RFC 1929: the reply is VER STATUS with VER = X'01'. Checking it matters because
@@ -580,9 +587,30 @@ fn io_failure(e: &std::io::Error, what: &str, phases: Phases) -> ProbeOutcome {
     )
 }
 
-fn read_exact<R: Read>(s: &mut R, buf: &mut [u8]) -> std::io::Result<()> {
+/// Read exactly `buf.len()` bytes, or fail — bounded in *time*, not only in bytes.
+///
+/// `SO_RCVTIMEO` bounds each `read` syscall, not the message. A peer that delivers one
+/// byte just inside the timeout resets that clock on every iteration, so the reply parser
+/// — up to 262 reads for an `ATYP_DOMAIN` address — could hold a worker for 262x the
+/// configured budget, chosen by the peer. Measured at 26x against a 200ms budget. Since
+/// concurrency here is the worker-thread count with no queue, a hostile proxy doing this
+/// on every connection stalls the whole scan.
+///
+/// `deadline` is `None` only where there is no clock to run against — a fuzz harness
+/// driving a `Cursor`, which cannot block.
+fn read_exact<R: Read>(
+    s: &mut R,
+    buf: &mut [u8],
+    deadline: Option<Instant>,
+) -> std::io::Result<()> {
     let mut filled = 0;
     while filled < buf.len() {
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "peer did not deliver a complete message within the budget",
+            ));
+        }
         match s.read(&mut buf[filled..]) {
             Ok(0) => {
                 return Err(std::io::Error::new(
@@ -630,9 +658,9 @@ pub fn build_connect_request(dest: &Destination) -> Vec<u8> {
 /// Generic over the reader so a fuzz harness can drive it with arbitrary bytes. This
 /// parses attacker-influenced input — the length byte of an `ATYP_DOMAIN` bound address
 /// is supplied by the proxy — so it is the most security-relevant parser in the crate.
-pub fn read_reply<R: Read>(s: &mut R) -> std::io::Result<u8> {
+pub fn read_reply<R: Read>(s: &mut R, deadline: Option<Instant>) -> std::io::Result<u8> {
     let mut head = [0u8; 4];
-    read_exact(s, &mut head)?;
+    read_exact(s, &mut head, deadline)?;
     if head[0] != VERSION {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -646,7 +674,7 @@ pub fn read_reply<R: Read>(s: &mut R) -> std::io::Result<u8> {
         ATYP_IPV6 => 16,
         ATYP_DOMAIN => {
             let mut l = [0u8; 1];
-            read_exact(s, &mut l)?;
+            read_exact(s, &mut l, deadline)?;
             l[0] as usize
         }
         other => {
@@ -657,7 +685,7 @@ pub fn read_reply<R: Read>(s: &mut R) -> std::io::Result<u8> {
         }
     };
     let mut rest = vec![0u8; addr_len + 2];
-    read_exact(s, &mut rest)?;
+    read_exact(s, &mut rest, deadline)?;
     Ok(rep)
 }
 
@@ -1015,6 +1043,29 @@ mod tests {
             let o = transport(&fx).probe(&Destination::Addr(closed_port()), &timing());
             assert_eq!(o.state, State::Error);
         }
+    }
+
+    /// A peer that answers correctly but slowly must not be able to choose how long a
+    /// probe takes. `SO_RCVTIMEO` bounds each read, not the message, so before the
+    /// message deadline a trickling proxy held a worker for 26x the configured budget —
+    /// and concurrency here is the worker-thread count with no queue behind it.
+    #[test]
+    fn a_trickling_proxy_cannot_outrun_the_budget() {
+        let fx = Socks5Fixture::start(Behavior::Trickle(Duration::from_millis(60)));
+        let mut tm = timing();
+        tm.handshake_timeout = Duration::from_millis(150);
+        tm.connect_timeout = Duration::from_millis(150);
+
+        let started = std::time::Instant::now();
+        let o = transport(&fx).probe(&Destination::Addr(closed_port()), &tm);
+        let elapsed = started.elapsed();
+
+        // Ten bytes at 60ms each would be 600ms if each read reset the clock.
+        assert!(
+            elapsed < Duration::from_millis(450),
+            "a peer chose the duration: {elapsed:?} against a 150ms budget ({:?})",
+            o.state
+        );
     }
 
     #[test]
