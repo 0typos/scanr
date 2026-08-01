@@ -12,11 +12,12 @@ changes.
 ## Checklist
 
 1. **Move the changelog section.** `CHANGELOG.md` accumulates under `## [Unreleased]`.
-   Rename it to `## [X.Y.Z] - YYYY-MM-DD` and add a fresh empty `## [Unreleased]` above.
+   Rename that heading to `## [X.Y.Z] - YYYY-MM-DD`, **and add a fresh `## [Unreleased]`
+   heading above it.**
 
-   This is not cosmetic. The release workflow extracts the section whose heading matches
-   the tag and uses it as the release notes; leaving everything under `Unreleased`
-   produces an empty body and a warning.
+   The fresh heading is not cosmetic. Without it the next commit's changelog entry has no
+   correct home and lands under the version you just shipped — which happened twice, and
+   both times meant a release whose notes described work it did not contain.
 
 2. **Bump `version` in `Cargo.toml`** and run `cargo build` so `Cargo.lock` updates.
 
