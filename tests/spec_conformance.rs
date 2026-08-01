@@ -39,13 +39,24 @@ fn record() -> Vec<Value> {
         }
     });
 
+    // A closed port as well as an open one, so the record contains a `probe_span`. With
+    // only an open port there is nothing to collapse, and the assertion that `counts` —
+    // not line counts — is the authority on totals would hold trivially.
+    let closed = {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let p = l.local_addr().unwrap().port();
+        drop(l);
+        p
+    };
+    let ports = format!("{},{}", addr.port(), closed);
+
     let out = Command::new(BIN)
         .args([
             "run",
             "--targets",
             "127.0.0.1",
             "--ports",
-            &addr.port().to_string(),
+            &ports,
             "--output-dir",
             "out",
             "--all",
@@ -231,6 +242,33 @@ fn terminal_event_counts_account_for_every_probe() {
         g("planned"),
         g("completed") + g("abandoned") + g("not_started"),
         "the three buckets must sum to planned: {c}"
+    );
+
+    // The documented promise: `counts` is the authority on totals, and counting lines of
+    // any one event type is not. A collapsed probe has no `probe_result` row, so a
+    // consumer that counts them alone under-reports — which is exactly what the old
+    // "new optional fields may appear" wording would have licensed it to do.
+    let rows = events
+        .iter()
+        .filter(|e| e["type"] == "probe_result")
+        .count() as u64;
+    let spanned: u64 = events
+        .iter()
+        .filter(|e| e["type"] == "probe_span")
+        .filter_map(|e| e["count"].as_u64())
+        .sum();
+    assert_eq!(
+        g("completed"),
+        rows + spanned,
+        "completed must equal probe_result rows plus the probes their spans stand for"
+    );
+    assert!(
+        spanned > 0,
+        "the fixture must actually produce a span, or this proves nothing"
+    );
+    assert!(
+        rows < g("completed"),
+        "and counting rows alone must under-report, which is the whole point"
     );
     assert_eq!(
         g("completed"),
