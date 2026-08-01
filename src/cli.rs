@@ -489,11 +489,7 @@ fn build_plan(
 ) -> Result<ScanPlan, ConfigError> {
     let files = load_config(cli)?;
     let facts = HostFacts::probe();
-    let plan = resolve(&files, scan, &overrides.to_overrides(), &facts)?;
-    // Every `service_label` in the record and on screen reads the process table, so it
-    // has to be in place before the first probe is written.
-    crate::services::install(plan.services.clone());
-    Ok(plan)
+    resolve(&files, scan, &overrides.to_overrides(), &facts)
 }
 
 // ── run ─────────────────────────────────────────────────────────────────────
@@ -661,7 +657,8 @@ fn plan_row(s: &mut String, style: &Style, k: &str, v: String, src: &str) {
     } else {
         // `{v:<40}` alone pads nothing once the value reaches the column width, so a
         // long value ran straight into the provenance: `... + builtin (59)defaults`.
-        // Always leave a separator, and count characters rather than bytes.
+        // The `.max(1)` is the whole fix — always leave a separator. (The format width
+        // was never the bug: `Formatter::pad` already counts characters, not bytes.)
         let pad = 40usize.saturating_sub(v.chars().count()).max(1);
         format!("{k:<16}{v}{}{}", " ".repeat(pad), style.dim(src))
     };
@@ -988,32 +985,27 @@ fn cmd_transport_test(
 
 // ── output ──────────────────────────────────────────────────────────────────
 
-/// Give the `output` commands the same label table a scan would have used.
+/// Give `output get` the label table a scan would have used.
 ///
-/// Best effort on purpose. These commands read a finished record and mostly take labels
-/// straight from it; only `remainder` has to invent one, for a port that was never
-/// probed. That is not worth failing a read-only command over, so a broken or absent
-/// config here means the builtin table rather than an error — the scan commands, which
-/// do care, resolve it strictly through `build_plan`.
+/// Only `get` needs one, and only for rows it expands out of a `probe_span`: those have
+/// no `service_label` of their own, because the span collapsed them. Every other
+/// `output` command reads labels straight from the record, so making them all pay a
+/// config load and an `/etc/services` parse bought nothing.
+///
+/// Best effort: a broken or absent config here means the builtin table rather than a
+/// failed read-only command. The precedence itself comes from `resolve_services`, the
+/// same function the scan path uses, so what a record is read back with cannot drift
+/// from what it was written with.
 fn install_services_best_effort(cli: &Cli) {
-    let files = load_config(cli).ok();
-    let configured = files
-        .as_ref()
-        .and_then(|f| f.pick(|c| c.defaults.services_file.clone()))
-        .map(|(v, _)| crate::config::expand_home(&v));
-    let use_etc = files
-        .as_ref()
-        .and_then(|f| f.pick(|c| c.defaults.use_etc_services))
-        .map(|(v, _)| v)
-        .unwrap_or(true);
-    if let Ok(t) = crate::services::ServiceTable::resolve_from_host(configured.as_deref(), use_etc)
-    {
+    let Ok(files) = load_config(cli) else { return };
+    let mut prov = crate::plan::Provenance::default();
+    let mut warnings = Vec::new();
+    if let Ok(t) = crate::plan::resolve_services(&files, &mut prov, &mut warnings) {
         crate::services::install(t);
     }
 }
 
 fn cmd_output(cli: &Cli, cmd: &OutputCmd) -> Result<u8, ConfigError> {
-    install_services_best_effort(cli);
     match cmd {
         OutputCmd::Summarize { file, by } => {
             let style = output_style(cli);
@@ -1080,6 +1072,10 @@ fn cmd_output_get(
     json: bool,
 ) -> Result<u8, ConfigError> {
     use crate::verify::Query;
+
+    // Rows expanded out of a `probe_span` carry no `service_label` of their own, so this
+    // is the one read-only command that needs a label table.
+    install_services_best_effort(cli);
 
     let mut q = Query::default();
     for spec in hosts.unwrap_or(&[]).iter().flat_map(|s| s.split(',')) {

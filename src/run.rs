@@ -171,6 +171,13 @@ pub(crate) fn execute_with(
     opts: &RunOptions,
     harness: Harness,
 ) -> Result<ScanSummary, ScanError> {
+    // Both the record's `service_label` fields and the live result lines read the
+    // process-wide table, so it has to be installed before either is written. Here
+    // rather than in the CLI's plan builder: any caller of `execute` should get the
+    // labels its own plan resolved, and a function that builds a value should not also
+    // be reaching into a global.
+    crate::services::install(plan.services.clone());
+
     let facts = HostFacts::probe();
     let scan_id = crate::output::new_scan_id();
     let started_ms = now_epoch_ms();
@@ -1766,8 +1773,8 @@ mod tests {
     /// very same record did not come from.
     #[test]
     fn the_config_event_reports_the_table_the_labels_came_from() {
-        let mut path = std::env::temp_dir();
-        path.push(format!("scanr-run-services-{}", std::process::id()));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("services");
         std::fs::write(&path, "internal-api 8080/tcp\n").expect("write fixture");
 
         let mut plan = ScanPlan::for_test(vec![80], 4);
@@ -1789,7 +1796,5 @@ mod tests {
             "nothing was installed, so only the builtin can have produced labels: {layers:?}"
         );
         assert_eq!(layers[0]["source"], "builtin");
-
-        let _ = std::fs::remove_file(&path);
     }
 }
