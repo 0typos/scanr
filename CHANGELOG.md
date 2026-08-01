@@ -42,6 +42,15 @@ invited before then.
 
 ### Fixed
 
+- **`output verify` answered "I could not read it" and "I read it and it is bad" with the
+  same exit code.** Both were `1`, so a caller could not tell a corrupt record from a
+  mistyped path — the one distinction a verification tool's exit code exists to carry.
+  Problems found now exit `2`; an unreadable file still exits `1`.
+- **`output results --hosts <name>` matched nothing silently** on a record whose targets
+  are addresses, so `--hosts localhost` against a scan of `127.0.0.1` looked exactly like
+  "nothing was open". Host filters are deliberately not resolved — the record is read
+  offline, and a scan using transport-side DNS never resolved the name locally either —
+  so an empty name query now says so on stderr.
 - **`config init` omitted nine keys the parser accepts**: `banner`, `compress`, `spans`,
   `services_file` and `use_etc_services` under `[defaults]`; `banner_bytes` and
   `banner_timeout` on a profile; `hops` and `members` on a transport — so the generated
