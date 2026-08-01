@@ -808,8 +808,27 @@ fn reference_error(
 
 /// A credential file readable by anyone but its owner is a real finding, not a nit.
 fn check_secret_file_permissions(path: &Path) -> Result<(), String> {
+    read_secret_file(path).map(|_| ())
+}
+
+/// Open a credential file, check the mode *of the thing we opened*, and read it.
+///
+/// The check and the read are one operation on one descriptor deliberately. Splitting
+/// them — `metadata(path)` at validation, `read_to_string(path)` later at resolve — leaves
+/// a window in which the path can be repointed at something else after passing the check,
+/// so the mode that was approved is not the mode of the bytes that get used. Because
+/// `File::metadata` fstats the open descriptor rather than re-walking the path, nothing
+/// can be swapped in between here.
+///
+/// The permission rule itself is unchanged: no group or other bits at all.
+pub(crate) fn read_secret_file(path: &Path) -> Result<String, String> {
+    use std::io::Read;
     use std::os::unix::fs::PermissionsExt;
-    let md = std::fs::metadata(path)
+
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| format!("cannot read password_file {}: {e}", path.display()))?;
+    let md = file
+        .metadata()
         .map_err(|e| format!("cannot read password_file {}: {e}", path.display()))?;
     let mode = md.permissions().mode() & 0o777;
     if mode & 0o077 != 0 {
@@ -821,7 +840,10 @@ fn check_secret_file_permissions(path: &Path) -> Result<(), String> {
             path.display()
         ));
     }
-    Ok(())
+    let mut s = String::new();
+    file.read_to_string(&mut s)
+        .map_err(|e| format!("cannot read password_file {}: {e}", path.display()))?;
+    Ok(s)
 }
 
 #[cfg(test)]

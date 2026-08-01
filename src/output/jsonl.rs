@@ -9,7 +9,6 @@
 //!   named `.partial` means the process died without finalizing.
 //! * Credentials never appear.
 
-use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -152,7 +151,23 @@ impl JsonlWriter {
         };
         let final_path = dir.join(&name);
         let partial_path = dir.join(format!("{name}.partial"));
-        let file = File::create(&partial_path)?;
+        // 0600, not the 0644 the default umask gives. `docs/security.md` calls the record
+        // a sensitive artifact — it is a map of what you scanned and what answered — and
+        // the tool already refuses a `password_file` that group or others can read. A
+        // world-readable record on a shared host contradicted that in the same breath.
+        //
+        // Set at creation rather than chmod-ed afterwards, so there is no window in which
+        // the file exists with wider permissions.
+        let file = {
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            opts.open(&partial_path)?
+        };
         let sink: Box<dyn Write + Send> = if compress {
             Box::new(GzFrames::new(file))
         } else {
@@ -378,7 +393,7 @@ mod compression_tests {
         );
 
         let mut out = String::new();
-        flate2::read::MultiGzDecoder::new(File::open(&p).unwrap())
+        flate2::read::MultiGzDecoder::new(std::fs::File::open(&p).unwrap())
             .read_to_string(&mut out)
             .expect("a finalized record decodes completely");
         let lines: Vec<&str> = out.lines().collect();

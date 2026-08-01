@@ -1057,6 +1057,7 @@ fn writer_failure_exits_three_and_leaves_a_partial_file() {
 
     // SAFETY: setrlimit is async-signal-safe and this runs in the forked child
     // between fork and exec.
+    #[allow(unsafe_code)]
     unsafe {
         cmd.pre_exec(|| {
             let lim = libc::rlimit {
@@ -1145,6 +1146,7 @@ fn resource_pressure_is_reported_once_with_remediation() {
     discard_coverage_profile(&mut cmd);
 
     // SAFETY: setrlimit is async-signal-safe and runs between fork and exec.
+    #[allow(unsafe_code)]
     unsafe {
         cmd.pre_exec(|| {
             let lim = libc::rlimit {

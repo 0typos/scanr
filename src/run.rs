@@ -840,7 +840,11 @@ fn started_event(epoch_ms: u64) -> serde_json::Value {
 /// The scanning host, so a record identifies where the connections originated.
 pub fn hostname() -> String {
     let mut buf = [0u8; 256];
-    // SAFETY: gethostname writes at most buf.len() bytes into a buffer we own.
+    // SAFETY: `buf` is a live 256-byte array and we pass its exact length, so the write
+    // cannot overrun. POSIX permits truncation without a trailing NUL when the name does
+    // not fit, which is why the caller below scans for a NUL and falls back to the full
+    // length rather than trusting one to be there.
+    #[allow(unsafe_code)]
     let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
     if rc != 0 {
         return "unknown".into();
