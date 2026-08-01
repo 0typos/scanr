@@ -38,6 +38,13 @@ pub enum Behavior {
     BadAddressType,
     /// Complete the handshake and then never answer the CONNECT.
     SilentAfterHandshake,
+    /// Answers correctly, one byte at a time, pausing between each.
+    ///
+    /// The gap that let a peer choose how long a probe took: `SO_RCVTIMEO` bounds each
+    /// `read` syscall, not the message, so a peer delivering a byte just inside the
+    /// timeout resets the clock on every iteration. Nothing modelled this, so nothing
+    /// asserted a bound on a probe's total wall time.
+    Trickle(Duration),
     /// Always succeed without attempting a real connection.
     AlwaysOpen,
 }
@@ -199,6 +206,21 @@ fn handle(mut s: TcpStream, behavior: Behavior, shutdown: Arc<AtomicBool>) -> st
         }
         Behavior::BadAddressType => {
             s.write_all(&[VERSION, REP_SUCCEEDED, 0x00, 0x09, 0, 0])?;
+        }
+        // One byte at a time, with a pause between each — every individual read succeeds
+        // well inside the per-read timeout, so only a message-level deadline stops it.
+        Behavior::Trickle(gap) => {
+            let reply = [VERSION, REP_SUCCEEDED, 0x00, ATYP_IPV4, 0, 0, 0, 0, 0, 0];
+            for b in reply {
+                if shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+                if s.write_all(&[b]).is_err() {
+                    break;
+                }
+                let _ = s.flush();
+                std::thread::sleep(*gap);
+            }
         }
         Behavior::SilentAfterHandshake => {
             // Hold without answering until the fixture is torn down.

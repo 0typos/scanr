@@ -179,6 +179,11 @@ impl Spans {
     /// Draining bounds that to one progress interval, and several spans of the same
     /// class are as valid as one — their ranges are disjoint and their counts add.
     pub fn drain_events(&mut self) -> Vec<Value> {
+        // The accumulator is about to be empty, so the next window deserves its own class
+        // budget. Latching this meant one unlucky five-second window — an 8-member pool
+        // reaches 64 classes easily, since `via` is part of the key — disabled collapsing
+        // for the rest of a multi-hour scan, silently and permanently.
+        self.exhausted = false;
         std::mem::take(&mut self.groups)
             .into_iter()
             .map(|((state, source, reason, attempts, via), mut g)| {

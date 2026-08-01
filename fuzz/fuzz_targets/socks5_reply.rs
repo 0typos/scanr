@@ -13,7 +13,7 @@ use scanr::transport::socks5::read_reply;
 
 fuzz_target!(|data: &[u8]| {
     let mut cursor = std::io::Cursor::new(data);
-    match read_reply(&mut cursor) {
+    match read_reply(&mut cursor, None) {
         Ok(code) => {
             // A success can only be reported for a well-formed reply, which must have
             // begun with the version byte.
@@ -27,7 +27,7 @@ fuzz_target!(|data: &[u8]| {
 
     // Reading twice from the same bytes must agree: the parser holds no hidden state.
     let mut again = std::io::Cursor::new(data);
-    let a = read_reply(&mut std::io::Cursor::new(data)).ok();
-    let b = read_reply(&mut again).ok();
+    let a = read_reply(&mut std::io::Cursor::new(data), None).ok();
+    let b = read_reply(&mut again, None).ok();
     assert_eq!(a, b, "parsing is not deterministic for {data:?}");
 });

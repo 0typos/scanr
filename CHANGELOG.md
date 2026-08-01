@@ -17,6 +17,28 @@ invited before then.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-08-01
+
+### Fixed
+
+- **A trickling proxy could choose how long a probe took.** `SO_RCVTIMEO` bounds each
+  `read` syscall, not the message, so a peer delivering one byte just inside the timeout
+  reset the clock every iteration — measured at 26x the configured budget. Reads now have
+  a message-level deadline. Concurrency is the worker-thread count with no queue, so this
+  was a whole-scan stall, not one slow probe.
+- **`Spans::exhausted` latched permanently.** One five-second window exceeding the 64-class
+  ceiling disabled span collapsing for the rest of the scan, silently. An 8-member pool
+  reaches 64 classes easily, since the member is part of the key. It is now per-window.
+- **A failed worker spawn detached the workers already running** — no cancellation, no
+  join, process exit moments later. Connections were made to real hosts and never
+  recorded. Reachable under `RLIMIT_NPROC` or a container `pids.max`.
+- **An interrupt left no trace** when a worker panic or writer failure co-occurred: the
+  terminal event dropped `signal`, `forced` and `requested_at` because `Failed` outranks
+  `Interrupted`. That is an argument about which name to print, not a reason to delete the
+  evidence.
+- The signal handler's read-modify-write was not atomic, so a SIGTERM nesting inside a
+  SIGINT handler could lose the escalation to forced.
+
 ## [0.2.1] - 2026-08-01
 
 ### Fixed

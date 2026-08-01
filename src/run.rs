@@ -372,10 +372,11 @@ fn spawn_workers(
     let limiter = Arc::new(RateLimiter::new(plan.timing.rate));
     let (tx, rx) = sync_channel::<Completed>(CHANNEL_DEPTH);
 
-    // Hoisted: the loop shadows `plan` with a clone that moves into the worker closure,
-    // so the error path cannot reach the outer one.
+    // Hoisted: the loop shadows `plan`, `cancel` and `tx` with clones that move into the
+    // worker closure, so the error path cannot reach the outer ones.
     let out_dir = plan.output_dir.clone();
-    let mut handles = Vec::with_capacity(n_workers);
+    let outer_cancel = cancel.clone();
+    let mut handles: Vec<std::thread::JoinHandle<()>> = Vec::with_capacity(n_workers);
     for i in 0..n_workers {
         let (plan, transport, permutation, counter, limiter, cancel, tx) = (
             plan.clone(),
@@ -403,7 +404,26 @@ fn spawn_workers(
             .map_err(|e| ScanError::Output {
                 path: out_dir.clone(),
                 source: e,
-            })?;
+            });
+        // A `?` here dropped `handles`, detaching every worker already spawned: no
+        // cancellation, no join, and the process exits from `main` moments later — killing
+        // them mid-`connect`. So connections were made to real hosts and never recorded,
+        // in a tool whose purpose is an auditable account of exactly that. Reachable via
+        // `RLIMIT_NPROC` or a container `pids.max`, since concurrency validates to 65535
+        // while D1 documents a ~10k thread ceiling.
+        let handle = match handle {
+            Ok(h) => h,
+            Err(e) => {
+                // Tell the running workers to stop, release anything parked in `send`,
+                // then wait for them before surfacing the error.
+                outer_cancel.request_graceful();
+                drop(rx);
+                for h in handles {
+                    let _ = h.join();
+                }
+                return Err(e);
+            }
+        };
         handles.push(handle);
     }
     // The collector's loop ends on channel disconnect, which cannot happen while this
@@ -676,7 +696,13 @@ fn terminal_body(t: &Terminal) -> serde_json::Value {
         "duration_ms": t.duration.as_millis() as u64,
         "exit_code": t.termination.exit_code(),
     });
-    if t.termination == Termination::Interrupted {
+    // Recorded whenever an interrupt actually happened, not only when it won the label.
+    // `Failed` outranks `Interrupted` deliberately — a crash needs investigating and the
+    // user asked for the interrupt — but that is an argument about which *name* to print,
+    // not a reason to delete the evidence. A scan the operator stopped that also hit a
+    // worker panic previously emitted `scan_failed` with no signal, no forced flag, and no
+    // requested_at, so "was this abandoned or aborted" became unanswerable.
+    if t.interrupt_requested_at.is_some() || t.cancel.is_cancelled() {
         body["signal"] = json!("SIGINT");
         body["forced"] = json!(t.cancel.is_forced());
         if let Some(at) = t.interrupt_requested_at {
