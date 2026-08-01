@@ -919,9 +919,10 @@ fn load_password(
     }
     if let Some(f) = &raw.password_file {
         let path = expand_home(f);
-        let v = std::fs::read_to_string(&path).map_err(|e| {
-            ConfigError::new(format!("cannot read password_file {}: {e}", path.display()))
-        })?;
+        // Re-checks the mode on the descriptor it reads from. Validation checked it too,
+        // but that was a separate `stat` on a path that could since have been repointed —
+        // and this is the read whose bytes actually become the credential.
+        let v = crate::config::read_secret_file(&path).map_err(ConfigError::new)?;
         return Ok(Some(Secret::new(
             v.trim_end_matches(['\n', '\r']).to_string(),
             Origin::Env(format!("file:{}", path.display())),

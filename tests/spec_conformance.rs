@@ -338,6 +338,82 @@ fn the_closed_enumerations_match_the_spec() {
     }
 }
 
+/// `docs/security.md` enumerates every `unsafe` block; the source is the authority.
+///
+/// The claim had drifted to "three narrowly-scoped FFI calls" while there were five —
+/// `getentropy` and `signal` were added later and nobody updated the prose. A reader
+/// auditing the crate would have stopped looking after finding the three named.
+#[test]
+fn security_doc_accounts_for_every_unsafe_block() {
+    const CALLS: [&str; 5] = [
+        "getrandom",
+        "getentropy",
+        "gethostname",
+        "getrlimit",
+        "signal",
+    ];
+    let doc = spec("security.md");
+    let mut found: Vec<String> = Vec::new();
+
+    for path in walk_rust_sources() {
+        let text = std::fs::read_to_string(&path).unwrap();
+        for (offset, _) in text.match_indices("unsafe {") {
+            // Skip the word appearing in prose or in the lint attribute.
+            let line_start = text[..offset].rfind('\n').map_or(0, |i| i + 1);
+            let line = &text[line_start..];
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            // The libc call is on the same line or just inside the block, so look at the
+            // statement and a short window after it.
+            let window = &text[offset..text.len().min(offset + 240)];
+            let call = CALLS
+                .iter()
+                .find(|c| window.contains(&format!("libc::{c}")))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "unrecognised unsafe block in {}:\n{}",
+                        path.display(),
+                        &window[..window.len().min(120)]
+                    )
+                });
+            found.push((*call).to_string());
+        }
+    }
+
+    found.sort();
+    let mut expected: Vec<String> = CALLS.iter().map(|c| (*c).to_string()).collect();
+    expected.sort();
+    assert_eq!(
+        found, expected,
+        "the unsafe blocks in src/ do not match the five documented in docs/security.md"
+    );
+    for call in &found {
+        assert!(
+            doc.contains(&format!("`{call}`")),
+            "unsafe call `{call}` is not listed in docs/security.md"
+        );
+    }
+}
+
+/// Every `.rs` file under `src/`, plus `build.rs`.
+fn walk_rust_sources() -> Vec<std::path::PathBuf> {
+    fn go(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                go(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut out = vec![root.join("build.rs")];
+    go(&root.join("src"), &mut out);
+    out
+}
+
 #[test]
 fn spec_json_examples_are_valid_json() {
     // A spec whose examples do not parse cannot be trusted by someone writing a

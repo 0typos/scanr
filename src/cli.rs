@@ -439,7 +439,14 @@ extern "C" fn on_sigint(_sig: libc::c_int) {
 }
 
 fn install_signal_handler() {
-    // SAFETY: `on_sigint` performs only atomic stores, which is permitted in a handler.
+    // SAFETY: `on_sigint` is an `extern "C"`-compatible fn item with no captured state,
+    // and the cast to `sighandler_t` is the documented way to install one. What it does
+    // when it fires is a compare-exchange loop on a `static AtomicU8` and nothing else
+    // — no allocation, no locks, no I/O — so it is async-signal-safe. (It is a
+    // read-modify-write, not the plain store an earlier version of this comment claimed;
+    // both are fine here, but the distinction is the whole reason the loop exists.)
+    // SIGPIPE and SIGXFSZ are set to SIG_IGN, which is always valid.
+    #[allow(unsafe_code)]
     unsafe {
         libc::signal(libc::SIGINT, on_sigint as *const () as libc::sighandler_t);
         libc::signal(libc::SIGTERM, on_sigint as *const () as libc::sighandler_t);

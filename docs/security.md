@@ -34,6 +34,38 @@ confidentiality and no integrity. The credentials and the whole session cross th
 in cleartext. If the path to your proxy is untrusted, tunnel it — `ssh -D` gives you a
 proxy whose transport is encrypted, at the cost of `open_only` result fidelity.
 
+## Every hop in a chain sees the credentials of every hop after it
+
+This is the property most likely to surprise, and it follows directly from how chaining
+works. A chain reuses one socket: `scanr` completes the SOCKS5 handshake with hop 1, asks
+it for a tunnel to hop 2, then performs hop 2's handshake **inside that tunnel**, and so on.
+
+The consequence, for `hops = ["a", "b", "c"]`:
+
+| what | who can read it |
+|---|---|
+| `a`'s credentials | the network path to `a`, and `a` |
+| `b`'s credentials | all of the above, plus `b` |
+| `c`'s credentials | all of the above, plus `c` |
+| the destination and every probe result | every hop |
+
+RFC 1929 sends the username and password with no confidentiality (above), and a tunnel
+does not change that: hop 1 terminates its own encryption, so it reads the bytes you send
+onward in cleartext. **Chaining through a hop is trusting it with every credential
+downstream of it**, not just its own. Encrypting the link to hop 1 — `ssh -D`, say —
+protects those bytes from an observer *on that link*, never from hop 1 itself.
+
+Practical consequences:
+
+- **Do not reuse one password across hops.** Give each hop its own, so a hop that logs or
+  leaks what passes through it compromises only the hops after it.
+- **Order matters.** The least trusted hop belongs last, where it sees the fewest secrets.
+- **A pool is not a chain.** Members are probed *across*, never *through*, so a pool
+  member sees only its own credentials and its own share of the destinations.
+
+None of this is specific to `scanr` — it is how nested SOCKS5 works — but the tool makes
+chains easy enough to build that the property is worth stating plainly.
+
 ## Credentials
 
 **Inline passwords in configuration are rejected**, not warned about:
@@ -104,8 +136,21 @@ See `fuzz/fuzz_targets/`. Seeds are committed and replayed in CI as a regression
 Fuzzing found and fixed one real defect: an address-count overflow that panicked in debug
 builds and silently wrapped in release, so `::/0` reported covering one address.
 
-No `unsafe` blocks exist outside three narrowly-scoped FFI calls — `getrandom`,
-`gethostname`, and `getrlimit`/sysctl reads in `diag` — each with a safety comment.
+`unsafe_code` is denied crate-wide, so each of the five `unsafe` blocks is an explicit
+`#[allow(unsafe_code)]` carrying a safety comment. All five are thin libc calls:
+
+| where | call | why |
+|---|---|---|
+| `plan::permute` | `getrandom` | seed entropy (Linux) |
+| `plan::permute` | `getentropy` | seed entropy (Apple) |
+| `run` | `gethostname` | the scanning host, recorded in the record |
+| `diag` | `getrlimit` | the file-descriptor budget warning |
+| `cli` | `signal` | SIGINT/SIGTERM handling, and ignoring SIGPIPE/SIGXFSZ |
+
+There is no `unsafe` anywhere else in the shipped crate — no raw-pointer data structures,
+no transmutes, no manual synchronization. Adding a sixth block fails the build until
+someone writes the comment justifying it. (The test harness has two more, both
+`setrlimit` in a `pre_exec` closure, used to drive writer-failure paths. They do not ship.)
 
 ## What lands on disk
 
@@ -116,6 +161,13 @@ scanned and what answered.
 - No credentials, by the guarantees above.
 - The full resolved configuration, so the file explains itself.
 - The scanning host's name and PID, plus the commit the binary was built from.
+
+The record is created **mode 0600**, readable only by the user who ran the scan, and the
+`.partial` file it is written through carries the same mode from the moment it exists.
+Refusing a `password_file` that group or others can read while writing a world-readable
+map of the target network would have been a contradiction. The containing `output_dir` is
+created with the process umask, so tighten that directory yourself if its *name* is
+sensitive — the record contents are not exposed by it.
 
 Nothing is transmitted anywhere. There is no telemetry, no update check, and no network
 activity beyond the probes you asked for and any DNS resolution the chosen mode implies.

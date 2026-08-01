@@ -21,7 +21,17 @@ allow = [
 confidence-threshold = 0.9
 
 [bans]
-multiple-versions = "warn"
+# Denied, not warned: the header above claims a second copy cannot arrive quietly, and a
+# warning does not stop anything — a duplicate had in fact already arrived under it.
+# Every duplicate is now either blocked or listed below with a reason, so the claim is
+# true and the exceptions are visible.
+multiple-versions = "deny"
+skip = [
+    # toml 0.9 pulls winnow 0.7 while its own toml_parser 1.1 pulls winnow 1.0. Both are
+    # dev-dependency-only (the `toml` crate is used by tests and the config fixtures), and
+    # resolving it is upstream's to do. Revisit when toml unifies on winnow 1.
+    { crate = "winnow@0.7.15", reason = "toml 0.9 vs toml_parser 1.1; dev-only, upstream's to unify" },
+]
 wildcards = "deny"
 # The dependency list is short and deliberate (see docs/design/architecture.md).
 # Anything arriving here that pulls in an async runtime contradicts D1 and should be a

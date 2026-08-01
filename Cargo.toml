@@ -24,6 +24,12 @@ exclude = [
     "/fuzz/artifacts",
 ]
 
+[lints.rust]
+# Every `unsafe` block is an explicit `#[allow(unsafe_code)]` with a SAFETY comment
+# stating the obligation it discharges. There are five, all thin libc calls; denying by
+# default means a sixth cannot appear without someone writing that comment.
+unsafe_code = "deny"
+
 [features]
 # In-process SOCKS5 and TCP fixtures. Off by default so a release build carries no
 # fixture servers; the dev-dependency below turns it on for the integration tests, which

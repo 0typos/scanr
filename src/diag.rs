@@ -96,7 +96,10 @@ fn read_rlimit_nofile() -> Option<u64> {
         rlim_cur: 0,
         rlim_max: 0,
     };
-    // SAFETY: getrlimit writes into a fully initialized rlimit we own.
+    // SAFETY: `lim` is a fully initialized `libc::rlimit` in this frame, and `&mut` gives
+    // a pointer valid for writes for the whole call. getrlimit writes one `rlimit` and
+    // nothing else, and `RLIMIT_NOFILE` is a valid resource.
+    #[allow(unsafe_code)]
     if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } == 0 {
         Some(lim.rlim_cur)
     } else {

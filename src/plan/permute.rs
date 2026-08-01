@@ -108,15 +108,21 @@ impl Permutation {
 /// compiling for macOS.
 #[cfg(target_os = "linux")]
 fn os_entropy(buf: &mut [u8]) -> bool {
-    // SAFETY: getrandom writes at most buf.len() bytes into a buffer we own.
+    // SAFETY: `buf` is a live mutable slice, so its pointer is valid for `buf.len()`
+    // writes and aligned for `u8`. We pass exactly that length, so getrandom cannot write
+    // past the end. `buf` is already initialized, so a short write leaves no
+    // uninitialized memory behind — the caller checks the count and falls back.
+    #[allow(unsafe_code)]
     let rc = unsafe { libc::getrandom(buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) };
     rc == buf.len() as isize
 }
 
 #[cfg(target_vendor = "apple")]
 fn os_entropy(buf: &mut [u8]) -> bool {
-    // SAFETY: getentropy writes exactly buf.len() bytes into a buffer we own, and is
-    // documented to accept up to 256 at a time.
+    // SAFETY: as above — `buf` is a live mutable slice and we pass its exact length, so
+    // the write cannot overrun. getentropy rejects lengths above 256 by returning -1
+    // without writing, which the caller treats as failure; the only call site asks for 8.
+    #[allow(unsafe_code)]
     let rc = unsafe { libc::getentropy(buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
     rc == 0
 }

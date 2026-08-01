@@ -32,14 +32,43 @@ fn capture(cmd: &mut Command) -> Option<String> {
 }
 
 fn git_sha() -> String {
-    let sha = capture(Command::new("git").args(["rev-parse", "--short=9", "HEAD"]));
-    // A packaged or exported source tree has no .git, which is expected rather than an
-    // error; the record then says so plainly instead of carrying a stale value.
-    let Some(sha) = sha else {
+    // A packaged or exported source tree has no `.git`, which is expected rather than an
+    // error; the record then says "unknown" instead of carrying a stale value.
+    //
+    // But `git` searches *upwards*, so a source tree vendored inside another repository
+    // answers with that repository's commit — measured: a copy of this crate dropped into
+    // an unrelated repo stamped its HEAD, and every record claimed provenance from a
+    // commit that never contained scanr. Only trust the answer when the repository git
+    // found is this crate, which is what comparing toplevel to the manifest directory
+    // establishes.
+    if !git_repo_is_this_crate() {
+        return "unknown".into();
+    }
+    let Some(sha) = capture(Command::new("git").args(["rev-parse", "--short=9", "HEAD"])) else {
         return "unknown".into();
     };
     let dirty = capture(Command::new("git").args(["status", "--porcelain"])).is_some();
     if dirty { format!("{sha}-dirty") } else { sha }
+}
+
+/// Whether the repository `git` resolves from here is this crate rather than one
+/// containing it.
+///
+/// Canonicalized on both sides so a symlinked checkout compares equal.
+fn git_repo_is_this_crate() -> bool {
+    let Some(top) = capture(Command::new("git").args(["rev-parse", "--show-toplevel"])) else {
+        return false;
+    };
+    let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") else {
+        return false;
+    };
+    match (
+        std::fs::canonicalize(&top),
+        std::fs::canonicalize(&manifest),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 fn rustc_version() -> String {
