@@ -506,9 +506,18 @@ answers and the scan runs marginally faster for writing less.
 
 * **Not field-stripping.** Removing every derivable field was measured at 1.69×, and only
   1.37× on top of compression, for a schema break. Spans attack the row count instead.
-* **Ranges over `probe_index`.** That index is the target-major position, so a consumer
-  expands a span with arithmetic and the specs in `scan_config` — the permutation decides
-  visit order, never the mapping, so the seed is not needed.
+* **Ranges over the counter index (amended — schema 2).** Originally the ranges were
+  `probe_index`, the target-major matrix position, on the reasoning that the permutation
+  decides visit order and never the mapping, so a consumer needed no seed. True, and it
+  hid that the *encoding* depends on visit order even though the mapping does not. A drain
+  window holds whatever was issued in that interval; probe order is randomised, so in
+  matrix space that is a scattered subset and the run-length encoding degenerates toward
+  one range per probe. The 151,000× above survived only because that scan was fast enough
+  to drain in a handful of windows each covering most of the matrix. Re-measured on a
+  rate-limited 20,001-probe scan long enough to drain repeatedly: **10,023 ranges in matrix
+  space, 595 in counter space**, an 11× smaller record (53,765 B → 4,893 B). Counter space
+  is contiguous by construction, so the collapse no longer depends on scan duration. The
+  cost is that expanding a span now needs the seed, which `scan_config` already records.
 * **A retry that agreed is still bulk.** The first rule excluded every retried probe,
   which sounded careful and collapsed *nothing*: `retries = 1` is the default and applies
   to timeouts, so in a scan of silent hosts every probe is retried. A probe whose attempts

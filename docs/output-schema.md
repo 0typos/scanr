@@ -5,14 +5,14 @@ format — tests check the running code against this page, so what it says is wh
 
 ## Stability
 
-`schema_version` is `1`, and within it the format is **additive-stable**. Concretely,
+`schema_version` is `2`, and within it the format is **additive-stable**. Concretely,
 what will not change without a version bump:
 
 - an existing field will not change type or meaning
 - an existing field will not be removed
 - an event type that exists will not be renamed
 
-And what may change within version 1:
+And what may change within version 2:
 
 - **new optional fields** may appear on any event
 - **new event types** may appear
@@ -31,6 +31,20 @@ lines and believe it had them all.
 
 `scanr` itself is `0.x` — see the note in `CHANGELOG.md`. Schema feedback is explicitly
 wanted before `1.0` hardens this into a semver commitment.
+
+### Version history
+
+| version | change |
+|---|---|
+| 2 | `probe_span.probe_indices` moved from matrix order to counter order (see [Spans](#spans)) |
+| 1 | initial |
+
+Writing moves forward; **reading does not drop support**. This build writes version 2 and
+reads 1 and 2, because a record is an archive and the tool that wrote it may be long gone.
+A reader that meets a version it does not know must refuse rather than guess — a version 1
+reader handed a version 2 record would expand every span to the wrong endpoints, including
+ones already reported open, and nothing in the file would look malformed. `scanr output
+verify` names the versions the build accepts when it refuses.
 
 ## File
 
@@ -226,26 +240,36 @@ Stands for many probes that shared an outcome.
  "timing_ms":{"min":300.1,"mean":300.4,"max":300.9}}
 ```
 
-`probe_indices` are inclusive, sorted, disjoint ranges over `probe_index`, which is the
-target-major position in the planned matrix:
+`probe_indices` are inclusive, sorted, disjoint ranges of **counter indices** — the order
+in which probes were issued, not the position of the endpoint in the matrix. Expanding a
+span is two steps: run each counter index through the recorded permutation to get a
+`probe_index`, then map that to an endpoint.
 
 ```
-target = targets[probe_index / ports.count]
-port   = ports[probe_index % ports.count]
+probe_index = permute(counter_index, permutation.seed, probes_planned)
+target      = targets[probe_index / ports.count]
+port        = ports[probe_index % ports.count]
 ```
 
-The permutation seed affects only the order probes were *visited*, never that mapping, so
-expanding a span needs nothing but `scan_config`.
-
-That form applies to a matrix scan. When `targets.mode` is `"pairs"` — which is what a
-resumed scan writes — `probe_index` indexes the embedded `targets.pairs` list directly:
+When `targets.mode` is `"pairs"` — which is what a resumed scan writes — only the last
+step changes; the permutation still applies:
 
 ```
-endpoint = targets.pairs[probe_index]
+probe_index = permute(counter_index, permutation.seed, probes_planned)
+endpoint    = targets.pairs[probe_index]
 ```
 
-The permutation decides only the order probes are *visited*, never either mapping, so the
-seed is not needed to expand a span.
+So **the permutation seed is required to expand a span**, and `scan_config` carries
+everything the two steps need. The permutation is the 4-round Feistel network named by
+`permutation.algorithm`; `scanr output results` and `scanr output remainder` do this for
+you, which is the easier path unless you are writing your own reader.
+
+Storing counter indices rather than matrix ones is what makes the collapse work. Probe
+order is randomised, so a drain window covers a scattered subset of the matrix and matrix-
+space ranges degenerate to roughly one per probe. Measured on a rate-limited 20,001-probe
+scan long enough to drain repeatedly: 10,023 ranges in matrix space against 595 in counter
+space, an 11× smaller record. This is the difference between schema 1 and 2 — version 1
+wrote matrix indices, and a reader expands those by skipping the permutation step.
 
 A collapsed probe still counts as `completed` in the terminal event, and
 `scanr output remainder` expands spans, so resuming works the same either way. What you
