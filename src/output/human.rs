@@ -6,7 +6,8 @@
 
 use std::io::{IsTerminal, Write};
 
-use crate::probe::{ProbeOutcome, State, service_label};
+use crate::probe::{ProbeOutcome, State};
+use crate::services::service_label;
 
 pub struct Style {
     pub color: bool,

@@ -1341,3 +1341,156 @@ fn help_lists_the_documented_command_tree() {
         assert!(so.contains(cmd), "help should mention `{cmd}`: {so}");
     }
 }
+
+// ── service labels (D31) ────────────────────────────────────────────────────
+
+/// Write a config whose `services_file` renames a port the builtin table already knows,
+/// so a wrong precedence order is visible rather than merely unproven.
+fn services_fixture(d: &Path, extra: &str) -> SocketAddr {
+    let (_l, addr) = open_port();
+    std::mem::forget(_l);
+    std::fs::write(
+        d.join("my-services"),
+        // 8080 is `http-proxy` in the builtin table and usually `http-alt` in
+        // /etc/services; naming it a third thing pins which layer answered.
+        format!(
+            "internal-api  8080/tcp\nprobe-target  {}/tcp\n",
+            addr.port()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        d.join("scanr.toml"),
+        format!(
+            "version = 1\n[defaults]\noutput_dir = \"out\"\nservices_file = \"{}\"\n{extra}",
+            d.join("my-services").display()
+        ),
+    )
+    .unwrap();
+    addr
+}
+
+#[test]
+fn a_configured_services_file_outranks_the_builtin_end_to_end() {
+    let d = tempfile::tempdir().unwrap();
+    let addr = services_fixture(d.path(), "");
+
+    let out = scanr(
+        d.path(),
+        &[
+            "run",
+            "--targets",
+            "127.0.0.1",
+            "--ports",
+            &format!("{},8080", addr.port()),
+            "--no-spans",
+            "--all",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+
+    let events = read_events(d.path());
+    let probe = events
+        .iter()
+        .find(|e| e["type"] == "probe_result" && e["port"] == addr.port())
+        .expect("the open port was probed");
+    assert_eq!(
+        probe["service_label"], "probe-target",
+        "the configured file should have supplied this label"
+    );
+
+    let eight = events
+        .iter()
+        .find(|e| e["type"] == "probe_result" && e["port"] == 8080)
+        .expect("8080 was probed");
+    assert_eq!(
+        eight["service_label"], "internal-api",
+        "the configured file outranks both /etc/services and the builtin"
+    );
+
+    // Provenance: the record has to explain where those labels came from, because the
+    // middle layer differs between machines.
+    let cfg = events
+        .iter()
+        .find(|e| e["type"] == "scan_config")
+        .expect("config event");
+    let layers = cfg["service_labels"]["layers"]
+        .as_array()
+        .expect("layers array");
+    assert!(
+        layers[0]["source"]
+            .as_str()
+            .unwrap()
+            .ends_with("my-services"),
+        "most specific layer first: {layers:?}"
+    );
+    assert_eq!(layers[0]["entries"], 2);
+    assert_eq!(
+        layers.last().unwrap()["source"],
+        "builtin",
+        "every table ends at the builtin"
+    );
+}
+
+#[test]
+fn a_services_file_that_is_not_there_stops_the_scan() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(
+        d.path().join("scanr.toml"),
+        "version = 1\n[defaults]\noutput_dir = \"out\"\nservices_file = \"/nonexistent/services\"\n",
+    )
+    .unwrap();
+    let out = scanr(
+        d.path(),
+        &["run", "--targets", "127.0.0.1", "--ports", "80"],
+    );
+    assert_eq!(code(&out), 1, "a named file that is absent is a mistake");
+    let se = stderr(&out);
+    assert!(se.contains("services_file"), "{se}");
+    assert!(se.contains("cannot read"), "{se}");
+}
+
+#[test]
+fn unparseable_services_lines_warn_but_still_scan() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("my-services"), "ssh 22/tcp\nlonely\n").unwrap();
+    std::fs::write(
+        d.path().join("scanr.toml"),
+        format!(
+            "version = 1\n[defaults]\noutput_dir = \"out\"\nservices_file = \"{}\"\n",
+            d.path().join("my-services").display()
+        ),
+    )
+    .unwrap();
+
+    let out = scanr(
+        d.path(),
+        &["plan", "--targets", "127.0.0.1", "--ports", "22"],
+    );
+    assert_eq!(code(&out), 0, "a stray line must not block a scan");
+    let so = stdout(&out);
+    assert!(so.contains("skipped 1 unparseable line"), "{so}");
+}
+
+#[test]
+fn the_plan_names_its_label_sources() {
+    let d = tempfile::tempdir().unwrap();
+    services_fixture(d.path(), "");
+    let out = scanr(
+        d.path(),
+        &["plan", "--targets", "127.0.0.1", "--ports", "8080"],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let so = stdout(&out);
+    let line = so
+        .lines()
+        .find(|l| l.starts_with("labels"))
+        .expect("a labels row");
+    assert!(line.contains("my-services (2)"), "{line}");
+    assert!(line.contains("builtin ("), "{line}");
+    // The provenance column must not run into the value; it did, for exactly this row.
+    assert!(
+        line.ends_with(" defaults"),
+        "value and provenance need a separator: {line:?}"
+    );
+}

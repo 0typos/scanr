@@ -29,6 +29,7 @@ pub mod plan;
 pub mod probe;
 pub mod run;
 pub mod sched;
+pub mod services;
 pub mod timefmt;
 pub mod transport;
 pub mod units;

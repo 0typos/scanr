@@ -125,6 +125,9 @@ pub struct RawDefaults {
     pub open_only: Option<bool>,
     pub compress: Option<bool>,
     pub spans: Option<bool>,
+    /// A file of `name port/proto` lines to label ports from, ahead of `/etc/services`
+    /// and the builtin table. `~` is expanded.
+    pub services_file: Option<String>,
 }
 
 /// Timing knobs. Also inlineable on a scan, which is why this is its own type.

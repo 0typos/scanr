@@ -60,6 +60,39 @@ rate            400/s                                   builtin.proxy
 connect_timeout 8s                                      cli
 ```
 
+## Service labels
+
+`scanr` labels each port with what usually listens there. By default that is
+`/etc/services` where the host has one, falling back to a compiled-in table of 59
+well-known ports.
+
+To label your own ports, point at a file:
+
+```toml
+[defaults]
+services_file = "~/.config/scanr/services"
+```
+
+It takes `/etc/services` format — `name port/proto`, `#` to end of line a comment, extra
+columns ignored — so an `nmap-services` file works too:
+
+```
+internal-api   8080/tcp
+build-cache    9099/tcp
+metrics        9100/tcp   # aliases are fine
+```
+
+Your file wins over `/etc/services`, which wins over the builtin table, and only for the
+ports it mentions. Three lines does not cost you the other 5,000.
+
+A file that cannot be read stops the scan — if you named it, you meant it. Lines that
+do not parse are counted and warned about, and the scan continues.
+
+This is still a guess from the port number, never a fingerprint: nothing connects to the
+service or reads a banner. Port 4444 is `krb524` to every layer and is essentially never
+Kerberos. Every record states which files produced its labels, so scans from two
+machines can be compared — see [output-schema.md](output-schema.md).
+
 ## Profiles
 
 Four built-ins. **Flat and complete — no inheritance**, so what you read is what runs.

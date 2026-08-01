@@ -152,6 +152,7 @@ pub fn resolve(
     let compress = resolve_compress(files, scan_name, ov, &mut prov);
     let spans = resolve_spans(files, scan_name, ov, &mut prov);
     let seed = resolve_seed(ov, &mut prov);
+    let services = resolve_services(files, &mut prov, &mut warnings)?;
 
     let port_spec = port_spec_override.unwrap_or_else(|| PortSummary(&ports).to_string());
 
@@ -176,6 +177,7 @@ pub fn resolve(
         compress,
         spans,
         output_dir,
+        services,
         provenance: prov,
         warnings,
     };
@@ -373,6 +375,47 @@ fn resolve_dns(
         other => other,
     };
     Ok((dns_requested, dns_effective))
+}
+
+/// Build the port-label table from `defaults.services_file`, `/etc/services`, and the
+/// builtin, in that order.
+///
+/// A configured file that cannot be read is fatal: naming a path that is not there is a
+/// mistake, and silently scanning with different labels than asked for is worse than
+/// stopping. A missing `/etc/services` is not — "when it exists" is its whole contract.
+fn resolve_services(
+    files: &Layered,
+    prov: &mut Provenance,
+    warnings: &mut Vec<PlanWarning>,
+) -> Result<crate::services::ServiceTable, ConfigError> {
+    let configured = files.pick(|c| c.defaults.services_file.clone());
+    match &configured {
+        Some((_, path)) => prov.set("services_file", Origin::Defaults(path.clone())),
+        None => prov.set("services_file", Origin::Default),
+    }
+    let path = configured.map(|(v, _)| expand_home(&v));
+
+    let table = crate::services::ServiceTable::resolve_from_host(path.as_deref()).map_err(|e| {
+        ConfigError::new(format!("services_file: {e}")).help(
+            "point defaults.services_file at a readable /etc/services-format file, \
+             or remove the key to use /etc/services and the builtin table",
+        )
+    })?;
+
+    // Not fatal: a file that mostly parses is still better than no file, and refusing a
+    // scan over a few stray lines in someone's /etc/services would be absurd. Say so
+    // and carry on.
+    for stat in table.malformed() {
+        warnings.push(PlanWarning {
+            code: "services_file_lines_skipped",
+            message: format!(
+                "{}: skipped {} unparseable line(s); {} port label(s) loaded",
+                stat.layer, stat.malformed, stat.entries
+            ),
+        });
+    }
+
+    Ok(table)
 }
 
 fn resolve_output_dir(

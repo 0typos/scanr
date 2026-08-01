@@ -870,6 +870,10 @@ fn config_event(plan: &ScanPlan, facts: &HostFacts) -> serde_json::Value {
             "retries": plan.timing.retries,
             "retry_delay_ms": plan.timing.retry_delay.as_millis() as u64,
         },
+        // Where `service_label` came from. Labels can now differ between machines,
+        // because /etc/services does; this is what makes such a difference explainable
+        // from the record alone rather than a mystery (D31).
+        "service_labels": plan.services.provenance(),
         "output": {
             "dir": plan.output_dir.to_string_lossy(),
             "open_only": plan.open_only,

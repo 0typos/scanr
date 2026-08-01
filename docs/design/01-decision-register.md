@@ -529,3 +529,50 @@ answers and the scan runs marginally faster for writing less.
 **Consequence:** `probe_result` no longer covers every probe when spans are on. `verify`
 reconciles rows plus span counts, validates each span's ranges, and `remainder` expands
 them. `output.spans` in `scan_config` records whether it was used.
+
+### D31 — Service labels are layered, and the record says which layer answered
+
+`service_label` was a compiled-in table of 59 ports and nothing else. That made every
+record reproducible and most records unhelpful: a port outside the 59 got `null`, and a
+port inside it got the registry's opinion regardless of what was actually listening.
+
+It now resolves through three layers, most specific first:
+
+1. `defaults.services_file`, if the config names one
+2. `/etc/services`, if it exists
+3. the compiled-in table
+
+First layer with an answer wins, so a two-line custom file still inherits everything
+else. The custom file is the point of the change — an internal port map is the only
+source that can say `internal-api` instead of `http-alt` — and `/etc/services` is there
+because ~5,800 tcp entries beat 59 for free.
+
+**What this costs.** Labels are no longer identical across machines: two hosts with
+different `/etc/services` will label the same port differently, and the old table could
+not do that. That is accepted rather than worked around, because the alternative is
+worse labels everywhere to protect a property almost nothing depends on.
+
+It is paid for with provenance. Every record's `config` event carries
+`service_labels.layers` — each source, how many entries it contributed, how many lines
+it could not parse — so a disagreement between two records is answerable from the
+records. `plan` shows the same thing before a scan is spent.
+
+**What this does not touch.** `state`, `source`, and `reason` are unchanged and remain
+the fields anything automated should key on. `service_label` was already documented as a
+guess from the port number rather than a fingerprint, and it still is: nothing connects
+to the service or reads a banner. Better-sourced guessing is still guessing. Port 4444
+is `krb524` to all three layers and is essentially never Kerberos.
+
+**Failure handling** splits on who chose the path. A configured file that cannot be read
+is fatal — naming a path that is not there is a mistake, and scanning with different
+labels than were asked for is worse than stopping. A missing `/etc/services` is not an
+error at all; "when it exists" is its whole contract, and containers routinely lack one.
+Lines that do not parse are counted and reported as a plan warning, never fatal:
+refusing a scan over a stray line in the system's own file would be absurd. UDP and SCTP
+rows are skipped without being counted as malformed, since roughly half of a real
+`/etc/services` is UDP and counting those would report the file as broken on every
+machine.
+
+The parser also accepts `nmap-services`, whose extra frequency column parses as an
+alias. That was not a design goal, but it is the obvious file to reach for and it costs
+nothing to allow.

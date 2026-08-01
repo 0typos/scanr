@@ -41,6 +41,10 @@ transport = "direct"
 output_dir = "./scanr-results"
 open_only = true                  # stdout only; JSONL always records everything
 
+# Port labels, ahead of /etc/services and the builtin table. Optional; `~` expands.
+# An /etc/services-format file: `name port/proto [aliases...]`, `#` comments.
+services_file = "~/.config/scanr/services"
+
 # ── Profiles ────────────────────────────────────────────────────────
 # Flat and complete. No inheritance (D-register: rejected for v1).
 [profiles.proxy]
