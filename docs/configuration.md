@@ -112,14 +112,18 @@ machines can be compared — see [output-schema.md](output-schema.md).
 
 ## Profiles
 
-Four built-ins. **Flat and complete — no inheritance**, so what you read is what runs.
+Seven built-ins. **Flat and complete — no inheritance**, so what you read is what runs.
+`scanr config show` prints them with their current values.
 
 | profile | concurrency | rate | connect | retries | for |
 |---|---|---|---|---|---|
-| `proxy-careful` | 64 | 50/s | 8s | 1 | rotating pools, `ssh -D`, unknown limits |
-| `proxy` | 512 | 400/s | 5s | 1 | self-hosted dante/microsocks |
-| `direct` | 512 | unlimited | 2s | 1 | routed networks, no proxy |
-| `direct-fast` | 2048 | unlimited | 1s | 0 | LAN, latency known low |
+| `direct` | 512 | unlimited | 2s | 1 | routed networks with no proxy in the path |
+| `direct-fast` | 2048 | unlimited | 300ms | 1 | LAN, round trip known under ~100ms |
+| `proxy` | 512 | 400/s | 5s | 1 | self-hosted SOCKS5 (dante, microsocks) on a good link |
+| `proxy-careful` | 64 | 50/s | 8s | 1 | rotating pools, or limits you do not know |
+| `ssh-fast` | 64 | unlimited | 2s | 0 | `ssh -D` to a nearby server (LAN, same DC) |
+| `ssh` | 96 | unlimited | 6s | 1 | `ssh -D` over a typical internet link |
+| `ssh-slow` | 128 | unlimited | 15s | 1 | `ssh -D` over a high-latency or long-haul link |
 
 With nothing selecting a profile, the default **follows the transport**: `proxy` for
 SOCKS5, `direct` otherwise. Otherwise a direct ad-hoc scan would inherit the proxy

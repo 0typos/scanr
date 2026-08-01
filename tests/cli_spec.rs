@@ -1,9 +1,13 @@
-//! The CLI specification must describe the CLI that exists.
+//! The command reference must describe the CLI that exists.
 //!
-//! The JSONL spec and the man pages both had drift guards; this one did not, and it
-//! drifted — `--pairs` and `--calibrate` were added and the specification never
-//! mentioned either. A design document nobody can trust is worse than none, because it
-//! is read as authoritative.
+//! The record schema and the man pages both had drift guards; this one did not, and it
+//! drifted — `--pairs` and `--calibrate` were added and the reference never mentioned
+//! either. Documentation nobody can trust is worse than none, because it is read as
+//! authoritative anyway.
+//!
+//! This now points at `docs/cli.md`, a page users read, rather than at a design-only
+//! specification. Holding a private document still while the public one drifts had the
+//! guarantee backwards.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -11,7 +15,7 @@ use std::path::Path;
 use clap::CommandFactory;
 
 fn spec() -> String {
-    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/design/06-cli-spec.md");
+    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/cli.md");
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()))
 }
 
@@ -110,7 +114,7 @@ fn every_command_is_in_the_spec() {
     let missing: Vec<_> = actual.difference(&documented).collect();
     assert!(
         missing.is_empty(),
-        "these commands exist but are undocumented in docs/design/06-cli-spec.md: {missing:?}"
+        "these commands exist but are undocumented in docs/cli.md: {missing:?}"
     );
 }
 
@@ -120,7 +124,7 @@ fn the_spec_describes_no_command_that_was_removed() {
     let extra: Vec<_> = documented.difference(&actual).collect();
     assert!(
         extra.is_empty(),
-        "docs/design/06-cli-spec.md documents commands that do not exist: {extra:?}"
+        "docs/cli.md documents commands that do not exist: {extra:?}"
     );
 }
 
@@ -160,5 +164,100 @@ fn the_documented_exit_codes_match_the_code() {
             text.contains(&format!("| {meaning} |")) || text.contains(&format!("`{meaning}`")),
             "exit code {meaning} is not documented in the CLI spec"
         );
+    }
+}
+
+// ── the profile table ───────────────────────────────────────────────────────
+
+/// `docs/configuration.md` must describe the profiles that exist, with their real values.
+///
+/// This is the drift that prompted the check. The table said "Four built-ins" long after
+/// `ssh-fast`, `ssh` and `ssh-slow` were added, and listed `direct-fast` at a 1 s timeout
+/// with `retries = 0` when it had become 300 ms with `retries = 1` — the retry being the
+/// entire reason a sub-second timeout is safe. Three of the six columns were wrong on the
+/// one row a reader is most likely to copy.
+///
+/// The same figures had also been duplicated into the README, where they drifted
+/// independently. There is now one table, and this holds it to the code.
+#[test]
+fn the_documented_profiles_match_the_builtins() {
+    use scanr::config::builtin::builtin_profiles;
+
+    let doc = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/configuration.md"),
+    )
+    .expect("configuration.md should be readable");
+
+    // Rows look like: | `direct` | 512 | unlimited | 2s | 1 | routed networks |
+    let rows: std::collections::BTreeMap<String, Vec<String>> = doc
+        .lines()
+        .filter(|l| l.starts_with("| `"))
+        .filter_map(|l| {
+            let cells: Vec<String> = l
+                .trim_matches('|')
+                .split('|')
+                .map(|c| c.trim().trim_matches('`').to_string())
+                .collect();
+            (cells.len() == 6).then(|| (cells[0].clone(), cells))
+        })
+        .collect();
+
+    let dur = |d: std::time::Duration| {
+        let ms = d.as_millis();
+        if ms.is_multiple_of(1000) {
+            format!("{}s", ms / 1000)
+        } else {
+            format!("{ms}ms")
+        }
+    };
+
+    for p in builtin_profiles() {
+        let row = rows.get(p.name).unwrap_or_else(|| {
+            panic!(
+                "docs/configuration.md has no row for the `{}` profile",
+                p.name
+            )
+        });
+        assert_eq!(
+            row[1],
+            p.timing.concurrency.to_string(),
+            "{}: concurrency",
+            p.name
+        );
+        let rate = if p.timing.rate == 0 {
+            "unlimited".to_string()
+        } else {
+            format!("{}/s", p.timing.rate)
+        };
+        assert_eq!(row[2], rate, "{}: rate", p.name);
+        assert_eq!(row[3], dur(p.timing.connect_timeout), "{}: connect", p.name);
+        assert_eq!(row[4], p.timing.retries.to_string(), "{}: retries", p.name);
+    }
+
+    let documented: std::collections::BTreeSet<&str> = rows.keys().map(String::as_str).collect();
+    let actual: std::collections::BTreeSet<&str> =
+        builtin_profiles().iter().map(|p| p.name).collect();
+    let extra: Vec<_> = documented.difference(&actual).collect();
+    assert!(
+        extra.is_empty(),
+        "docs/configuration.md documents profiles that do not exist: {extra:?}"
+    );
+
+    // The prose counts them, and that count drifted too.
+    assert!(
+        doc.contains(&format!("{} built-ins", spell(actual.len()))),
+        "the profile count in the prose does not match the {} that exist",
+        actual.len()
+    );
+}
+
+fn spell(n: usize) -> &'static str {
+    match n {
+        4 => "Four",
+        5 => "Five",
+        6 => "Six",
+        7 => "Seven",
+        8 => "Eight",
+        _ => "some",
     }
 }

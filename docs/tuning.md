@@ -72,7 +72,7 @@ Thread cost is low — 64 KiB stacks, 40.6 MB resident at 5,000 threads and 81 M
 destination, not the threads.
 
 **Above about 10,000 the design runs out.** If you need more, the architecture would have
-to change; see [`design/02-runtime-evaluation.md`](design/02-runtime-evaluation.md).
+to change; the measurements behind it are in [`design/decisions.md`](design/decisions.md) under D1.
 
 For a proxied scan, measure the proxy instead of guessing:
 
@@ -287,14 +287,16 @@ really about timeouts, so it is worth being careful:
 
 | | wall |
 |---|---|
-| scanr `--profile direct-fast` (1 s timeout) | 13.10 s |
+| scanr `--profile direct-fast` (300ms, twice) | 9.22 s |
 | nmap `-T5` | 7.16 s |
-| scanr `--connect-timeout 300ms --concurrency 4096` | **2.23 s** |
-| scanr `--connect-timeout 150ms --concurrency 4096` | 1.18 s |
+| scanr `--connect-timeout 300ms --concurrency 4096`, single attempt | **2.23 s** |
+| scanr `--connect-timeout 150ms --concurrency 4096`, single attempt | 1.18 s |
 
-nmap wins on the first line and it is not mysterious: `-T5` caps `max-rtt-timeout` at
-300 ms, while `direct-fast` waits a full second. Told to give up as fast as nmap does,
-scanr is **3.2× faster** — the same ratio as the responsive case. Neither tool reported
+nmap wins the first line and it is not mysterious: it was told `--max-retries 0`, so it
+makes one attempt per port, while `direct-fast` deliberately makes two (see
+[Timeouts](#timeouts) — one 300 ms attempt cannot survive a dropped SYN). Told to give up
+on the same terms nmap was, scanr is **3.2× faster** — the same ratio as the responsive
+case. Neither tool reported
 anything open, which is correct for TEST-NET.
 
 The real difference is that **nmap adapts its timeout from observed round-trip times and

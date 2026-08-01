@@ -94,6 +94,13 @@ invited before then.
 
 ### Fixed
 
+- The documented built-in profiles now match the code. The table said "Four built-ins"
+  after three `ssh -D` profiles were added, and listed `direct-fast` at a 1s timeout with
+  `retries = 0` when it had become 300ms with `retries = 1` — the retry being the whole
+  reason a sub-second timeout is safe. A test now checks the table against the builtins.
+- `docs/tuning.md` no longer contradicts itself about `direct-fast`, describing it as
+  300ms twice in one section and "a full second" in another.
+
 - The span accumulator no longer sizes itself from the *planned* probe count. It held one
   bit per planned probe per outcome class, so a `/8 x 100` scan wanted ~200 MB per class
   against a 64-class ceiling; it now keeps only the indices it absorbed, which one

@@ -109,7 +109,7 @@ by omission.
 `scanr transport test` connects through the configured proxy to a known-open port, a
 known-closed port, and a blackhole, then reports which reply codes came back — i.e.
 whether this proxy can distinguish closed from filtered at all. The measured fidelity
-is declared in config (see `04-config-spec.md`) and recorded in the scan config event.
+is declared in config (see `../configuration.md`) and recorded in the scan config event.
 
 **Measured against real software (2026-07-29), by capturing raw bytes:**
 
@@ -194,7 +194,7 @@ whether they reached the network is unknown, and re-probing is the safe default.
 **Status:** accepted
 
 `~/.config/scanr/config.toml` for transports and credentials; `./scanr.toml` for scan
-definitions, version-controlled. Precedence in `04-config-spec.md`.
+definitions, version-controlled. Precedence in `../configuration.md`.
 
 ### D14 — Credentials: no inline passwords, ever
 **Status:** accepted · stricter than the original brief, which specified a warning
@@ -233,7 +233,7 @@ Revisit if a library API becomes a goal.
 **Status:** accepted
 
 Well-maintained crates where they earn their place; SOCKS5 and the permutation written
-directly. Per-crate rationale in `03-architecture.md`.
+directly. Per-crate rationale in `architecture.md`.
 
 ---
 

@@ -30,7 +30,7 @@ fn build_version() -> &'static str {
     V.get_or_init(crate::run::build_info)
 }
 
-/// Exit codes are part of the interface; see docs/design/06-cli-spec.md.
+/// Exit codes are part of the interface; see docs/cli.md.
 pub const EXIT_OK: u8 = 0;
 pub const EXIT_USAGE: u8 = 1;
 pub const EXIT_SCAN_FAILED: u8 = 2;

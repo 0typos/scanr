@@ -1,7 +1,7 @@
 # Scan record schema
 
-Consumer-facing reference for the JSONL file every run produces. For the design rationale
-see [`design/05-jsonl-spec.md`](design/05-jsonl-spec.md).
+Reference for the JSONL file every run produces. This is the normative description of the
+format — tests check the running code against this page, so what it says is what you get.
 
 ## Stability
 
@@ -81,6 +81,21 @@ complete concurrently.
 There is no per-probe *start* event. At high concurrency it would double file size to
 record something derivable.
 
+Every event carries `type`, `seq`, `ts` (RFC 3339, millisecond precision) and `scan_id`.
+`seq` is assigned by the writer and is monotonic in **write** order, which is not probe
+order — probes are randomized and complete concurrently.
+
+### Dropped and why
+
+Three event types were specified at one point and deliberately do not exist, so a
+consumer written against an early draft is not waiting for them:
+
+| type | why not |
+|---|---|
+| `scan_plan` | folded into `scan_config`; two events describing the same immutable object invites divergence |
+| `scan_error` | non-fatal errors are `scan_warning`, fatal ones are the `scan_failed` terminal |
+| `scan_interrupt_requested` | `scan_interrupted` carries `requested_at`, which says the same thing without a second write during shutdown — exactly when writes are least reliable |
+
 ## `probe_result`
 
 The one you will mostly consume.
@@ -119,14 +134,14 @@ Because `/etc/services` differs between machines, so can the labels. `scan_confi
 therefore records exactly which layers produced them:
 
 ```json
-"service_labels": {
+{"service_labels": {
   "layers": [
     {"source": "/home/me/.config/scanr/services", "entries": 12,   "malformed": 0},
     {"source": "/etc/services",                   "entries": 5862, "malformed": 0},
     {"source": "builtin",                         "entries": 2,    "malformed": 0}
   ],
   "use_etc_services": true
-}
+}}
 ```
 
 `entries` counts the tcp ports that layer was the first to claim, so the rows sum to the
@@ -215,13 +230,32 @@ Emitted before probing, from plan resolution:
 | `ephemeral_budget` | configured rate exceeds the sustainable ephemeral-port ceiling |
 | `fd_budget` | concurrency exceeds `RLIMIT_NOFILE` |
 
-Emitted during the scan, at most once each, with `detail.remediation`:
+```json
+{"type":"scan_warning","seq":204,"ts":"2026-07-31T12:00:04.100Z","scan_id":"a3f19c02",
+ "code":"ephemeral_pressure","message":"local ephemeral ports exhausted",
+ "detail":{"remediation":"the local ephemeral port range (28232 ports) is exhausted"}}
+```
+
+Emitted during the scan, at most once each, with `detail.remediation`. Rate-limited to
+one per code per scan, or a saturated host would emit one warning per failing probe:
 
 | code | meaning |
 |---|---|
 | `ephemeral_pressure` | source ports actually ran out mid-scan |
 | `fd_pressure` | descriptors actually ran out mid-scan |
 | `proxy_saturation` | the proxy stopped accepting connections |
+
+Emitted just before the terminal event, and unlike the rest a report of a `scanr` bug
+rather than an environmental condition:
+
+| code | meaning |
+|---|---|
+| `worker_panic` | a scan worker died; the probes it held were abandoned and the results are incomplete |
+
+The codes are owned by `diag::WARNING_CODES` and a test asserts this list matches it, so
+the two cannot drift. An earlier version listed `fidelity_degraded`, `dns_mode_changed`
+and `slow_writer`, none of which the code could ever emit — which is why the test now
+also checks the reverse direction.
 
 ```console
 scanr output cat scan-*.jsonl.gz | jq -r 'select(.type=="scan_warning") | "\(.code)\t\(.message)"'

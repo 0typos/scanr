@@ -19,7 +19,7 @@ const BIN: &str = env!("CARGO_BIN_EXE_scanr");
 
 fn spec_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("docs/design")
+        .join("docs")
         .join(name)
 }
 
@@ -279,11 +279,11 @@ fn terminal_event_counts_account_for_every_probe() {
 
 #[test]
 fn spec_warning_codes_match_the_code() {
-    let doc = spec("05-jsonl-spec.md");
+    let doc = spec("output-schema.md");
     for code in scanr::diag::WARNING_CODES {
         assert!(
             doc.contains(&format!("`{code}`")),
-            "warning code `{code}` is emitted but undocumented in the JSONL spec"
+            "warning code `{code}` is emitted but undocumented in docs/output-schema.md"
         );
     }
     // The other direction: these three were documented for a while and never existed.
@@ -301,7 +301,7 @@ fn spec_warning_codes_match_the_code() {
 fn spec_json_examples_are_valid_json() {
     // A spec whose examples do not parse cannot be trusted by someone writing a
     // consumer against it.
-    let doc = spec("05-jsonl-spec.md");
+    let doc = spec("output-schema.md");
     let mut checked = 0;
     let mut rest = doc.as_str();
     while let Some(start) = rest.find("```json") {
@@ -323,7 +323,7 @@ fn spec_json_examples_are_valid_json() {
 fn every_documented_event_type_is_reachable() {
     // Guards against the spec growing an event the code cannot produce, which is what
     // happened with `scan_plan` and `scan_error` before they were explicitly dropped.
-    let doc = spec("05-jsonl-spec.md");
+    let doc = spec("output-schema.md");
     let known = [
         "scan_started",
         "scan_config",
@@ -338,12 +338,20 @@ fn every_documented_event_type_is_reachable() {
     for t in &known {
         assert!(doc.contains(t), "spec omits event type `{t}`");
     }
+    // These three were specified and deliberately never built. They may appear, but only
+    // in the section that says so — otherwise a consumer waits forever for an event that
+    // cannot arrive.
+    //
+    // The loop used to discard `dropped` and assert the heading existed three times over,
+    // so a name reintroduced anywhere in the document would have gone unnoticed.
+    let (_, dropped_section) = doc
+        .split_once("### Dropped and why")
+        .expect("the schema should explain the events it does not emit");
     for dropped in ["scan_plan", "scan_error", "scan_interrupt_requested"] {
-        // Permitted only in the "Dropped and why" section.
-        assert!(
-            doc.contains("Dropped and why"),
-            "the spec should explain dropped events"
+        assert_eq!(
+            doc.matches(dropped).count(),
+            dropped_section.matches(dropped).count(),
+            "`{dropped}` is named outside the section explaining that it does not exist"
         );
-        let _ = dropped;
     }
 }
