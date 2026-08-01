@@ -58,6 +58,7 @@ pub fn builtin_profiles() -> Vec<BuiltinProfile> {
                 connect_timeout: ms(2_000),
                 retries: 0,
                 retry_delay: ms(250),
+                banner: None,
             },
         },
         BuiltinProfile {
@@ -71,6 +72,7 @@ pub fn builtin_profiles() -> Vec<BuiltinProfile> {
                 connect_timeout: ms(6_000),
                 retries: 1,
                 retry_delay: ms(500),
+                banner: None,
             },
         },
         BuiltinProfile {
@@ -85,6 +87,7 @@ pub fn builtin_profiles() -> Vec<BuiltinProfile> {
                 connect_timeout: ms(15_000),
                 retries: 1,
                 retry_delay: ms(1_000),
+                banner: None,
             },
         },
         BuiltinProfile {
@@ -98,6 +101,7 @@ pub fn builtin_profiles() -> Vec<BuiltinProfile> {
                 connect_timeout: ms(8_000),
                 retries: 1,
                 retry_delay: ms(500),
+                banner: None,
             },
         },
         BuiltinProfile {
@@ -112,6 +116,7 @@ pub fn builtin_profiles() -> Vec<BuiltinProfile> {
                 connect_timeout: ms(5_000),
                 retries: 1,
                 retry_delay: ms(250),
+                banner: None,
             },
         },
         BuiltinProfile {
@@ -125,6 +130,7 @@ pub fn builtin_profiles() -> Vec<BuiltinProfile> {
                 connect_timeout: ms(2_000),
                 retries: 1,
                 retry_delay: ms(250),
+                banner: None,
             },
         },
         // A short timeout is only safe when something else covers a lost SYN.
@@ -155,6 +161,7 @@ pub fn builtin_profiles() -> Vec<BuiltinProfile> {
                 connect_timeout: ms(300),
                 retries: 1,
                 retry_delay: ms(100),
+                banner: None,
             },
         },
     ]

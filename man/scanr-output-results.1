@@ -4,7 +4,7 @@
 .SH NAME
 scanr\-output\-results \- Every probe result, with spans expanded; filter by host, port, or state
 .SH SYNOPSIS
-\fBscanr\-output\-results\fR [\fB\-\-hosts\fR] [\fB\-\-ports\fR] [\fB\-\-states\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIFILE\fR> 
+\fBscanr\-output\-results\fR [\fB\-\-hosts\fR] [\fB\-\-ports\fR] [\fB\-\-states\fR] [\fB\-\-format\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIFILE\fR> 
 .SH DESCRIPTION
 Every probe result, with spans expanded; filter by host, port, or state
 .SH OPTIONS
@@ -18,8 +18,8 @@ Only these ports: `80`, `1\-1024`, or a list
 \fB\-\-states\fR \fI<LIST>\fR
 Only these states: open, closed, filtered, error (comma\-separated)
 .TP
-\fB\-\-json\fR
-Emit JSON Lines instead of a table
+\fB\-\-format\fR \fI<FORMAT>\fR [default: table]
+Output shape: table, json, nmap, or list
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

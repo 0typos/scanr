@@ -187,9 +187,9 @@ enum OutputCmd {
         /// Only these states: open, closed, filtered, error (comma-separated)
         #[arg(long, value_name = "LIST")]
         states: Option<String>,
-        /// Emit JSON Lines instead of a table
-        #[arg(long)]
-        json: bool,
+        /// Output shape: table, json, nmap, or list
+        #[arg(long, value_name = "FORMAT", default_value = "table", value_parser = format_arg)]
+        format: ResultFormat,
     },
 }
 
@@ -297,6 +297,14 @@ struct OverrideArgs {
     #[arg(long, conflicts_with = "spans")]
     no_spans: bool,
 
+    /// Read what open services volunteer on connect, without sending anything
+    #[arg(long, conflicts_with = "no_banner")]
+    banner: bool,
+
+    /// Do not read banners (default)
+    #[arg(long)]
+    no_banner: bool,
+
     /// Permit target sets larger than 4,000,000 addresses
     #[arg(long)]
     allow_large_range: bool,
@@ -314,6 +322,36 @@ fn flag(on: bool, off: bool) -> Option<bool> {
 
 fn duration_arg(s: &str) -> Result<Duration, String> {
     parse_duration(s).map_err(|e| e.to_string())
+}
+
+/// How `output results` should shape what it found.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum ResultFormat {
+    Table,
+    Json,
+    Nmap,
+    List,
+}
+
+impl From<ResultFormat> for crate::verify::Handoff {
+    fn from(f: ResultFormat) -> Self {
+        match f {
+            ResultFormat::Json => crate::verify::Handoff::Json,
+            ResultFormat::Nmap => crate::verify::Handoff::Nmap,
+            // `Table` never reaches here.
+            _ => crate::verify::Handoff::List,
+        }
+    }
+}
+
+fn format_arg(s: &str) -> Result<ResultFormat, String> {
+    match s {
+        "table" => Ok(ResultFormat::Table),
+        "json" => Ok(ResultFormat::Json),
+        "nmap" => Ok(ResultFormat::Nmap),
+        "list" => Ok(ResultFormat::List),
+        _ => Err("expected one of: table, json, nmap, list".into()),
+    }
 }
 
 fn grouping_arg(s: &str) -> Result<Grouping, String> {
@@ -350,6 +388,7 @@ impl OverrideArgs {
             seed: self.seed,
             compress: flag(self.compress, self.no_compress),
             spans: flag(self.spans, self.no_spans),
+            banner: flag(self.banner, self.no_banner),
             open_only: flag(self.open_only, self.all),
             allow_large_range: self.allow_large_range,
         }
@@ -1041,14 +1080,14 @@ fn cmd_output(cli: &Cli, cmd: &OutputCmd) -> Result<u8, ConfigError> {
             hosts,
             ports,
             states,
-            json,
+            format,
         } => cmd_output_results(
             cli,
             file,
             hosts.as_deref(),
             ports.as_deref(),
             states.as_deref(),
-            *json,
+            *format,
         ),
         OutputCmd::Events { file } => {
             let mut out = std::io::stdout().lock();
@@ -1083,7 +1122,7 @@ fn cmd_output_results(
     hosts: Option<&[String]>,
     ports: Option<&[String]>,
     states: Option<&str>,
-    json: bool,
+    format: ResultFormat,
 ) -> Result<u8, ConfigError> {
     use crate::verify::Query;
 
@@ -1115,11 +1154,22 @@ fn cmd_output_results(
     let hits = crate::verify::get(file, &q).map_err(ConfigError::new)?;
     let style = output_style(cli);
     let mut out = std::io::stdout().lock();
-    if json {
-        for h in &hits {
-            let _ = writeln!(out, "{}", h.to_json());
+    if format != ResultFormat::Table {
+        // Feeding another tool a list dominated by closed ports is almost never what was
+        // meant, and the mistake is silent otherwise.
+        let non_open = hits.iter().filter(|h| h.state != "open").count();
+        if format != ResultFormat::Json && non_open > 0 {
+            let _ = writeln!(
+                std::io::stderr(),
+                "note: {non_open} of {} results are not open; add `--states open` unless \
+                 you meant to hand those on too",
+                hits.len()
+            );
         }
-    } else {
+        let _ = write!(out, "{}", crate::verify::handoff(&hits, format.into()));
+        return Ok(EXIT_OK);
+    }
+    {
         let width = hits
             .iter()
             .map(|h| h.target.len() + h.port.to_string().len() + 5)

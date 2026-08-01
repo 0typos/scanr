@@ -92,6 +92,20 @@ invited before then.
   which are data.
 - Shell completions for bash, zsh, fish, elvish, and PowerShell.
 
+### Added
+
+- **`--banner` reads what open services volunteer**, without sending anything — the record
+  states `banner.sent_bytes: 0`. Off by default; 1024 bytes and 500 ms by default,
+  tunable per profile via `banner_bytes` and `banner_timeout`. Only services that greet
+  first say anything, so HTTP and anything behind TLS stay silent; an absent banner means
+  "said nothing unprompted", not "nothing there". Banners reach the screen as printable
+  ASCII only, because a terminal acts on escape sequences and the bytes belong to the
+  scanned host; the record keeps them verbatim.
+- **`output results --format nmap|list`** hands the open endpoints to a tool that can
+  interrogate them. The `nmap` form emits runnable `nmap -sV` commands grouped by each
+  host's exact open ports; `list` emits `host:port` for `httpx`, `tlsx` and `nuclei`.
+  Replaces `--json` on that command with `--format json`.
+
 ### Changed
 
 - **`output cat` is now `output events`, and `output get` is now `output results`.** The

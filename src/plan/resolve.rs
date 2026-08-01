@@ -53,6 +53,7 @@ pub struct Overrides {
     /// Collapse repetitive outcomes into spans. On by default; `--no-spans` sets this
     /// false.
     pub spans: Option<bool>,
+    pub banner: Option<bool>,
     pub allow_large_range: bool,
 }
 
@@ -88,7 +89,7 @@ pub fn resolve(
 
     let (profile, base) = resolve_profile(files, scan_name, ov, &transport, &mut prov)?;
 
-    let timing = resolve_timing(files, scan_name, &profile, &base, ov, &mut prov)?;
+    let mut timing = resolve_timing(files, scan_name, &profile, &base, ov, &mut prov)?;
 
     let (dns_requested, dns_effective) =
         resolve_dns(files, scan_name, &transport, &transport_name, ov, &mut prov)?;
@@ -152,6 +153,7 @@ pub fn resolve(
     let compress = resolve_compress(files, scan_name, ov, &mut prov);
     let spans = resolve_spans(files, scan_name, ov, &mut prov);
     let seed = resolve_seed(ov, &mut prov);
+    timing.banner = resolve_banner(files, scan_name, &profile, ov, &mut prov)?;
     let services = resolve_services(files, &mut prov, &mut warnings)?;
 
     let port_spec = port_spec_override.unwrap_or_else(|| PortSummary(&ports).to_string());
@@ -315,6 +317,8 @@ fn resolve_timing(
             base.timing.connect_timeout,
             profile,
         )?,
+        // Resolved by the caller, which knows whether the scan asked for banners at all.
+        banner: None,
         retry_delay: duration_field(
             prov,
             "retry_delay",
@@ -496,6 +500,77 @@ fn resolve_compress(
 /// Collapsing bulk outcomes into spans. On by default: it takes a million-probe record
 /// from 391 MB to 2.6 KB, and what it drops is the per-probe timestamp and exact timing
 /// of results that all said the same thing. `--no-spans` keeps a row per probe.
+/// Enough for every greeting a real service sends: SSH is ~40 bytes, SMTP ~100.
+const DEFAULT_BANNER_BYTES: u32 = 1024;
+
+/// A hostile service can send as much as you will read. 4 KiB per open port is the most
+/// this will put in a record.
+const MAX_BANNER_BYTES: u32 = 4096;
+
+/// A service that volunteers a greeting does so immediately — this is a read on a
+/// connection that is already established, not another connect.
+const DEFAULT_BANNER_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Whether to read what open services volunteer, and within what limits.
+///
+/// The toggle is a scan-level choice (it changes what the scan does to a target); the
+/// limits are timing, so they live on the profile beside the other timeouts.
+fn resolve_banner(
+    files: &Layered,
+    scan_name: Option<&str>,
+    profile: &str,
+    ov: &Overrides,
+    prov: &mut Provenance,
+) -> Result<Option<Banner>, ConfigError> {
+    let on = match ov.banner {
+        Some(v) => {
+            prov.set("banner", Origin::Cli);
+            v
+        }
+        None => {
+            let from_scan =
+                scan_name.and_then(|n| files.pick(|c| c.scans.get(n).and_then(|s| s.banner)));
+            match from_scan.or_else(|| files.pick(|c| c.defaults.banner)) {
+                Some((v, path)) => {
+                    prov.set("banner", Origin::Defaults(path));
+                    v
+                }
+                None => {
+                    prov.set("banner", Origin::Default);
+                    false
+                }
+            }
+        }
+    };
+    if !on {
+        return Ok(None);
+    }
+
+    let bytes = field(
+        prov,
+        "banner_bytes",
+        None,
+        timing_source(files, scan_name, profile, |p| p.banner_bytes),
+        DEFAULT_BANNER_BYTES,
+        profile,
+    );
+    if bytes == 0 || bytes > MAX_BANNER_BYTES {
+        return Err(ConfigError::new(format!(
+            "banner_bytes must be between 1 and {MAX_BANNER_BYTES}, got {bytes}"
+        ))
+        .help("a greeting is tens of bytes; the cap exists so one record cannot be inflated by a hostile service"));
+    }
+    let timeout = duration_field(
+        prov,
+        "banner_timeout",
+        None,
+        timing_source(files, scan_name, profile, |p| p.banner_timeout.clone()),
+        DEFAULT_BANNER_TIMEOUT,
+        profile,
+    )?;
+    Ok(Some(Banner { bytes, timeout }))
+}
+
 fn resolve_spans(
     files: &Layered,
     scan_name: Option<&str>,

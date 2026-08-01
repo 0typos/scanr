@@ -27,6 +27,21 @@ pub struct Timing {
     /// Retries apply to timeouts only (D10).
     pub retries: u32,
     pub retry_delay: Duration,
+    /// `None` when banner grabbing is off, which is the default.
+    pub banner: Option<Banner>,
+}
+
+/// Limits for reading what an open service volunteers.
+///
+/// One struct rather than a bool beside two numbers, so "off" is a state the type can
+/// express and every probe site has one thing to check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Banner {
+    /// Cap on what is read and recorded.
+    pub bytes: u32,
+    /// A service that volunteers a greeting does so immediately; this is a read on a
+    /// connection that is already established, not another connect.
+    pub timeout: Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -322,6 +337,7 @@ impl ScanPlan {
                 connect_timeout: Duration::from_millis(200),
                 retries: 0,
                 retry_delay: Duration::ZERO,
+                banner: None,
             },
             dns_requested: DnsMode::Local,
             dns_effective: DnsMode::Local,

@@ -889,6 +889,17 @@ fn config_event(plan: &ScanPlan, facts: &HostFacts) -> serde_json::Value {
         // enforced it, and a field whose whole job is to be trustworthy should not
         // depend on two things staying in step.
         "service_labels": crate::services::active().provenance(),
+        // What was read from open services, if anything. Recorded because it changes
+        // what the scan *did*, not merely what it reported.
+        "banner": match &plan.timing.banner {
+            None => json!({ "enabled": false }),
+            Some(b) => json!({
+                "enabled": true,
+                "sent_bytes": 0,
+                "max_bytes": b.bytes,
+                "timeout_ms": b.timeout.as_millis() as u64,
+            }),
+        },
         "output": {
             "dir": plan.output_dir.to_string_lossy(),
             "open_only": plan.open_only,
@@ -1722,6 +1733,7 @@ mod tests {
                     total: Duration::from_millis(1),
                 },
                 pressure: None,
+                banner: None,
             },
             attempts: 1,
             attempt_states: vec![state],

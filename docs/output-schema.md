@@ -115,9 +115,38 @@ The one you will mostly consume.
 | `reason` | free text when not open; `null` when open |
 | `resolved_address` | `null` for hostname targets under transport DNS |
 | `service_label` | a guess from the port number, **not a fingerprint**; `null` if unknown. Layered — see below |
+| `banner` | what the service volunteered, when `--banner` is on and it said anything. Absent otherwise |
+| `banner_hex` | the same bytes in hex, used instead of `banner` when they are not valid UTF-8 |
+| `banner_bytes` | how many bytes were read |
 | `attempts` | retries are merged into one row (timeouts only) |
 | `attempt_states` | per-attempt states, so the merge loses nothing |
 | `timing_ms` | `proxy_connect` and `handshake` absent on the direct path |
+
+### Banners
+
+`--banner` reads what an open service volunteers on connect. **Nothing is sent** — the
+`scan_config` event records `banner.sent_bytes: 0` to say so — which is what keeps
+"scanr connected and listened" a true description of the scan.
+
+Only services that greet first say anything: SSH, SMTP, FTP, POP3, IMAP, MySQL, Telnet.
+HTTP does not, and neither does anything behind TLS. **An absent `banner` means the
+service said nothing unprompted, never that nothing is there.**
+
+The bytes are recorded as sent. Valid UTF-8 goes in `banner`, where JSON escaping renders
+control characters inertly (`\u001b`); anything else goes in `banner_hex`. Nothing is
+normalised away, because a record that quietly replaced bytes would be evidence of
+nothing.
+
+> **Do not print a banner straight to a terminal.** The bytes are chosen by the scanned
+> host, and a terminal acts on what it is given — `ESC [ 2J` clears the screen, `ESC ] 0 ;`
+> rewrites the window title. `scanr` renders banners as printable ASCII only, replacing
+> everything else with `.`; anything consuming the record should do the same.
+
+`scan_config.banner` records the settings the scan ran with:
+
+```json
+{"banner": {"enabled": true, "sent_bytes": 0, "max_bytes": 1024, "timeout_ms": 500}}
+```
 
 ### Where `service_label` comes from
 
@@ -362,7 +391,7 @@ $ scanr output results scan-*.jsonl.gz --states open
 2 result(s)
 
 $ scanr output results scan-*.jsonl.gz --hosts 10.0.0.0/24 --ports 22,443 --states closed,filtered
-$ scanr output results scan-*.jsonl.gz --states open --json | jq -r .target
+$ scanr output results scan-*.jsonl.gz --states open --format json | jq -r .target
 ```
 
 | flag | accepts |

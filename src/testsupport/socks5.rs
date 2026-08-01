@@ -278,6 +278,7 @@ mod tests {
                 connect_timeout: Duration::from_secs(2),
                 retries: 0,
                 retry_delay: Duration::ZERO,
+                banner: None,
             };
             let o = t.probe_detailed(&crate::transport::Destination::Addr(open), &timing);
             assert_eq!(o.reply_code, Some(REP_SUCCEEDED), "{b:?} on open port");

@@ -50,8 +50,14 @@ impl Transport for DirectTransport {
 
         match result {
             Ok(stream) => {
+                // Before the RST: the socket is open here and nowhere else, and a banner
+                // read is a read on this connection rather than another one.
+                let banner = timing
+                    .banner
+                    .as_ref()
+                    .and_then(|o| super::read_banner(&stream, o));
                 close_without_time_wait(&stream);
-                ProbeOutcome::open(phases, Source::LocalStack)
+                ProbeOutcome::open(phases, Source::LocalStack).with_banner(banner)
             }
             Err(e) => classify_os_error(&e, phases),
         }
@@ -90,6 +96,7 @@ mod tests {
             connect_timeout: Duration::from_millis(connect_ms),
             retries: 0,
             retry_delay: Duration::from_millis(0),
+            banner: None,
         }
     }
 

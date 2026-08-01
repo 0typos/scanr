@@ -214,6 +214,7 @@ mod tests {
                     total: Duration::from_millis(ms),
                 },
                 pressure: None,
+                banner: None,
             },
             attempts: 1,
             attempt_states: vec![state],

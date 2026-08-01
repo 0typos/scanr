@@ -1794,6 +1794,63 @@ fn remainder_note(outstanding: usize, planned: u64, path: &Path) -> String {
     )
 }
 
+/// A shape for handing results to another tool.
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub enum Handoff {
+    /// One JSON object per result.
+    Json,
+    /// `host:port` per line — what `httpx`, `tlsx` and `nuclei` all read from stdin.
+    List,
+    /// Runnable `nmap -sV` commands.
+    Nmap,
+}
+
+/// Render results for another tool to consume.
+///
+/// The point of this is division of labour, not completeness. `scanr` is good at finding
+/// open ports quickly through a proxy; `nmap -sV` is good at saying what is behind them,
+/// on the strength of a signature database two decades deep. Handing it the ~0.1% of
+/// endpoints that answered is far faster than letting it scan everything, and far better
+/// than reimplementing its database badly (D32).
+pub fn handoff(hits: &[Hit], how: Handoff) -> String {
+    let mut s = String::new();
+    match how {
+        Handoff::Json => {
+            for h in hits {
+                let _ = writeln!(s, "{}", h.to_json());
+            }
+        }
+        Handoff::List => {
+            for h in hits {
+                let _ = writeln!(s, "{}", format_pair(&h.target, h.port));
+            }
+        }
+        Handoff::Nmap => {
+            // Grouped by the exact set of ports found on a host, so no host is offered a
+            // port that was never open on it. One command per distinct set — on a real
+            // sweep that is a handful, because hosts of a kind look alike.
+            let mut by_ports: BTreeMap<Vec<u16>, Vec<&str>> = BTreeMap::new();
+            let mut hosts: BTreeMap<&str, Vec<u16>> = BTreeMap::new();
+            for h in hits {
+                hosts.entry(h.target.as_str()).or_default().push(h.port);
+            }
+            for (host, mut ports) in hosts {
+                ports.sort_unstable();
+                ports.dedup();
+                by_ports.entry(ports).or_default().push(host);
+            }
+            for (ports, mut group) in by_ports {
+                group.sort_by_key(|h| host_key(h));
+                let p: Vec<String> = ports.iter().map(u16::to_string).collect();
+                // -Pn because scanr already established these are up; -n because it
+                // already resolved them. Both stop nmap redoing finished work.
+                let _ = writeln!(s, "nmap -sV -Pn -n -p {} {}", p.join(","), group.join(" "));
+            }
+        }
+    }
+    s
+}
+
 /// Endpoints that were not probed, suitable for `scanr run --pairs -`.
 ///
 /// This is what replaces a `resume` feature (D12). It used to emit whole targets, which
@@ -3257,6 +3314,56 @@ mod tests {
             .find(|s| s["service"] == "ssh")
             .expect("an ssh service entry");
         assert_eq!(ssh["ports"][0], 22);
+    }
+
+    fn hit(target: &str, port: u16, state: &str) -> Hit {
+        Hit {
+            target: target.into(),
+            port,
+            state: state.into(),
+            source: "local_stack".into(),
+            reason: None,
+            service: None,
+            collapsed: false,
+            total_ms: Some(1.0),
+        }
+    }
+
+    /// One command per distinct port set, so no host is offered a port that was never
+    /// open on it — the whole reason to hand off precisely rather than a union.
+    #[test]
+    fn the_nmap_handoff_groups_hosts_by_their_open_ports() {
+        let hits = vec![
+            hit("10.0.0.2", 22, "open"),
+            hit("10.0.0.2", 80, "open"),
+            hit("10.0.0.9", 22, "open"),
+            hit("10.0.0.10", 22, "open"),
+            hit("10.0.0.10", 80, "open"),
+        ];
+        let out = handoff(&hits, Handoff::Nmap);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2, "two distinct port sets: {out}");
+        assert!(
+            lines.iter().any(|l| l.contains("-p 22 10.0.0.9")),
+            "the single-port host on its own: {out}"
+        );
+        let pair = lines
+            .iter()
+            .find(|l| l.contains("-p 22,80"))
+            .unwrap_or_else(|| panic!("{out}"));
+        assert!(
+            pair.contains("10.0.0.2") && pair.contains("10.0.0.10"),
+            "{pair}"
+        );
+        // -Pn and -n stop nmap redoing work scanr already did.
+        assert!(pair.contains("-sV -Pn -n"), "{pair}");
+    }
+
+    #[test]
+    fn the_list_handoff_is_one_endpoint_per_line() {
+        let hits = vec![hit("10.0.0.2", 443, "open"), hit("::1", 22, "open")];
+        let out = handoff(&hits, Handoff::List);
+        assert_eq!(out, "10.0.0.2:443\n[::1]:22\n", "IPv6 must be bracketed");
     }
 
     #[test]

@@ -125,6 +125,9 @@ pub struct RawDefaults {
     pub open_only: Option<bool>,
     pub compress: Option<bool>,
     pub spans: Option<bool>,
+    /// Read what open services volunteer. Off by default: it changes what the scan does
+    /// to a target, so it is asked for rather than assumed.
+    pub banner: Option<bool>,
     /// A file of `name port/proto` lines to label ports from, ahead of `/etc/services`
     /// and the builtin table. `~` is expanded.
     pub services_file: Option<String>,
@@ -144,6 +147,10 @@ pub struct RawProfile {
     pub connect_timeout: Option<String>,
     pub retries: Option<u32>,
     pub retry_delay: Option<String>,
+    /// Cap on bytes read from an open service when banner grabbing is on.
+    pub banner_bytes: Option<u32>,
+    /// How long to wait for a service to volunteer a greeting.
+    pub banner_timeout: Option<String>,
 }
 
 impl RawProfile {
@@ -197,6 +204,7 @@ pub struct RawScan {
     pub open_only: Option<bool>,
     pub compress: Option<bool>,
     pub spans: Option<bool>,
+    pub banner: Option<bool>,
     pub dns: Option<String>,
     pub output_dir: Option<String>,
     /// Inline timing overrides, same shape as a profile.

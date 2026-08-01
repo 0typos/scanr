@@ -161,10 +161,20 @@ impl Socks5Transport {
         phases.total = started.elapsed();
 
         match reply {
-            Ok(code) => DetailedOutcome {
-                outcome: classify_reply(code, phases),
-                reply_code: Some(code),
-            },
+            Ok(code) => {
+                let outcome = classify_reply(code, phases);
+                // Through a proxy the tunnel *is* the connection to the destination, so
+                // reading a greeting off it works exactly as it does directly. Banner
+                // grabbing is one of the few capabilities a proxy does not cost us.
+                let banner = (outcome.state == State::Open)
+                    .then_some(timing.banner.as_ref())
+                    .flatten()
+                    .and_then(|o| super::read_banner(&s, o));
+                DetailedOutcome {
+                    outcome: outcome.with_banner(banner),
+                    reply_code: Some(code),
+                }
+            }
             Err(e) => detailed(io_failure(&e, "reading CONNECT reply", phases), None),
         }
     }
@@ -548,6 +558,7 @@ mod tests {
             connect_timeout: Duration::from_millis(2000),
             retries: 0,
             retry_delay: Duration::from_millis(0),
+            banner: None,
         }
     }
 

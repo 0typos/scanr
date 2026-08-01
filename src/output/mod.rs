@@ -10,6 +10,20 @@ pub use human::{Progress, ResultPrinter, Style};
 pub use jsonl::{Counts, JsonlWriter, SCHEMA_VERSION, new_scan_id};
 pub use span::Spans;
 
+/// Lowercase hex, for banner bytes that are not valid UTF-8.
+///
+/// Hand-rolled rather than pulling in a dependency: at a 4 KiB cap the 2x size is
+/// irrelevant and the encoder is three lines.
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push(DIGITS[(b >> 4) as usize] as char);
+        out.push(DIGITS[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
 /// One completed probe, retries already merged (D10).
 #[derive(Debug, Clone)]
 pub struct ProbeRecord {
@@ -45,7 +59,7 @@ impl ProbeRecord {
             serde_json::json!(ms(Some(phases.total)).unwrap_or(0.0)),
         );
 
-        serde_json::json!({
+        let mut v = serde_json::json!({
             "probe_index": self.probe_index,
             "target": self.target,
             "resolved_address": self.resolved_address.map(|a| a.to_string()),
@@ -58,7 +72,22 @@ impl ProbeRecord {
             "attempts": self.attempts,
             "attempt_states": self.attempt_states.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
             "timing_ms": timing,
-        })
+        });
+
+        // What the service said, recorded as it was sent.
+        //
+        // A JSON string when the bytes are valid UTF-8 — `serde_json` escapes control
+        // characters, so an ESC in a banner is `\u001b` in the file and cannot do
+        // anything on the way back out. Hex when they are not, because a record that
+        // silently replaced undecodable bytes would be evidence of nothing.
+        if let Some(b) = &self.outcome.banner {
+            v["banner_bytes"] = serde_json::json!(b.len());
+            match std::str::from_utf8(b) {
+                Ok(text) => v["banner"] = serde_json::json!(text),
+                Err(_) => v["banner_hex"] = serde_json::json!(hex(b)),
+            }
+        }
+        v
     }
 }
 
@@ -85,6 +114,7 @@ mod tests {
                     total: Duration::from_micros(35600),
                 },
                 pressure: None,
+                banner: None,
             },
             attempts: 2,
             attempt_states: vec![State::Filtered, State::Open],
