@@ -19,6 +19,8 @@ use serde_json::{Value, json};
 
 use crate::net::target::{TargetSet, TargetSpec, format_pair, parse_pair};
 use crate::net::{Target, parse_ports, parse_target};
+use crate::output::human::Style;
+use crate::probe::State;
 use crate::units::{HumanElapsed, commas};
 
 /// One line of a record, as streamed.
@@ -831,7 +833,7 @@ fn find_exposed_secret(v: &Value) -> Option<String> {
     walk(v, "")
 }
 
-pub fn summarize(path: &Path, by: Grouping) -> Result<String, String> {
+pub fn summarize(path: &Path, by: Grouping, style: &Style) -> Result<String, String> {
     // Retains the header, the config, the terminal event, and one formatted line per
     // *open* port. Everything else is dropped as it goes by: the closed and filtered
     // rows are the bulk of a large record and none of them are printed.
@@ -930,14 +932,23 @@ pub fn summarize(path: &Path, by: Grouping) -> Result<String, String> {
                     t["duration_ms"].as_u64().unwrap_or(0)
                 ))
             );
+            // Coloured per state, matching `run`'s palette. This is the one line here
+            // where colour carries information: every entry in the open-ports list below
+            // is open by definition, so colouring that would be decoration.
+            let count = |k: &str, st: State| {
+                style.paint_state(
+                    st,
+                    &format!("{} {}", c[k].as_u64().unwrap_or(0), st.as_str()),
+                )
+            };
             let _ = writeln!(
                 s,
-                "  {:<16}{} open, {} closed, {} filtered, {} error",
+                "  {:<16}{}, {}, {}, {}",
                 "states",
-                c["open"].as_u64().unwrap_or(0),
-                c["closed"].as_u64().unwrap_or(0),
-                c["filtered"].as_u64().unwrap_or(0),
-                c["error"].as_u64().unwrap_or(0)
+                count("open", State::Open),
+                count("closed", State::Closed),
+                count("filtered", State::Filtered),
+                count("error", State::Error)
             );
             if c["not_started"].as_u64().unwrap_or(0) > 0 {
                 let _ = writeln!(
@@ -2053,7 +2064,7 @@ mod tests {
         }
         for err in [
             verify(&p).err(),
-            summarize(&p, Grouping::Flat).err(),
+            summarize(&p, Grouping::Flat, &Style::for_stream(false, true)).err(),
             remainder(&p).err().map(|e| e.to_string()),
         ] {
             let err = err.expect("an unreadable file must be an error, not a partial answer");
@@ -2360,7 +2371,7 @@ mod tests {
     fn summarize_lists_open_ports() {
         let d = tempfile::tempdir().unwrap();
         let p = write(d.path(), "s.jsonl", &good_events());
-        let out = summarize(&p, Grouping::Flat).unwrap();
+        let out = summarize(&p, Grouping::Flat, &Style::for_stream(false, true)).unwrap();
         assert!(out.contains("open ports:"), "{out}");
         assert!(out.contains("10.0.0.0:80/tcp  http"), "{out}");
         assert!(
@@ -2405,7 +2416,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = write(d.path(), "g.jsonl", &multi_host_record());
         for by in [Grouping::Flat, Grouping::Host] {
-            let out = summarize(&p, by).unwrap();
+            let out = summarize(&p, by, &Style::for_stream(false, true)).unwrap();
             let order: Vec<usize> = ["10.0.0.2", "10.0.0.9", "10.0.0.10"]
                 .iter()
                 .map(|h| {
@@ -2424,7 +2435,7 @@ mod tests {
     fn grouping_by_host_puts_each_host_on_one_line() {
         let d = tempfile::tempdir().unwrap();
         let p = write(d.path(), "g.jsonl", &multi_host_record());
-        let out = summarize(&p, Grouping::Host).unwrap();
+        let out = summarize(&p, Grouping::Host, &Style::for_stream(false, true)).unwrap();
         assert!(out.contains("open ports by host (3 hosts)"), "{out}");
         // 10.0.0.2 has both ports, on one line, in port order.
         let line = out
@@ -2442,7 +2453,7 @@ mod tests {
     fn grouping_by_port_ranks_the_commonest_first() {
         let d = tempfile::tempdir().unwrap();
         let p = write(d.path(), "g.jsonl", &multi_host_record());
-        let out = summarize(&p, Grouping::Port).unwrap();
+        let out = summarize(&p, Grouping::Port, &Style::for_stream(false, true)).unwrap();
         assert!(out.contains("open ports by port (2 distinct)"), "{out}");
         // 80/http appears on two hosts, 22/ssh on two as well — ties break by key, but
         // both must list their hosts.
@@ -2457,7 +2468,7 @@ mod tests {
     fn grouping_by_service_keys_on_the_label() {
         let d = tempfile::tempdir().unwrap();
         let p = write(d.path(), "g.jsonl", &multi_host_record());
-        let out = summarize(&p, Grouping::Service).unwrap();
+        let out = summarize(&p, Grouping::Service, &Style::for_stream(false, true)).unwrap();
         assert!(out.contains("open ports by service"), "{out}");
         let ssh = out
             .lines()
@@ -2719,7 +2730,7 @@ mod tests {
         std::fs::write(&p, "").unwrap();
         let r = verify(&p).unwrap();
         assert!(r.problems.iter().any(|x| x.contains("no events")));
-        assert!(summarize(&p, Grouping::Flat).is_err());
+        assert!(summarize(&p, Grouping::Flat, &Style::for_stream(false, true)).is_err());
     }
 
     #[test]

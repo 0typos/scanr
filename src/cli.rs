@@ -972,10 +972,11 @@ fn cmd_transport_test(
 
 // ── output ──────────────────────────────────────────────────────────────────
 
-fn cmd_output(_cli: &Cli, cmd: &OutputCmd) -> Result<u8, ConfigError> {
+fn cmd_output(cli: &Cli, cmd: &OutputCmd) -> Result<u8, ConfigError> {
     match cmd {
         OutputCmd::Summarize { file, by } => {
-            let report = crate::verify::summarize(file, *by).map_err(ConfigError::new)?;
+            let style = output_style(cli);
+            let report = crate::verify::summarize(file, *by, &style).map_err(ConfigError::new)?;
             let _ = write!(std::io::stdout(), "{}", report);
             Ok(EXIT_OK)
         }
@@ -995,6 +996,7 @@ fn cmd_output(_cli: &Cli, cmd: &OutputCmd) -> Result<u8, ConfigError> {
             states,
             json,
         } => cmd_output_get(
+            cli,
             file,
             hosts.as_deref(),
             ports.as_deref(),
@@ -1015,8 +1017,21 @@ fn cmd_output(_cli: &Cli, cmd: &OutputCmd) -> Result<u8, ConfigError> {
     }
 }
 
+/// Colour for a human-facing report on stdout.
+///
+/// TTY-only and honouring `--no-color` and `NO_COLOR`, the same rule `run` uses for its
+/// result lines — so a redirected or piped report is plain text either way.
+fn output_style(cli: &Cli) -> Style {
+    use std::io::IsTerminal;
+    Style::for_stream(
+        std::io::stdout().is_terminal() && !cli.no_color,
+        cli.no_color,
+    )
+}
+
 /// `scanr output get` — filter the results in a record.
 fn cmd_output_get(
+    cli: &Cli,
     file: &std::path::Path,
     hosts: Option<&[String]>,
     ports: Option<&[String]>,
@@ -1051,6 +1066,7 @@ fn cmd_output_get(
     }
 
     let hits = crate::verify::get(file, &q).map_err(ConfigError::new)?;
+    let style = output_style(cli);
     let mut out = std::io::stdout().lock();
     if json {
         for h in &hits {
@@ -1065,12 +1081,15 @@ fn cmd_output_get(
             .max(20);
         for h in &hits {
             let endpoint = format!("{}:{}/tcp", h.target, h.port);
-            let line = format!(
-                "{endpoint:<width$}  {:<9} {:<12} {}",
-                h.state,
-                h.source,
-                h.service.as_deref().unwrap_or("")
-            );
+            // Padded first, then painted: an escape sequence inflates `str::len`, so
+            // `{:<9}` applied to a coloured value stops aligning (D22).
+            let padded = format!("{:<9}", h.state);
+            let state = match crate::probe::State::parse(&h.state) {
+                Some(st) => style.paint_state(st, &padded),
+                None => padded,
+            };
+            let tail = format!("{:<12} {}", h.source, h.service.as_deref().unwrap_or(""));
+            let line = format!("{endpoint:<width$}  {state} {}", tail.trim_end());
             let _ = writeln!(out, "{}", line.trim_end());
         }
     }
