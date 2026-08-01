@@ -873,6 +873,54 @@ fn a_sigkilled_scan_keeps_the_probes_its_spans_stood_for() {
     );
 }
 
+/// `output cat` exists so a documented `jq` recipe works the same on every platform:
+/// `zcat -f`'s pass-through of uncompressed input is a GNU extension, and macOS ships
+/// BSD gzip. It must be byte-faithful on both record formats.
+#[test]
+fn output_cat_emits_plain_jsonl_for_either_format() {
+    let d = tempfile::tempdir().unwrap();
+    let (_l, open) = open_port();
+    let ports = format!("{},20000-20020", open.port());
+
+    for (dir, extra) in [("gz", vec![]), ("plain", vec!["--no-compress"])] {
+        let mut args = vec![
+            "run",
+            "--targets",
+            "127.0.0.1",
+            "--ports",
+            &ports,
+            "--output-dir",
+            dir,
+            "--all",
+            "-q",
+        ];
+        args.extend(extra);
+        assert_eq!(code(&scanr(d.path(), &args)), 0);
+    }
+
+    for dir in ["gz", "plain"] {
+        let f = scanr::testsupport::find_record(&d.path().join(dir)).expect("a record");
+        let out = scanr(d.path(), &["output", "cat", f.to_str().unwrap()]);
+        assert_eq!(code(&out), 0, "{}", stderr(&out));
+
+        // Byte-for-byte what the file holds once decompressed.
+        assert_eq!(
+            stdout(&out),
+            scanr::testsupport::record_text(&f),
+            "{dir}: cat must not reformat the record"
+        );
+        // And every line is still one JSON object.
+        for line in stdout(&out).lines() {
+            serde_json::from_str::<Value>(line).expect("valid JSON per line");
+        }
+        assert!(
+            stdout(&out).contains("\"type\":\"scan_started\""),
+            "{dir}: {}",
+            stdout(&out)
+        );
+    }
+}
+
 #[test]
 fn declared_fidelity_is_honoured_end_to_end() {
     let d = tempfile::tempdir().unwrap();

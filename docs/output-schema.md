@@ -183,7 +183,7 @@ Emitted during the scan, at most once each, with `detail.remediation`:
 | `proxy_saturation` | the proxy stopped accepting connections |
 
 ```console
-zcat -f scan-*.jsonl.gz | jq -r 'select(.type=="scan_warning") | "\(.code)\t\(.message)"'
+scanr output cat scan-*.jsonl.gz | jq -r 'select(.type=="scan_warning") | "\(.code)\t\(.message)"'
 ```
 
 Seeing `fidelity_open_only`, `proxy_saturation`, or either `*_pressure` code means some
@@ -239,32 +239,38 @@ have a row per probe. Totals for the other states come from the terminal event's
 
 ## Recipes
 
+`scanr output cat` writes the record as plain JSONL whichever format it is in, so these
+work unchanged on a compressed or uncompressed record and on any platform. `zcat -f`
+does the same on GNU systems, but its pass-through of uncompressed input is a GNU
+extension and macOS ships BSD gzip — hence the built-in.
+
+
 Open ports, as `host:port`:
 
 ```console
-zcat -f scan-*.jsonl.gz | jq -r 'select(.type=="probe_result" and .state=="open") | "\(.target):\(.port)"'
+scanr output cat scan-*.jsonl.gz | jq -r 'select(.type=="probe_result" and .state=="open") | "\(.target):\(.port)"'
 ```
 
 Only verdicts you can trust as `closed`:
 
 ```console
-zcat -f scan-*.jsonl.gz | jq -r 'select(.type=="probe_result" and .state=="closed" and .source=="local_stack")
+scanr output cat scan-*.jsonl.gz | jq -r 'select(.type=="probe_result" and .state=="closed" and .source=="local_stack")
        | "\(.target):\(.port)"'
 ```
 
 Did it finish, and what settings produced it?
 
 ```console
-zcat -f scan-*.jsonl.gz | jq -r 'select(.counts)
+scanr output cat scan-*.jsonl.gz | jq -r 'select(.counts)
        | "\(.type) \(.termination) \(.counts.completed)/\(.counts.planned)"'
-zcat -f scan-*.jsonl.gz | jq -r 'select(.type=="scan_config") | .timing, .transport, .permutation'
+scanr output cat scan-*.jsonl.gz | jq -r 'select(.type=="scan_config") | .timing, .transport, .permutation'
 ```
 
 Diff two scans for ports that changed:
 
 ```console
 for f in old.jsonl.gz new.jsonl.gz; do
-  zcat -f "$f" | jq -r 'select(.type=="probe_result") | "\(.target):\(.port) \(.state)"' \
+  scanr output cat "$f" | jq -r 'select(.type=="probe_result") | "\(.target):\(.port) \(.state)"' \
     | sort > "$f.st"
 done
 diff old.jsonl.gz.st new.jsonl.gz.st
@@ -273,13 +279,13 @@ diff old.jsonl.gz.st new.jsonl.gz.st
 Which build produced this record:
 
 ```console
-zcat -f scan-*.jsonl.gz | jq -r 'select(.type=="scan_started") | "\(.tool_version) \(.git_commit) \(.target_triple)"'
+scanr output cat scan-*.jsonl.gz | jq -r 'select(.type=="scan_started") | "\(.tool_version) \(.git_commit) \(.target_triple)"'
 ```
 
 Slowest responders:
 
 ```console
-zcat -f scan-*.jsonl.gz | jq -r 'select(.type=="probe_result" and .state=="open")
+scanr output cat scan-*.jsonl.gz | jq -r 'select(.type=="probe_result" and .state=="open")
        | [.timing_ms.total, "\(.target):\(.port)"] | @tsv' | sort -rn | head
 ```
 
@@ -290,7 +296,7 @@ expanded matrix — a /16 × 1000 ports is 65M probes. With the recorded permuta
 that is enough to reproduce the scan exactly:
 
 ```console
-cfg() { zcat -f scan-*.jsonl.gz | jq -r "select(.type==\"scan_config\")|$1"; }
+cfg() { scanr output cat scan-*.jsonl.gz | jq -r "select(.type==\"scan_config\")|$1"; }
 scanr run --targets "$(cfg '.targets.spec[]')" \
           --ports   "$(cfg '.ports.spec')" \
           --seed    "$(cfg '.permutation.seed')"

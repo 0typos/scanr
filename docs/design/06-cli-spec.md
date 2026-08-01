@@ -16,6 +16,7 @@ transport test
 output summarize
 output verify
 output remainder
+output cat
 completion
 ```
 
@@ -37,7 +38,8 @@ scanr
 ├── output
 │   ├── summarize <file>       counts, duration, open ports
 │   ├── verify <file>          integrity and completeness checks
-│   └── remainder <file>       emit un-probed targets as a target list
+│   ├── remainder <file>       emit un-probed targets as a target list
+│   └── cat <file>             the record as plain JSONL, decompressing it
 └── completion <shell>
 ```
 
