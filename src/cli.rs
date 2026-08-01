@@ -992,17 +992,17 @@ fn cmd_transport_test(
 
 // ── output ──────────────────────────────────────────────────────────────────
 
-/// Give the commands that expand spans the label table a scan would have used.
+/// Give every `output` command the label table a scan would have used.
 ///
-/// That is `results` and `summarize`: both walk every result, and rows recovered from a
-/// `probe_span` have no `service_label` of their own, because the span collapsed them.
-/// `events`, `verify` and `remainder` read labels straight from the record or not at
-/// all, so they do not pay for a config load and an `/etc/services` parse.
+/// Rows recovered from a `probe_span` have no `service_label` of their own, because the
+/// span collapsed them, so anything walking results has to synthesise one.
 ///
-/// Wired per command rather than at the `output` entry point, and that has now bitten
-/// twice: once when moving it out dropped it entirely, and again when `summarize` grew a
-/// call to `service_label` and nobody re-wired it — leaving `results` and `summarize`
-/// disagreeing about the same record. Both are covered by tests now.
+/// Done once here rather than in the arms that happen to need it. That was the previous
+/// shape and it broke twice: once when moving it out dropped it entirely, and again when
+/// `summarize` grew a call to `service_label` and nobody re-wired it — leaving `results`
+/// and `summarize` disagreeing about the same record. The saving was one config load and
+/// one `/etc/services` parse, about a millisecond, on commands that do not need it; the
+/// price was two silent divergence bugs. Not a trade worth repeating.
 ///
 /// Best effort: a broken or absent config here means the builtin table rather than a
 /// failed read-only command. The precedence itself comes from `resolve_services`, the
@@ -1018,10 +1018,9 @@ fn install_services_best_effort(cli: &Cli) {
 }
 
 fn cmd_output(cli: &Cli, cmd: &OutputCmd) -> Result<u8, ConfigError> {
+    install_services_best_effort(cli);
     match cmd {
         OutputCmd::Summarize { file, by, json } => {
-            // Span-expanded rows carry no label of their own; see the note on the fn.
-            install_services_best_effort(cli);
             let style = output_style(cli);
             let report =
                 crate::verify::summarize(file, *by, *json, &style).map_err(ConfigError::new)?;
@@ -1087,10 +1086,6 @@ fn cmd_output_results(
     json: bool,
 ) -> Result<u8, ConfigError> {
     use crate::verify::Query;
-
-    // Rows expanded out of a `probe_span` carry no `service_label` of their own, so this
-    // is the one read-only command that needs a label table.
-    install_services_best_effort(cli);
 
     let mut q = Query::default();
     for spec in hosts.unwrap_or(&[]).iter().flat_map(|s| s.split(',')) {
