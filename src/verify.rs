@@ -909,15 +909,23 @@ pub fn summarize(
 ) -> Result<String, String> {
     let mut hosts: BTreeMap<HostKey, HostAgg> = BTreeMap::new();
     let mut ports: BTreeMap<u16, PortAgg> = BTreeMap::new();
+    let mut unknown_state: u64 = 0;
+    // Results arrive host-major within a span, so the map slot is almost always the one
+    // used last. Skipping the lookup saves parsing the address back out of the formatted
+    // target and descending a 65k-entry map, per probe.
+    let mut last: Option<(String, HostKey)> = None;
     let scan = walk_results(path, |r| {
-        let h = hosts.entry(host_key(r.target)).or_insert_with(|| HostAgg {
+        if last.as_ref().is_none_or(|(t, _)| t != r.target) {
+            last = Some((r.target.to_string(), host_key(r.target)));
+        }
+        let key = &last.as_ref().expect("just set").1;
+        let h = hosts.entry(key.clone()).or_insert_with(|| HostAgg {
             name: r.target.to_string(),
             ..HostAgg::default()
         });
         h.states.add(r.state);
-        if r.state == "open" {
-            h.open_ports
-                .push((r.port, r.service.unwrap_or("").to_string()));
+        if r.state == State::Open.as_str() {
+            h.open_ports.push(r.port);
         }
 
         let p = ports.entry(r.port).or_default();
@@ -927,10 +935,13 @@ pub fn summarize(
         {
             p.service = s.to_string();
         }
+        if State::parse(r.state).is_none() {
+            unknown_state += 1;
+        }
     })?;
-    if scan.header.is_none() {
+    let Some(header) = scan.header else {
         return Err(format!("{} contains no events", path.display()));
-    }
+    };
 
     for h in hosts.values_mut() {
         h.open_ports.sort_unstable();
@@ -939,7 +950,8 @@ pub fn summarize(
     let summary = Summary {
         path: path.display().to_string(),
         unreadable: scan.unreadable,
-        header: scan.header,
+        unknown_state,
+        header,
         config: scan.config,
         terminal: scan.terminal,
         hosts,
@@ -957,7 +969,10 @@ pub fn summarize(
 struct HostAgg {
     name: String,
     states: States,
-    open_ports: Vec<(u16, String)>,
+    /// Ports only. The label is a pure function of the port and `Summary::ports` already
+    /// carries it, so storing it per host cost a `String` per open result — memory
+    /// proportional to *probes*, which is exactly what this aggregation exists to avoid.
+    open_ports: Vec<u16>,
 }
 
 /// Per-port totals across hosts. One probe per (host, port), so `states.open` *is* the
@@ -983,12 +998,16 @@ struct States {
 
 impl States {
     fn add(&mut self, state: &str) {
-        match state {
-            "open" => self.open += 1,
-            "closed" => self.closed += 1,
-            "filtered" => self.filtered += 1,
-            "error" => self.error += 1,
-            _ => self.other += 1,
+        // Through `State::parse` rather than a second copy of the four strings. The
+        // caveat line calls `other` "a state this build does not recognise", which a
+        // hardcoded list can make false: a fifth `State` variant would be reported as
+        // unrecognised by the same build that defines it. This way it is a compile error.
+        match State::parse(state) {
+            Some(State::Open) => self.open += 1,
+            Some(State::Closed) => self.closed += 1,
+            Some(State::Filtered) => self.filtered += 1,
+            Some(State::Error) => self.error += 1,
+            None => self.other += 1,
         }
     }
 
@@ -1000,9 +1019,23 @@ impl States {
         self.other += o.other;
     }
 
-    /// Anything at all was recorded for this key.
-    fn any(&self) -> bool {
-        self.open + self.closed + self.filtered + self.error + self.other > 0
+    /// Header cells for the four state columns, so a header and its rows cannot drift.
+    fn head() -> String {
+        format!(
+            "{:>6} {:>6} {:>8} {:>6}",
+            State::Open.as_str(),
+            State::Closed.as_str(),
+            State::Filtered.as_str(),
+            State::Error.as_str()
+        )
+    }
+
+    /// The matching data cells.
+    fn cols(&self) -> String {
+        format!(
+            "{:>6} {:>6} {:>8} {:>6}",
+            self.open, self.closed, self.filtered, self.error
+        )
     }
 
     fn to_json(self) -> Value {
@@ -1028,8 +1061,11 @@ fn network_of(target: &str) -> String {
             format!("{}.{}.{}.0/24", o[0], o[1], o[2])
         }
         Ok(std::net::IpAddr::V6(a)) => {
+            // Masked and re-rendered by `Ipv6Addr`'s own `Display`, so it elides the way
+            // every other address in the tool does: `::/64`, not `0:0:0:0::/64`.
             let s = a.segments();
-            format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+            let net = std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0);
+            format!("{net}/64")
         }
         Err(_) => "(hostnames)".to_string(),
     }
@@ -1043,7 +1079,12 @@ struct Summary {
     path: String,
     /// Results whose port the record states as unusable, so they are in no section.
     unreadable: u64,
-    header: Option<Value>,
+    /// Results whose `state` is none of the four. Counted where they are seen rather
+    /// than re-derived by summing the host map, which coupled the figure to whatever
+    /// happened to be in that map.
+    unknown_state: u64,
+    /// Not an `Option`: `summarize` refuses a record with no events before building this.
+    header: Value,
     config: Option<Value>,
     terminal: Option<Value>,
     hosts: BTreeMap<HostKey, HostAgg>,
@@ -1070,6 +1111,22 @@ impl Summary {
     /// put `10.0.0.0/24` before `2.2.2.0/24`, which is exactly the defect `host_key`
     /// exists to prevent — and it was doing it in the section directly below the
     /// correctly sorted host table.
+    /// `80/http`, or bare `9099` when nothing labels the port.
+    fn port_label(&self, port: u16) -> String {
+        match self.ports.get(&port).map(|p| p.service.as_str()) {
+            Some(s) if !s.is_empty() => format!("{port}/{s}"),
+            _ => port.to_string(),
+        }
+    }
+
+    /// The label as JSON, `null` when there is none.
+    fn service_of(&self, port: u16) -> Value {
+        match self.ports.get(&port).map(|p| p.service.as_str()) {
+            Some(s) if !s.is_empty() => json!(s),
+            _ => Value::Null,
+        }
+    }
+
     fn networks(&self) -> BTreeMap<HostKey, NetAgg> {
         let mut out: BTreeMap<HostKey, NetAgg> = BTreeMap::new();
         for h in self.hosts.values() {
@@ -1115,12 +1172,9 @@ impl Summary {
     /// the finding this section exists to surface, so the first version answered every
     /// question except the one it was written for.
     fn interesting_ports(&self) -> Vec<(u16, &PortAgg)> {
-        let mut v: Vec<(u16, &PortAgg)> = self
-            .ports
-            .iter()
-            .filter(|(_, p)| p.states.any())
-            .map(|(k, p)| (*k, p))
-            .collect();
+        // No filter: every entry in `self.ports` was created by a result and immediately
+        // counted, so there is nothing here that had no outcome.
+        let mut v: Vec<(u16, &PortAgg)> = self.ports.iter().map(|(k, p)| (*k, p)).collect();
         v.sort_by_key(|(port, p)| {
             (
                 std::cmp::Reverse(p.states.open),
@@ -1134,7 +1188,7 @@ impl Summary {
 
     fn render(&self, by: Option<Grouping>, style: &Style) -> String {
         let mut s = String::new();
-        let show = |g: Grouping| by.is_none() || by == Some(g);
+        let show = |g: Grouping| by.is_none_or(|b| b == g);
         // The all-sections view is a first look, so each section is bounded and says
         // what it left out. Asking for one section with `--by` asks for all of it.
         let limit = if by.is_none() {
@@ -1176,13 +1230,12 @@ impl Summary {
                 commas(self.unreadable)
             );
         }
-        let other: u64 = self.hosts.values().map(|h| h.states.other).sum();
-        if other > 0 {
+        if self.unknown_state > 0 {
             let _ = writeln!(
                 s,
                 "  {:<16}{} result(s) had a state this build does not recognise",
                 "note",
-                commas(other)
+                commas(self.unknown_state)
             );
         }
     }
@@ -1208,15 +1261,13 @@ impl Summary {
                 .and_then(|c| c["scan_name"].as_str())
                 .unwrap_or("(unknown)")
         );
-        if let Some(h) = &self.header {
-            let _ = writeln!(
-                s,
-                "  {:<16}{}  (scanr {})",
-                "started",
-                h["ts"].as_str().unwrap_or("?"),
-                h["tool_version"].as_str().unwrap_or("?")
-            );
-        }
+        let _ = writeln!(
+            s,
+            "  {:<16}{}  (scanr {})",
+            "started",
+            self.header["ts"].as_str().unwrap_or("?"),
+            self.header["tool_version"].as_str().unwrap_or("?")
+        );
         if let Some(c) = &self.config {
             let t = &c["transport"];
             let _ = writeln!(
@@ -1298,7 +1349,10 @@ impl Summary {
         // on a sweep the interesting rows are a handful among tens of thousands.
         let mut rows: Vec<&HostAgg> = self.hosts.values().collect();
         if limit.is_some() {
-            rows.sort_by_key(|h| (h.states.open == 0, host_key(&h.name)));
+            // Stable, and `self.hosts` is already keyed by `host_key`, so this is the
+            // same order the full key would give — without parsing every address again
+            // on every comparison, to print twenty-five rows.
+            rows.sort_by_key(|h| h.states.open == 0);
         }
         let shown = limit.unwrap_or(rows.len()).min(rows.len());
         let w = rows[..shown]
@@ -1309,35 +1363,13 @@ impl Summary {
             .max(15);
 
         let _ = writeln!(s, "\nby host ({}):", plural(self.hosts.len(), "host"));
-        let _ = writeln!(
-            s,
-            "  {:<w$}  {:>6} {:>6} {:>8} {:>6}  open ports",
-            "host",
-            "open",
-            "closed",
-            "filtered",
-            "error",
-            w = w
-        );
+        let _ = writeln!(s, "  {:<w$}  {}  open ports", "host", States::head(), w = w);
         for h in &rows[..shown] {
-            let list: Vec<String> = h
-                .open_ports
-                .iter()
-                .map(|(p, svc)| {
-                    if svc.is_empty() {
-                        p.to_string()
-                    } else {
-                        format!("{p}/{svc}")
-                    }
-                })
-                .collect();
+            let list: Vec<String> = h.open_ports.iter().map(|p| self.port_label(*p)).collect();
             let line = format!(
-                "  {:<w$}  {:>6} {:>6} {:>8} {:>6}  {}",
+                "  {:<w$}  {}  {}",
                 h.name,
-                h.states.open,
-                h.states.closed,
-                h.states.filtered,
-                h.states.error,
+                h.states.cols(),
                 list.join(" "),
                 w = w
             );
@@ -1351,7 +1383,13 @@ impl Summary {
         if nets.is_empty() {
             return;
         }
-        let rows: Vec<&NetAgg> = nets.values().collect();
+        let mut rows: Vec<&NetAgg> = nets.values().collect();
+        if limit.is_some() {
+            // Same rule the host table uses when bounded: prefixes that answered first.
+            // Without it the default view showed the interesting hosts beside an
+            // arbitrary twenty-five prefixes, truncated by numeric order.
+            rows.sort_by_key(|n| n.hosts_with_open == 0);
+        }
         let shown = limit.unwrap_or(rows.len()).min(rows.len());
         let w = rows[..shown]
             .iter()
@@ -1393,21 +1431,14 @@ impl Summary {
         }
         let shown = limit.unwrap_or(ports.len()).min(ports.len());
         let _ = writeln!(s, "\nby port ({}):", plural(ports.len(), "port"));
-        let _ = writeln!(
-            s,
-            "  {:<8} {:<16} {:>6} {:>6} {:>8} {:>6}",
-            "port", "service", "open", "closed", "filtered", "error"
-        );
+        let _ = writeln!(s, "  {:<8} {:<16} {}", "port", "service", States::head());
         for (port, p) in &ports[..shown] {
             let _ = writeln!(
                 s,
-                "  {:<8} {:<16} {:>6} {:>6} {:>8} {:>6}",
+                "  {:<8} {:<16} {}",
                 port,
                 label(&p.service),
-                p.states.open,
-                p.states.closed,
-                p.states.filtered,
-                p.states.error
+                p.states.cols()
             );
         }
         Self::elided(s, shown, ports.len(), "port");
@@ -1415,61 +1446,49 @@ impl Summary {
 
     fn render_services(&self, s: &mut String, limit: Option<usize>) {
         let svcs = self.services();
-        let mut rows: Vec<(&String, &SvcAgg)> =
-            svcs.iter().filter(|(_, v)| v.states.any()).collect();
+        let mut rows: Vec<(&String, &SvcAgg)> = svcs.iter().collect();
         if rows.is_empty() {
             return;
         }
         // Same ranking as ports: a service that is only ever filtered still matters.
-        rows.sort_by_key(|(name, v)| {
-            (
-                std::cmp::Reverse(v.states.open),
-                std::cmp::Reverse(v.states.filtered),
-                (*name).clone(),
-            )
+        // `sort_by` rather than `sort_by_key`: the latter would clone the name on every
+        // comparison just to break ties.
+        rows.sort_by(|(an, a), (bn, b)| {
+            b.states
+                .open
+                .cmp(&a.states.open)
+                .then(b.states.filtered.cmp(&a.states.filtered))
+                .then(an.cmp(bn))
         });
         let shown = limit.unwrap_or(rows.len()).min(rows.len());
 
         let _ = writeln!(s, "\nby service ({}):", plural(rows.len(), "service"));
-        let _ = writeln!(
-            s,
-            "  {:<16} {:>6} {:>6} {:>8} {:>6}  ports",
-            "service", "open", "closed", "filtered", "error"
-        );
+        let _ = writeln!(s, "  {:<16} {}  ports", "service", States::head());
         for (name, v) in &rows[..shown] {
             let ports: Vec<String> = v.ports.iter().map(u16::to_string).collect();
-            let _ = writeln!(
-                s,
-                "  {:<16} {:>6} {:>6} {:>8} {:>6}  {}",
-                name,
-                v.states.open,
-                v.states.closed,
-                v.states.filtered,
-                v.states.error,
-                ports.join(",")
-            );
+            let _ = writeln!(s, "  {:<16} {}  {}", name, v.states.cols(), ports.join(","));
         }
         Self::elided(s, shown, rows.len(), "service");
     }
 
-    fn to_json(&self, by: Option<Grouping>) -> Value {
-        let show = |g: Grouping| by.is_none() || by == Some(g);
-        let hosts: Vec<Value> = self
-            .hosts
+    fn hosts_json(&self) -> Vec<Value> {
+        self.hosts
             .values()
             .map(|h| {
                 json!({
                     "host": h.name,
                     "states": h.states.to_json(),
-                    "open_ports": h.open_ports.iter().map(|(p, s)| json!({
+                    "open_ports": h.open_ports.iter().map(|p| json!({
                         "port": p,
-                        "service_label": if s.is_empty() { Value::Null } else { json!(s) },
+                        "service_label": self.service_of(*p),
                     })).collect::<Vec<_>>(),
                 })
             })
-            .collect();
-        let networks: Vec<Value> = self
-            .networks()
+            .collect()
+    }
+
+    fn networks_json(&self) -> Vec<Value> {
+        self.networks()
             .into_values()
             .map(|n| {
                 json!({
@@ -1479,55 +1498,64 @@ impl Summary {
                     "states": n.states.to_json(),
                 })
             })
-            .collect();
-        let ports: Vec<Value> = self
-            .ports
+            .collect()
+    }
+
+    fn ports_json(&self) -> Vec<Value> {
+        self.ports
             .iter()
             .map(|(port, p)| {
                 json!({
                     "port": port,
-                    "service_label": if p.service.is_empty() { Value::Null } else { json!(p.service) },
+                    "service_label": self.service_of(*port),
                     "states": p.states.to_json(),
                 })
             })
-            .collect();
-        let services: Vec<Value> = self
-            .services()
+            .collect()
+    }
+
+    fn services_json(&self) -> Vec<Value> {
+        self.services()
             .into_iter()
             .map(|(name, v)| {
                 json!({ "service": name, "ports": v.ports, "states": v.states.to_json() })
             })
-            .collect();
+            .collect()
+    }
+
+    fn to_json(&self, by: Option<Grouping>) -> Value {
+        let show = |g: Grouping| by.is_none_or(|b| b == g);
 
         let mut v = json!({
             "file": self.path,
             // The identity the text render prints in its `started` line. Without it a
             // consumer comparing two summaries cannot say when either scan ran or which
             // build produced it.
-            "started": self.header.as_ref().map(|h| h["ts"].clone()).unwrap_or(Value::Null),
-            "tool_version": self.header
-                .as_ref()
-                .map(|h| h["tool_version"].clone())
-                .unwrap_or(Value::Null),
-            "scan_id": self.header.as_ref().map(|h| h["scan_id"].clone()).unwrap_or(Value::Null),
+            // `Value`'s `Index` already yields `Null` for a missing key.
+            "started": self.header["ts"].clone(),
+            "tool_version": self.header["tool_version"].clone(),
+            "scan_id": self.header["scan_id"].clone(),
             "scan": self.config.clone().unwrap_or(Value::Null),
             "terminal": self.terminal.clone().unwrap_or(Value::Null),
             "unreadable_ports": self.unreadable,
+            "unrecognized_states": self.unknown_state,
         });
-        // `--by` narrows JSON exactly as it narrows the table. It used to be accepted,
-        // validated, and then ignored here, so `--by port --json` returned everything.
+        // `--by` narrows JSON exactly as it narrows the table, and each section is built
+        // only if it will be emitted: `--by port --json` on a /16
+        // was materialising 65,536 host objects and two roll-up maps to discard them.
+        // `Value::Array` moves the vector; `json!(v)` would re-serialise it whole.
         let m = v.as_object_mut().expect("just built an object");
         if show(Grouping::Host) {
-            m.insert("hosts".into(), json!(hosts));
+            m.insert("hosts".into(), Value::Array(self.hosts_json()));
         }
         if show(Grouping::Network) {
-            m.insert("networks".into(), json!(networks));
+            m.insert("networks".into(), Value::Array(self.networks_json()));
         }
         if show(Grouping::Port) {
-            m.insert("ports".into(), json!(ports));
+            m.insert("ports".into(), Value::Array(self.ports_json()));
         }
         if show(Grouping::Service) {
-            m.insert("services".into(), json!(services));
+            m.insert("services".into(), Value::Array(self.services_json()));
         }
         v
     }
@@ -1601,15 +1629,15 @@ struct RecordScan {
 }
 
 /// One probe result, whether it had a row of its own or came out of a span.
-pub struct ResultRow<'a> {
-    pub target: &'a str,
-    pub port: u16,
-    pub state: &'a str,
-    pub source: &'a str,
-    pub reason: Option<&'a str>,
-    pub service: Option<&'a str>,
-    pub collapsed: bool,
-    pub total_ms: Option<f64>,
+struct ResultRow<'a> {
+    target: &'a str,
+    port: u16,
+    state: &'a str,
+    source: &'a str,
+    reason: Option<&'a str>,
+    service: Option<&'a str>,
+    collapsed: bool,
+    total_ms: Option<f64>,
 }
 
 /// Walk every probe result in a record — rows and span-expanded alike.
@@ -1676,14 +1704,25 @@ fn walk_results(path: &Path, mut f: impl FnMut(ResultRow<'_>)) -> Result<RecordS
                 let exp = expected.as_ref().expect("just built");
                 let source = e["source"].as_str().unwrap_or("");
                 let reason = e["reason"].as_str();
+                let stride = exp.stride();
+                // The target is constant across each run of `stride` indices; formatting
+                // it per probe made expanding a 65M-probe record almost entirely
+                // `IpAddr::to_string`.
+                let mut cached: Option<(u64, String)> = None;
                 for r in e["probe_indices"].as_array().into_iter().flatten() {
                     let (Some(a), Some(b)) = (r[0].as_u64(), r[1].as_u64()) else {
                         continue;
                     };
                     for i in a..=b {
-                        let Some((t, p)) = exp.at(i) else { continue };
+                        let slot = i / stride;
+                        if cached.as_ref().is_none_or(|(s, _)| *s != slot) {
+                            let Some((name, _)) = exp.at(i) else { continue };
+                            cached = Some((slot, name));
+                        }
+                        let Some(p) = exp.port_at(i) else { continue };
+                        let t = &cached.as_ref().expect("just set").1;
                         f(ResultRow {
-                            target: &t,
+                            target: t,
                             port: p,
                             state,
                             source,
@@ -2030,6 +2069,32 @@ impl Expected {
         match self {
             Expected::Pairs(p) => p.len(),
             Expected::Matrix { targets, ports } => targets.len() * ports.len(),
+        }
+    }
+
+    /// How many consecutive indices share one target.
+    ///
+    /// A span expands a *contiguous* range of indices, and a matrix scan lays them out
+    /// target-major, so every `stride` indices name the same host. A caller walking a
+    /// range can format that host once instead of once per probe — on a 1,000-port scan
+    /// that is 999 of every 1,000 allocations avoided.
+    fn stride(&self) -> u64 {
+        match self {
+            Expected::Pairs(_) => 1,
+            Expected::Matrix { ports, .. } => (ports.len() as u64).max(1),
+        }
+    }
+
+    /// The port at an index, without formatting the target.
+    fn port_at(&self, index: u64) -> Option<u16> {
+        match self {
+            Expected::Pairs(p) => p.get(index as usize).map(|(_, port)| *port),
+            Expected::Matrix { ports, .. } => {
+                let per = ports.len() as u64;
+                (per > 0)
+                    .then(|| ports.get((index % per) as usize).copied())
+                    .flatten()
+            }
         }
     }
 
@@ -2549,7 +2614,7 @@ mod tests {
         }
         for err in [
             verify(&p).err(),
-            summarize(&p, None, false, &Style::for_stream(false, true)).err(),
+            summarize(&p, None, false, &st()).err(),
             remainder(&p).err().map(|e| e.to_string()),
         ] {
             let err = err.expect("an unreadable file must be an error, not a partial answer");
@@ -3448,7 +3513,7 @@ mod tests {
         std::fs::write(&p, "").unwrap();
         let r = verify(&p).unwrap();
         assert!(r.problems.iter().any(|x| x.contains("no events")));
-        assert!(summarize(&p, None, false, &Style::for_stream(false, true)).is_err());
+        assert!(summarize(&p, None, false, &st()).is_err());
     }
 
     #[test]

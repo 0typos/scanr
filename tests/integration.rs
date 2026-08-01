@@ -1348,6 +1348,22 @@ fn help_lists_the_documented_command_tree() {
 
 // ── service labels (D31) ────────────────────────────────────────────────────
 
+/// Write a `scanr.toml` pointing at a services file, plus that file.
+///
+/// Three tests wrote these seven lines verbatim; the config schema changing meant
+/// editing all of them.
+fn services_config(d: &Path, services: &str, extra: &str) {
+    std::fs::write(d.join("my-services"), services).unwrap();
+    std::fs::write(
+        d.join("scanr.toml"),
+        format!(
+            "version = 1\n[defaults]\noutput_dir = \"out\"\nservices_file = \"{}\"\n{extra}",
+            d.join("my-services").display()
+        ),
+    )
+    .unwrap();
+}
+
 /// Write a config whose `services_file` renames a port the builtin table already knows,
 /// so a wrong precedence order is visible rather than merely unproven.
 fn services_fixture(d: &Path, extra: &str) -> (TcpListener, SocketAddr) {
@@ -1456,15 +1472,7 @@ fn a_services_file_that_is_not_there_stops_the_scan() {
 #[test]
 fn unparseable_services_lines_warn_but_still_scan() {
     let d = tempfile::tempdir().unwrap();
-    std::fs::write(d.path().join("my-services"), "ssh 22/tcp\nlonely\n").unwrap();
-    std::fs::write(
-        d.path().join("scanr.toml"),
-        format!(
-            "version = 1\n[defaults]\noutput_dir = \"out\"\nservices_file = \"{}\"\n",
-            d.path().join("my-services").display()
-        ),
-    )
-    .unwrap();
+    services_config(d.path(), "ssh 22/tcp\nlonely\n", "");
 
     let out = scanr(
         d.path(),
@@ -1588,59 +1596,6 @@ fn the_plan_marks_etc_services_as_declined() {
     );
 }
 
-#[test]
-fn output_results_labels_span_rows_from_the_configured_table() {
-    // Rows that were collapsed into a `probe_span` have no `service_label` in the record,
-    // so `get` synthesises one. That is the only reason a read-only command needs a label
-    // table at all, and moving the install out of the shared `output` entry point once
-    // dropped it entirely without a single test noticing.
-    let d = tempfile::tempdir().unwrap();
-    let closed = closed_port();
-    std::fs::write(
-        d.path().join("my-services"),
-        format!("collapsed-svc  {}/tcp\n", closed.port()),
-    )
-    .unwrap();
-    std::fs::write(
-        d.path().join("scanr.toml"),
-        format!(
-            "version = 1\n[defaults]\noutput_dir = \"out\"\nservices_file = \"{}\"\n",
-            d.path().join("my-services").display()
-        ),
-    )
-    .unwrap();
-
-    let out = scanr(
-        d.path(),
-        &[
-            "run",
-            "--targets",
-            "127.0.0.1",
-            "--ports",
-            &closed.port().to_string(),
-        ],
-    );
-    assert_eq!(code(&out), 0, "{}", stderr(&out));
-
-    let record = scanr::testsupport::find_record(&d.path().join("out")).expect("a record");
-    let got = scanr(
-        d.path(),
-        &[
-            "output",
-            "results",
-            "--states",
-            "closed",
-            record.to_str().unwrap(),
-        ],
-    );
-    assert_eq!(code(&got), 0, "{}", stderr(&got));
-    assert!(
-        stdout(&got).contains("collapsed-svc"),
-        "the span row should be labelled from the configured table: {}",
-        stdout(&got)
-    );
-}
-
 /// `summarize` against a real record — gzipped and span-collapsed, the default shape —
 /// with a configured services file.
 ///
@@ -1651,19 +1606,11 @@ fn output_results_labels_span_rows_from_the_configured_table() {
 fn summarize_and_results_agree_about_a_spanned_record() {
     let d = tempfile::tempdir().unwrap();
     let closed = closed_port();
-    std::fs::write(
-        d.path().join("my-services"),
-        format!("collapsed-svc  {}/tcp\n", closed.port()),
-    )
-    .unwrap();
-    std::fs::write(
-        d.path().join("scanr.toml"),
-        format!(
-            "version = 1\n[defaults]\noutput_dir = \"out\"\nservices_file = \"{}\"\n",
-            d.path().join("my-services").display()
-        ),
-    )
-    .unwrap();
+    services_config(
+        d.path(),
+        &format!("collapsed-svc  {}/tcp\n", closed.port()),
+        "",
+    );
 
     let (_l, open) = open_port();
     let out = scanr(

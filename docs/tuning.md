@@ -264,9 +264,11 @@ it — that set is the question being asked.
 
 `summarize` folds into per-host and per-port counters as it streams, so its cost follows
 the *shape* of the scan rather than its length: a /16 × 1,000 ports is 65,536 host
-entries and at most 65,535 port entries, however many probes ran. `--json` additionally
-builds the output tree before serializing it. The earlier 2.7 MB figure was measured
-when `summarize` only collected open ports, and no longer describes what it does.
+entries plus at most 65,535 port entries, however many probes ran. The one part that
+grows with results is the list of open ports per host — two bytes each, and only for
+ports that answered. `--json` builds the sections you asked for, so `--by port --json`
+does not materialise the host array. The earlier 2.7 MB figure was measured when
+`summarize` only collected open ports and no longer describes what it does.
 
 `results` holds what matches, so a narrow filter is cheap and `results` with no filter
 is the whole scan — use `events` if you want to stream rather than collect.

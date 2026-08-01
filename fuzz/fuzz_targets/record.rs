@@ -33,20 +33,27 @@ fuzz_target!(|data: &[u8]| {
         Some(scanr::verify::Grouping::Port),
         Some(scanr::verify::Grouping::Service),
     ] {
-        // Both with and without colour: the coloured path pads to a column width and
-        // then paints, over host and service strings the fuzzer controls.
-        for style in [
-            scanr::output::human::Style::for_stream(false, true),
-            scanr::output::human::Style::for_stream(true, false),
-        ] {
-            let _ = scanr::verify::summarize(&path, by, false, &style);
-        }
         let _ = scanr::verify::summarize(
             &path,
             by,
-            true,
+            false,
             &scanr::output::human::Style::for_stream(false, true),
         );
     }
+    // Colour and JSON once each, not once per section. Every `summarize` call re-decodes
+    // the whole record, and colour reaches only `render_scan`, which no section gates —
+    // running it per section cut throughput 2.25x for no new coverage.
+    let _ = scanr::verify::summarize(
+        &path,
+        None,
+        false,
+        &scanr::output::human::Style::for_stream(true, false),
+    );
+    let _ = scanr::verify::summarize(
+        &path,
+        None,
+        true,
+        &scanr::output::human::Style::for_stream(false, true),
+    );
     let _ = scanr::verify::remainder(&path);
 });
