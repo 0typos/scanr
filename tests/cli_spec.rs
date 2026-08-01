@@ -108,6 +108,50 @@ fn documented_run_flags() -> BTreeSet<String> {
     out
 }
 
+/// Every long flag on every subcommand, not just `run`'s.
+///
+/// `docs/cli.md` opens by claiming it lists "every command and every command-line flag",
+/// but the only guard was over `run`'s override allowlist — so a flag added to
+/// `output summarize` or `config init` could go undocumented indefinitely while the page
+/// still claimed completeness. Five had.
+fn actual_flags_everywhere() -> BTreeSet<(String, String)> {
+    fn walk(cmd: &clap::Command, prefix: &str, out: &mut BTreeSet<(String, String)>) {
+        for sub in cmd.get_subcommands() {
+            let path = if prefix.is_empty() {
+                sub.get_name().to_string()
+            } else {
+                format!("{prefix} {}", sub.get_name())
+            };
+            for a in sub.get_arguments() {
+                if let Some(l) = a.get_long()
+                    && l != "help"
+                    && !a.is_global_set()
+                {
+                    out.insert((path.clone(), format!("--{l}")));
+                }
+            }
+            walk(sub, &path, out);
+        }
+    }
+    let mut out = BTreeSet::new();
+    walk(&scanr::cli::Cli::command(), "", &mut out);
+    out
+}
+
+#[test]
+fn every_flag_on_every_command_is_documented() {
+    let text = spec();
+    let missing: Vec<_> = actual_flags_everywhere()
+        .into_iter()
+        .filter(|(_, flag)| !text.contains(flag.as_str()))
+        .map(|(cmd, flag)| format!("{cmd} {flag}"))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "docs/cli.md claims to list every flag but omits these: {missing:?}"
+    );
+}
+
 #[test]
 fn every_command_is_in_the_spec() {
     let (actual, documented) = (actual_commands(), documented_commands());

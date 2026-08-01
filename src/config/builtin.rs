@@ -209,7 +209,7 @@ version = 1
 [defaults]
 # Profile to use when a scan does not name one. Leave it unset and scanr follows the
 # transport: `proxy` for a SOCKS5 transport, `direct` otherwise. Set it to pin one.
-#   built-ins: proxy-careful | proxy | direct | direct-fast
+#   built-ins: ssh-fast | ssh | ssh-slow | proxy-careful | proxy | direct | direct-fast
 #   default: follows the transport      CLI: --profile
 # profile = "proxy"
 
@@ -225,6 +225,33 @@ output_dir = "./scanr-results"
 # outcome regardless of this setting.
 #   default: true             CLI: --open-only / --all
 open_only = true
+
+# gzip the record. Written as concatenated gzip members, so `zcat` and `zless` read it
+# and a killed scan still decodes up to its last flushed frame.
+#   default: true             CLI: --compress / --no-compress
+compress = true
+
+# Collapse repeated outcomes into `probe_span` events instead of one row per probe. A
+# large scan is mostly identical `filtered` rows; spans take that from hundreds of MB to
+# kilobytes. `open` and `error` results always keep their own row.
+#   default: true             CLI: --spans / --no-spans
+spans = true
+
+# Read what an open service volunteers on connect, without sending anything. Only
+# services that greet first say anything — SSH, SMTP, FTP, POP3, IMAP, MySQL. HTTP and
+# anything behind TLS greet nobody, so an empty banner means "said nothing unprompted".
+#   default: true             CLI: --banner / --no-banner
+banner = true
+
+# A file of `name port/proto` lines to label ports from, consulted ahead of
+# /etc/services and the built-in table. `~` is expanded.
+#   default: unset
+# services_file = "~/.config/scanr/services"
+
+# Read /etc/services for port labels. Set false for labels that depend only on this
+# config and the binary, and so match on every machine.
+#   default: true
+use_etc_services = true
 
 
 # ─── Profiles ────────────────────────────────────────────────────────────────
@@ -275,6 +302,18 @@ retries = 1
 #   default: "250ms"          CLI: (none)
 retry_delay = "250ms"
 
+# Most bytes to read from a banner. Truncation is recorded, never silent.
+#   range: 1-4096             default: 1024                 CLI: (none)
+banner_bytes = 1024
+
+# Ceiling on the wait for a greeting, not the wait itself. A greeting arrives about one
+# round trip after connect, so the actual wait scales off this host's measured connect
+# time and only approaches the ceiling on genuinely slow paths. It still matters:
+# concurrency is the worker-thread count with no queue, so a worker waiting on a silent
+# port is a worker issuing no probes.
+#   default: "500ms"          CLI: (none)
+banner_timeout = "500ms"
+
 
 # ─── Transports ──────────────────────────────────────────────────────────────
 # How connections are established. One transport per scan.
@@ -284,8 +323,8 @@ retry_delay = "250ms"
 type = "direct"
 
 [transports.lab]
-# "direct" or "socks5". SOCKS4/4a are not supported: they define only four reply
-# codes and cannot distinguish a closed port from a filtered one.
+# "direct", "socks5", "chain" or "pool". SOCKS4/4a are not supported: they define only
+# four reply codes and cannot distinguish a closed port from a filtered one.
 type = "socks5"
 
 # host:port of the proxy. Required for socks5.
@@ -324,6 +363,22 @@ dns = "auto"
 # Leave it unset and scanr warns on every scan that fidelity is unknown.
 #   default: unset            CLI: (none)
 # fidelity = "full"
+
+# A chain traverses SOCKS5 transports in order, each reached through the one before it,
+# so the destination sees only the last. Every hop must be socks5. Latency is the sum of
+# the hops, and the chain's fidelity is its weakest hop's.
+# [transports.doubled]
+# type = "chain"
+# hops = ["lab", "exit-b"]
+
+# A pool probes *across* its members rather than through them, which multiplies both the
+# local ephemeral-port ceiling and the per-proxy connection cap. Members are assigned by
+# hashing the endpoint, so a given endpoint always goes via the same member and a rerun
+# reproduces. It is not failover: a member that is down fails its share of the work
+# rather than having it taken over, and the record names the member behind every result.
+# [transports.spread]
+# type = "pool"
+# members = ["lab", "exit-b", "exit-c"]
 
 
 # ─── Target sets ─────────────────────────────────────────────────────────────
@@ -383,23 +438,129 @@ mod tests {
         assert_eq!(cfg.version, Some(1));
     }
 
+    /// The other drift direction: a field added to `RawProfile` but not documented.
+    ///
+    /// The destructuring is the guard. A new field on `RawProfile` stops this compiling
+    /// until someone names it here, which is the only way to notice a key the parser
+    /// accepts and `config init` never mentions — nothing else fails when the two
+    /// disagree, and the config file is the whole interface for a reproducible run. Nine
+    /// keys had drifted out of the template before this was written.
     #[test]
     fn template_documents_every_profile_field() {
-        // The other drift direction: a field added to RawProfile but not documented.
-        for field in [
-            "concurrency",
-            "rate",
-            "proxy_connect_timeout",
-            "handshake_timeout",
-            "connect_timeout",
-            "retries",
-            "retry_delay",
-        ] {
+        let crate::config::raw::RawProfile {
+            concurrency,
+            rate,
+            proxy_connect_timeout,
+            handshake_timeout,
+            connect_timeout,
+            retries,
+            retry_delay,
+            banner_bytes,
+            banner_timeout,
+        } = crate::config::raw::RawProfile::default();
+        // Named so the bindings are used and a typo above cannot silently pass.
+        let fields = [
+            ("concurrency", concurrency.is_none()),
+            ("rate", rate.is_none()),
+            ("proxy_connect_timeout", proxy_connect_timeout.is_none()),
+            ("handshake_timeout", handshake_timeout.is_none()),
+            ("connect_timeout", connect_timeout.is_none()),
+            ("retries", retries.is_none()),
+            ("retry_delay", retry_delay.is_none()),
+            ("banner_bytes", banner_bytes.is_none()),
+            ("banner_timeout", banner_timeout.is_none()),
+        ];
+        for (field, _) in fields {
             assert!(
                 ANNOTATED_TEMPLATE.contains(&format!("\n{field} = ")),
                 "template is missing an entry for profile field `{field}`"
             );
         }
+    }
+
+    /// Same guard for `[defaults]`. Five keys had drifted out of the template.
+    #[test]
+    fn template_documents_every_defaults_field() {
+        let crate::config::raw::RawDefaults {
+            profile,
+            transport,
+            output_dir,
+            open_only,
+            compress,
+            spans,
+            banner,
+            services_file,
+            use_etc_services,
+        } = crate::config::raw::RawDefaults::default();
+        let fields = [
+            ("profile", profile.is_none()),
+            ("transport", transport.is_none()),
+            ("output_dir", output_dir.is_none()),
+            ("open_only", open_only.is_none()),
+            ("compress", compress.is_none()),
+            ("spans", spans.is_none()),
+            ("banner", banner.is_none()),
+            ("services_file", services_file.is_none()),
+            ("use_etc_services", use_etc_services.is_none()),
+        ];
+        for (field, _) in fields {
+            assert!(
+                template_mentions(field),
+                "template is missing an entry for defaults field `{field}`"
+            );
+        }
+    }
+
+    /// Same guard for a transport. `hops` and `members` had drifted out, which meant
+    /// `config init` documented no way to reach either of the two transport types added
+    /// after it was written.
+    #[test]
+    fn template_documents_every_transport_field() {
+        let crate::config::raw::RawTransport {
+            kind,
+            address,
+            username,
+            password_env,
+            password_file,
+            password,
+            dns,
+            fidelity,
+            hops,
+            members,
+        } = crate::config::raw::RawTransport::default();
+        assert!(
+            password.is_none(),
+            "an inline password is rejected, not documented (D14)"
+        );
+        let fields = [
+            ("type", kind.is_none()),
+            ("address", address.is_none()),
+            ("username", username.is_none()),
+            ("password_env", password_env.is_none()),
+            ("password_file", password_file.is_none()),
+            ("dns", dns.is_none()),
+            ("fidelity", fidelity.is_none()),
+            ("hops", hops.is_none()),
+            ("members", members.is_none()),
+        ];
+        for (field, _) in fields {
+            assert!(
+                template_mentions(field),
+                "template is missing an entry for transport field `{field}`"
+            );
+        }
+    }
+
+    /// A key counts as documented whether it is live or commented out, since several are
+    /// deliberately shown commented so the generated file works as-is.
+    fn template_mentions(field: &str) -> bool {
+        ANNOTATED_TEMPLATE.lines().any(|l| {
+            let t = l.trim_start().trim_start_matches('#').trim_start();
+            // Split on `=` rather than matching a literal, because the template aligns
+            // some values with runs of spaces.
+            t.split_once('=')
+                .is_some_and(|(k, _)| k.trim_end() == field)
+        })
     }
 
     #[test]

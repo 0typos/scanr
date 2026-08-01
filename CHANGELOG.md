@@ -36,6 +36,23 @@ invited before then.
 
 ### Fixed
 
+- **`config init` omitted nine keys the parser accepts**: `banner`, `compress`, `spans`,
+  `services_file` and `use_etc_services` under `[defaults]`; `banner_bytes` and
+  `banner_timeout` on a profile; `hops` and `members` on a transport — so the generated
+  file documented no way to reach either transport type added after it was written. It
+  also named four built-in profiles when there are seven, and offered only "direct or
+  socks5" as transport types. The drift guards are now exhaustive destructurings of
+  `RawDefaults`, `RawProfile` and `RawTransport`, so a new key stops the build until it
+  is documented.
+- **`transport list` printed `direct` twice** for any config that redefines it — which is
+  what `config init` generates, so every freshly initialised config reported two
+  transports where there is one.
+- **`docs/cli.md` claimed to list every flag but guarded only `run`'s**, and omitted
+  `config init --force`, `output summarize --by` / `--json`, and `output results --hosts`.
+  The guard now covers every subcommand.
+- **`docs/output-schema.md` documented `--json` on `output results`**, which is
+  `--format json`; `--json` remains correct for `output summarize`.
+- **`RawDefaults::banner` documented itself as off by default.** It is on.
 - **A usage error exited `2`, colliding with "the scan failed after starting".** clap's
   default exit code was never overridden, so a misspelled flag was indistinguishable from
   a scan that broke mid-run — a wrapper retrying on 2 would retry the typo forever.

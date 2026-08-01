@@ -125,8 +125,9 @@ pub struct RawDefaults {
     pub open_only: Option<bool>,
     pub compress: Option<bool>,
     pub spans: Option<bool>,
-    /// Read what open services volunteer. Off by default: it changes what the scan does
-    /// to a target, so it is asked for rather than assumed.
+    /// Read what open services volunteer on connect. On by default; `--no-banner` turns
+    /// it off. Nothing is ever sent — only services that greet first say anything — so it
+    /// adds no traffic to the target beyond the connection the scan already made.
     pub banner: Option<bool>,
     /// A file of `name port/proto` lines to label ports from, ahead of `/etc/services`
     /// and the builtin table. `~` is expanded.

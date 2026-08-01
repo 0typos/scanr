@@ -1023,8 +1023,15 @@ fn cmd_transport(cli: &Cli, cmd: &TransportCmd) -> Result<u8, ConfigError> {
         TransportCmd::List => {
             let mut out = std::io::stdout();
             let _ = writeln!(out, "{:<16}{:<10}ADDRESS", "NAME", "TYPE");
-            let _ = writeln!(out, "{:<16}{:<10}-", "direct", "direct");
-            for name in files.transport_names() {
+            // Only when the config has not defined its own. Redefining `direct` is
+            // explicitly allowed — `config init` generates exactly that — and listing
+            // both the implicit and the configured one made every freshly initialised
+            // config report two transports where there is one.
+            let names = files.transport_names();
+            if !names.iter().any(|n| n == "direct") {
+                let _ = writeln!(out, "{:<16}{:<10}-", "direct", "direct");
+            }
+            for name in names {
                 let raw = files.pick(|c| c.transports.get(&name).cloned());
                 if let Some((t, _)) = raw {
                     let _ = writeln!(
