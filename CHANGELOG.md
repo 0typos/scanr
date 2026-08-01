@@ -34,6 +34,12 @@ invited before then.
   working unchanged. A version 1 reader correctly refuses a version 2 record rather than
   expanding it to the wrong endpoints, which is why the version was bumped.
 
+- **The schema now says which enumerations are closed.** `state` and `source` are fixed
+  within a version and safe to match exhaustively; `transport.type`, the fidelity fields,
+  `scan_warning.code` and the terminal `error_code` are open and need a default branch.
+  `chain` and `pool` joined `transport.type` within version 1 without a bump, which is the
+  distinction the new table draws. A test pins the closed sets in both directions.
+
 ### Fixed
 
 - **`config init` omitted nine keys the parser accepts**: `banner`, `compress`, `spans`,
