@@ -36,6 +36,13 @@ invited before then.
 
 ### Fixed
 
+- **A usage error exited `2`, colliding with "the scan failed after starting".** clap's
+  default exit code was never overridden, so a misspelled flag was indistinguishable from
+  a scan that broke mid-run — a wrapper retrying on 2 would retry the typo forever.
+  Usage errors now exit `1` as `docs/cli.md` has always said; `--help` and `--version`
+  exit `0`.
+- **The record's `exit_code` ignored writer failures**, so a run the shell saw exit `3`
+  could record `0`. It now goes through the same helper the process exits by.
 - **`output verify` accepted only the exact schema version this build writes**, so it
   would have rejected every older record the moment the version moved. It now accepts any
   version the build can read and names them when it refuses.

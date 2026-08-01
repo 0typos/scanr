@@ -167,6 +167,37 @@ fn the_documented_exit_codes_match_the_code() {
     }
 }
 
+/// A usage error must exit `1`, not clap's default `2`.
+///
+/// `2` means "the scan failed after starting", so the two are not interchangeable: a
+/// wrapper that retries on 2 would retry a misspelled flag forever, and one that treats 2
+/// as a network fault would report a typo as an outage. `--help` and `--version` are a
+/// success. These run the real binary, because the collision lived in `main`'s use of
+/// `Cli::parse` and no amount of testing the parser would have shown it.
+#[test]
+fn usage_errors_exit_one_and_help_exits_zero() {
+    const BIN: &str = env!("CARGO_BIN_EXE_scanr");
+    for (args, want, what) in [
+        (vec!["--help"], 0, "--help"),
+        (vec!["--version"], 0, "--version"),
+        (vec!["run", "--no-such-flag"], 1, "an unknown flag"),
+        (vec!["no-such-subcommand"], 1, "an unknown subcommand"),
+        (vec![], 1, "no arguments"),
+        (vec!["run", "--ports"], 1, "a flag missing its value"),
+    ] {
+        let out = std::process::Command::new(BIN)
+            .args(&args)
+            .output()
+            .expect("binary should run");
+        assert_eq!(
+            out.status.code(),
+            Some(want),
+            "{what} exited {:?}, expected {want}",
+            out.status.code()
+        );
+    }
+}
+
 // ── the profile table ───────────────────────────────────────────────────────
 
 /// `docs/configuration.md` must describe the profiles that exist, with their real values.

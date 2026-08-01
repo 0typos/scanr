@@ -469,7 +469,19 @@ fn spawn_signal_watcher(cancel: Cancel) {
 // ── entry point ─────────────────────────────────────────────────────────────
 
 pub fn main() -> ExitCode {
-    let cli = Cli::parse();
+    // Not `Cli::parse()`: clap exits `2` on a usage error, and `2` is scanr's "the scan
+    // failed after starting". A script that retries on 2 would retry a misspelled flag
+    // forever, and one that treats 2 as "the network broke" would report a typo as an
+    // outage. Usage errors are `1` here, as documented, and `--help` / `--version` are a
+    // success rather than an error.
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            // Routes itself: stdout for help and version, stderr for a real error.
+            let _ = e.print();
+            return ExitCode::from(if e.use_stderr() { EXIT_USAGE } else { EXIT_OK });
+        }
+    };
     ExitCode::from(dispatch(cli))
 }
 
@@ -583,10 +595,9 @@ fn cmd_run(cli: &Cli, scan: Option<&str>, overrides: &OverrideArgs) -> Result<u8
     match crate::run::execute(plan, cancel, &opts) {
         Ok(summary) => {
             crate::run::print_summary(&summary, cli.quiet);
-            if summary.writer_failed {
-                return Ok(EXIT_WRITER_FAILED);
-            }
-            Ok(summary.termination.exit_code())
+            // Same helper the record's `exit_code` field goes through, so the number the
+            // process exits with and the number written into the record cannot drift.
+            Ok(exit_code_for(summary.termination, summary.writer_failed))
         }
         Err(e) => {
             let _ = writeln!(std::io::stderr(), "error: {e}");
