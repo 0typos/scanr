@@ -84,6 +84,32 @@ pub struct ResultPrinter {
     open_only: bool,
 }
 
+/// A banner rendered safe for a terminal.
+///
+/// **This is a security boundary, not cosmetics.** The bytes come from a service that
+/// scanr does not control, and a terminal will act on what it is given: escape sequences
+/// can move the cursor, rewrite lines that have already scrolled past, change the title,
+/// or on some emulators trigger a reply the shell then reads as input. A scanner that
+/// prints attacker bytes verbatim hands that control away.
+///
+/// So the display form is printable ASCII only — everything else becomes `.`, the way a
+/// hex dump has always done it — collapsed onto one line and truncated. The record keeps
+/// the bytes exactly as they arrived; this is only what reaches a screen.
+pub fn safe_banner(bytes: &[u8], width: usize) -> String {
+    let mut out: String = bytes
+        .iter()
+        .take(width)
+        .map(|b| match b {
+            0x20..=0x7e => *b as char,
+            _ => '.',
+        })
+        .collect();
+    if bytes.len() > width {
+        out.push('…');
+    }
+    out
+}
+
 impl ResultPrinter {
     pub fn new(target_width: usize, open_only: bool, no_color: bool) -> Self {
         let tty = std::io::stdout().is_terminal();
@@ -111,6 +137,8 @@ impl ResultPrinter {
     const LABEL_W: usize = 14;
     /// `99999.9ms`
     const LATENCY_W: usize = 9;
+    /// Enough to recognise a greeting; the record has all of it.
+    const BANNER_W: usize = 48;
     const GAP: usize = 2;
 
     /// One result line. Format:
@@ -132,7 +160,10 @@ impl ResultPrinter {
             if s.ends_with(' ') {
                 s.pop();
             }
-            return format!("{s} {latency}");
+            return match &outcome.banner {
+                Some(b) => format!("{s} {latency} {}", safe_banner(b, Self::BANNER_W)),
+                None => format!("{s} {latency}"),
+            };
         }
 
         let pad = |n: usize| " ".repeat(n);
@@ -152,6 +183,12 @@ impl ResultPrinter {
         // Right-align the latency on its visible width.
         line.push_str(&pad(Self::LATENCY_W.saturating_sub(latency.len())));
         line.push_str(&self.style.dim(&latency));
+
+        // Last, because it is the only field whose length a stranger chooses.
+        if let Some(b) = &outcome.banner {
+            line.push_str(&pad(Self::GAP));
+            line.push_str(&self.style.dim(&safe_banner(b, Self::BANNER_W)));
+        }
         line
     }
 
@@ -229,6 +266,42 @@ impl Progress {
 
 #[cfg(test)]
 mod tests {
+    use super::safe_banner;
+
+    /// The security property, not a formatting preference.
+    ///
+    /// A banner is bytes chosen by a stranger, and a terminal acts on what it is given:
+    /// `ESC [ 2J` clears the screen, `ESC ] 0 ; … BEL` rewrites the window title. Printing
+    /// them verbatim hands a scanned host control of the operator's terminal.
+    #[test]
+    fn a_hostile_banner_cannot_reach_the_terminal() {
+        let evil = b"\x1b[2J\x1b]0;pwned\x07EVIL";
+        let shown = safe_banner(evil, 64);
+        assert!(!shown.contains('\x1b'), "escape survived: {shown:?}");
+        assert!(!shown.contains('\x07'), "bell survived: {shown:?}");
+        assert_eq!(shown, ".[2J.]0;pwned.EVIL");
+    }
+
+    #[test]
+    fn a_normal_banner_stays_readable() {
+        let ssh = b"SSH-2.0-OpenSSH_9.6p1 Debian-2\r\n";
+        assert_eq!(safe_banner(ssh, 64), "SSH-2.0-OpenSSH_9.6p1 Debian-2..");
+    }
+
+    /// A stranger also chooses the *length*, so the display width is ours, not theirs.
+    #[test]
+    fn a_long_banner_is_truncated_and_marked() {
+        let long = vec![b'A'; 4096];
+        let shown = safe_banner(&long, 48);
+        assert_eq!(shown.chars().count(), 49, "48 plus the ellipsis: {shown:?}");
+        assert!(shown.ends_with('…'));
+    }
+
+    #[test]
+    fn nothing_read_renders_as_nothing() {
+        assert_eq!(safe_banner(b"", 48), "");
+    }
+
     use super::*;
     use crate::probe::{Phases, Source};
     use std::time::Duration;
@@ -243,6 +316,7 @@ mod tests {
                 ..Default::default()
             },
             pressure: None,
+            banner: None,
         }
     }
 

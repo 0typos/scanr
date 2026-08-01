@@ -1656,3 +1656,202 @@ fn summarize_and_results_agree_about_a_spanned_record() {
         "{svcs:?}"
     );
 }
+
+// ── banner grabbing ─────────────────────────────────────────────────────────
+
+fn events_in(dir: &Path) -> Vec<Value> {
+    let rec = scanr::testsupport::find_record(dir)
+        .unwrap_or_else(|| panic!("no record under {}", dir.display()));
+    scanr::testsupport::record_text(&rec)
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("valid JSON per line"))
+        .collect()
+}
+
+fn probes(events: &[Value]) -> impl Iterator<Item = &Value> {
+    events.iter().filter(|e| e["type"] == "probe_result")
+}
+
+fn config_of(events: &[Value]) -> &Value {
+    events
+        .iter()
+        .find(|e| e["type"] == "scan_config")
+        .expect("a scan_config")
+}
+
+/// A listener that greets on connect, the way SSH and SMTP do.
+fn greeting_port(greeting: &'static [u8]) -> (TcpListener, SocketAddr) {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let a = l.local_addr().unwrap();
+    let l2 = l.try_clone().unwrap();
+    std::thread::spawn(move || {
+        for s in l2.incoming().flatten() {
+            use std::io::Write;
+            let mut s = s;
+            let _ = s.write_all(greeting);
+        }
+    });
+    (l, a)
+}
+
+#[test]
+fn a_banner_is_read_only_when_asked_for() {
+    let d = tempfile::tempdir().unwrap();
+    let (_l, addr) = greeting_port(b"SSH-2.0-OpenSSH_9.6p1\r\n");
+    let port = addr.port().to_string();
+
+    // Default: nothing is read, and the record says so.
+    let off = scanr(
+        d.path(),
+        &[
+            "run",
+            "--targets",
+            "127.0.0.1",
+            "--ports",
+            &port,
+            "--output-dir",
+            "off",
+        ],
+    );
+    assert_eq!(code(&off), 0, "{}", stderr(&off));
+    let events = events_in(&d.path().join("off"));
+    let seen: Vec<&Value> = probes(&events).map(|p| &p["banner"]).collect();
+    assert!(
+        !seen.is_empty(),
+        "the open port should still have produced a result"
+    );
+    assert!(
+        seen.iter().all(|b| b.is_null()),
+        "no banner was asked for: {seen:?}"
+    );
+    assert_eq!(config_of(&events)["banner"]["enabled"], false);
+
+    // Asked for: the greeting is recorded verbatim.
+    let on = scanr(
+        d.path(),
+        &[
+            "run",
+            "--targets",
+            "127.0.0.1",
+            "--ports",
+            &port,
+            "--banner",
+            "--output-dir",
+            "on",
+        ],
+    );
+    assert_eq!(code(&on), 0, "{}", stderr(&on));
+    let events = events_in(&d.path().join("on"));
+    let probe = probes(&events).next().expect("a result");
+    assert_eq!(probe["banner"], "SSH-2.0-OpenSSH_9.6p1\r\n");
+    assert_eq!(probe["banner_bytes"], 23);
+
+    let cfg = config_of(&events);
+    assert_eq!(cfg["banner"]["enabled"], true);
+    // The claim that makes this safe to enable without a separate consent story.
+    assert_eq!(cfg["banner"]["sent_bytes"], 0);
+}
+
+/// A port that opens and waits to be addressed — HTTP, and everything behind TLS.
+/// It must read as "said nothing", not as a failure.
+#[test]
+fn a_silent_service_yields_no_banner_and_is_still_open() {
+    let d = tempfile::tempdir().unwrap();
+    let (_l, addr) = open_port();
+    let out = scanr(
+        d.path(),
+        &[
+            "run",
+            "--targets",
+            "127.0.0.1",
+            "--ports",
+            &addr.port().to_string(),
+            "--banner",
+            "--output-dir",
+            "out",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert!(stdout(&out).contains("open"), "{}", stdout(&out));
+
+    let events = events_in(&d.path().join("out"));
+    let seen: Vec<&Value> = probes(&events).map(|p| &p["banner"]).collect();
+    assert!(
+        seen.iter().all(|b| b.is_null()),
+        "it volunteered nothing, so no banner should be recorded: {seen:?}"
+    );
+}
+
+/// Escape sequences from a scanned host must not reach the operator's terminal.
+#[test]
+fn a_hostile_banner_is_neutralised_on_screen_but_kept_in_the_record() {
+    let d = tempfile::tempdir().unwrap();
+    let (_l, addr) = greeting_port(b"\x1b[2J\x1b]0;pwned\x07EVIL");
+    let out = scanr(
+        d.path(),
+        &[
+            "run",
+            "--targets",
+            "127.0.0.1",
+            "--ports",
+            &addr.port().to_string(),
+            "--banner",
+            "--output-dir",
+            "out",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let shown = stdout(&out);
+    assert!(!shown.contains('\x1b'), "escape reached stdout: {shown:?}");
+    assert!(!shown.contains('\x07'), "bell reached stdout: {shown:?}");
+    assert!(shown.contains(".[2J.]0;pwned.EVIL"), "{shown}");
+
+    // The record is evidence, so it keeps what was actually sent.
+    let events = events_in(&d.path().join("out"));
+    let probe = probes(&events).next().expect("a result");
+    assert_eq!(probe["banner"], "\x1b[2J\x1b]0;pwned\x07EVIL");
+}
+
+#[test]
+fn the_nmap_handoff_runs_end_to_end() {
+    let d = tempfile::tempdir().unwrap();
+    let (_l, open) = open_port();
+    let closed = closed_port();
+    let out = scanr(
+        d.path(),
+        &[
+            "run",
+            "--targets",
+            "127.0.0.1",
+            "--ports",
+            &format!("{},{}", open.port(), closed.port()),
+            "--output-dir",
+            "out",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let rec = scanr::testsupport::find_record(&d.path().join("out")).unwrap();
+
+    let nmap = scanr(
+        d.path(),
+        &[
+            "output",
+            "results",
+            "--states",
+            "open",
+            "--format",
+            "nmap",
+            rec.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code(&nmap), 0, "{}", stderr(&nmap));
+    let cmd = stdout(&nmap);
+    assert!(cmd.starts_with("nmap -sV -Pn -n -p "), "{cmd}");
+    assert!(cmd.contains(&open.port().to_string()), "{cmd}");
+    assert!(
+        !cmd.contains(&closed.port().to_string()),
+        "a closed port must not be handed on: {cmd}"
+    );
+    // No stray warning when the caller did filter to open.
+    assert!(!stderr(&nmap).contains("not open"), "{}", stderr(&nmap));
+}

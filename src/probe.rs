@@ -92,9 +92,19 @@ pub struct ProbeOutcome {
     /// continues. Typed rather than inferred from `reason`, so the scan-level warning
     /// cannot drift from the condition that produced it.
     pub pressure: Option<crate::diag::Pressure>,
+    /// Bytes the service volunteered on connect, when banner grabbing is on and it said
+    /// anything. Raw: never decoded here, because what a service sends is its choice and
+    /// interpreting it is the reader's job.
+    pub banner: Option<Vec<u8>>,
 }
 
 impl ProbeOutcome {
+    /// Attach what the service volunteered, if anything.
+    pub fn with_banner(mut self, banner: Option<Vec<u8>>) -> Self {
+        self.banner = banner;
+        self
+    }
+
     pub fn open(phases: Phases, source: Source) -> Self {
         Self {
             state: State::Open,
@@ -102,6 +112,7 @@ impl ProbeOutcome {
             reason: None,
             phases,
             pressure: None,
+            banner: None,
         }
     }
 
@@ -112,6 +123,7 @@ impl ProbeOutcome {
             reason: Some(reason.into()),
             phases,
             pressure: None,
+            banner: None,
         }
     }
 

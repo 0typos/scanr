@@ -634,3 +634,58 @@ this counts ports a file layer *claimed*, not ports it *relabelled*. `/etc/servi
 agrees with the builtin that 22 is `ssh`, and 22 still belongs to the layer that got
 there first. Measuring differing labels instead gives 27, which is a real number
 answering a question nobody asked.
+
+### D32 — Banners are read, never solicited; interrogation is handed to nmap
+
+**Status:** accepted · **Alternatives:** active service probes, no banners at all
+
+`service_label` was always a guess from the port number — D31 made it a better-sourced
+guess and could not make it evidence. A banner is evidence. `--banner` reads what an open
+service volunteers on connect and records it verbatim.
+
+**Passive only, and that is the whole design.** Not one byte is written; `scan_config`
+records `banner.sent_bytes: 0` so a record can be audited on the point. Connecting to a
+port and listening is what a connect scan already does, so this needs no consent story
+beyond the one the tool already has. Sending a protocol probe is a different act — it
+addresses the service rather than observing it — and would need its own justification,
+its own flag, and its own paragraph in `security.md`.
+
+**The cost is coverage, and it is severe.** Only services that greet first say anything:
+SSH, SMTP, FTP, POP3, IMAP, MySQL, Telnet. HTTP does not, and neither does anything
+behind TLS, which on a modern network is most of what anyone wants identified. This is
+stated in the CLI help, the schema, and the guide, because an absent banner meaning
+"said nothing unprompted" and meaning "nothing there" would otherwise be indistinguishable
+to a reader.
+
+**Off by default.** It changes what the scan does to a target, so it is asked for. Same
+reasoning as every other knob here: clear limits over hidden magic.
+
+**Limits.** 1024 bytes by default, hard-capped at 4096: a greeting is tens of bytes (SSH
+~40, SMTP ~100) and the cap exists so one hostile service cannot inflate a record. 500 ms,
+because a service that volunteers a greeting does it immediately — this is a read on an
+established connection, not another connect. One `read`, not a loop: the protocols above
+all write their greeting with a single `write`, so looping would buy truncation resistance
+nobody needs at the price of a second timeout to wait out.
+
+**Displaying a banner is a security boundary.** The bytes are chosen by the scanned host
+and a terminal acts on what it is given — `ESC [ 2J` clears the screen, `ESC ] 0 ;` rewrites
+the title, and on some emulators a query sequence produces a reply the shell then reads as
+input. Banners reach the screen as printable ASCII only, everything else replaced with `.`.
+The record keeps the original bytes; only the display is sanitised. This is tested against
+a fixture that sends exactly those sequences.
+
+**Interrogation is not ours to do.** `nmap -sV` rests on a signature database two decades
+deep, and a worse copy of it would be worse than useless — it would be confidently wrong.
+`output results --format nmap` emits runnable `nmap -sV` commands instead, grouped by the
+exact set of ports open on each host so nothing is offered a port it never had, with
+`-Pn -n` to stop nmap repeating the liveness and resolution work already done. Pointing
+nmap at the fraction of endpoints that answered is dramatically faster than letting it
+scan everything.
+
+`--format list` serves the same purpose for `httpx`, `tlsx` and `nuclei`, which between
+them cover the HTTP and TLS surface a passive read cannot reach.
+
+**Revisit trigger.** A TLS `ClientHello` is the one probe worth reconsidering: it is the
+most standard thing that can be sent and it identifies a service definitively through the
+certificate, SNI and ALPN. It would still be an active probe and belongs behind its own
+flag, after the consent story above is written down properly.

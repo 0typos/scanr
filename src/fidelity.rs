@@ -563,6 +563,7 @@ mod tests {
             connect_timeout: Duration::from_millis(600),
             retries: 0,
             retry_delay: Duration::ZERO,
+            banner: None,
         }
     }
 

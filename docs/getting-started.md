@@ -182,7 +182,8 @@ by host (1 host):
 
 `summarize` also breaks the record down by network, port and service; `--by <section>`
 narrows it and `--json` makes it machine-readable. To look at individual results, use
-`scanr output results`, which can filter by host, port and state.
+`scanr output results`, which filters by host, port and state and can hand what it finds
+to another tool with `--format nmap` or `--format list`.
 
 A file still named `.partial` means the process died before finalizing. The results in it
 are valid; `verify` will tell you it was truncated. With the default settings that is

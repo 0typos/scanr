@@ -11,7 +11,7 @@ use std::fmt;
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::time::Duration;
 
-use crate::plan::types::{Fidelity, Timing, TransportKind};
+use crate::plan::types::{Banner, Fidelity, Timing, TransportKind};
 use crate::probe::ProbeOutcome;
 
 pub use direct::DirectTransport;
@@ -75,6 +75,34 @@ pub fn build(resolved: &crate::plan::types::ResolvedTransport) -> Box<dyn Transp
             resolved.fidelity,
         )),
     }
+}
+
+/// Read whatever an open service volunteers, without sending anything.
+///
+/// **Passive by construction: not one byte is written.** That keeps "we connected and
+/// listened" literally true, which is a materially different claim from having addressed
+/// the service — and it is why this needs no consent story beyond the one a connect scan
+/// already has. Sending protocol probes would be a different feature with a different
+/// justification (D32).
+///
+/// The cost is coverage, and it is large: only services that greet first say anything
+/// here. SSH, SMTP, FTP, POP3, IMAP, MySQL and Telnet do. HTTP does not, and neither does
+/// anything behind TLS, which is most of a modern network. An empty banner means "said
+/// nothing unprompted", never "nothing is there".
+///
+/// One read, bounded by `opts.timeout` and `opts.bytes`. Greetings arrive in a single
+/// segment — the protocols above all write theirs with one `write()` — so looping would
+/// buy truncation resistance nobody needs at the cost of a second timeout to wait out.
+pub fn read_banner(stream: &TcpStream, opts: &Banner) -> Option<Vec<u8>> {
+    use std::io::Read;
+
+    stream.set_read_timeout(Some(opts.timeout)).ok()?;
+    let mut buf = vec![0u8; opts.bytes as usize];
+    // A timeout, a reset, or a server that simply says nothing all land here, and all
+    // three mean the same thing to a reader: it volunteered nothing.
+    let n = (&*stream).read(&mut buf).ok()?;
+    buf.truncate(n);
+    (!buf.is_empty()).then_some(buf)
 }
 
 /// Close a probe socket with `SO_LINGER{on,0}` so it sends RST instead of FIN and skips

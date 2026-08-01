@@ -68,6 +68,7 @@ your shell history.
 --output-dir <path>         --seed <hex>
 --open-only / --all         --compress / --no-compress
 --spans / --no-spans
+--banner / --no-banner
 --config <path>
 --verbose / -v              --quiet / -q
 --no-color                  --allow-large-range
@@ -80,11 +81,46 @@ A few that are not self-explanatory:
 - `--pairs` takes exact `host:port` endpoints instead of a target × port matrix. This is
   what makes `scanr output remainder … | scanr run --pairs -` resume without re-probing
   anything that already finished.
+- `--banner` reads what open services volunteer on connect, **without sending anything**.
+  Off by default. Only services that greet first say anything — SSH, SMTP, FTP, POP3,
+  IMAP, MySQL — so an empty banner means "said nothing unprompted", not "nothing there".
+  HTTP and anything behind TLS greet nobody.
 - `--resumed-from` records which scan is being continued. You rarely type it: `remainder`
   emits it as a `# resumed-from:` comment and `run` picks it up from the pipe.
 
 `transport test` also takes `--known-open`, `--known-closed` and `--calibrate`. Those
 describe what to measure rather than how to scan, so they are not scan overrides.
+
+## Handing results to another tool
+
+`scanr` is good at finding open ports quickly through a proxy. `nmap -sV` is good at
+saying what is behind them. `output results --format` hands one to the other:
+
+```console
+$ scanr output results --states open --format nmap scan-*.jsonl.gz
+nmap -sV -Pn -n -p 22 10.0.0.9 10.0.0.10
+nmap -sV -Pn -n -p 22,80,443 10.0.0.2
+
+$ scanr output results --states open --format list scan-*.jsonl.gz | httpx
+10.0.0.2:80
+10.0.0.2:443
+```
+
+| format | for |
+|---|---|
+| `table` | reading (default) |
+| `json` | one JSON object per result |
+| `nmap` | runnable `nmap -sV` commands, one per distinct set of open ports |
+| `list` | `host:port` per line — what `httpx`, `tlsx` and `nuclei` read from stdin |
+
+The `nmap` form groups hosts by the exact ports found open on them, so no host is handed
+a port that was never open on it, and `-Pn -n` stop nmap repeating the liveness and DNS
+work `scanr` already did. Pointing nmap at the fraction of endpoints that answered is far
+faster than letting it scan everything, and it keeps nmap's signature database rather
+than reimplementing it badly.
+
+Filter to `--states open` — the other states are rarely what you want to hand on, and
+`scanr` will say so on stderr if you forget.
 
 ## stdout and stderr
 
