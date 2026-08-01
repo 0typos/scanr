@@ -9,7 +9,7 @@
 //! `Vec<Value>` cost about 11x the file size, so reading that record back took 4.2 GB.
 //! The commands for inspecting a big scan were the ones a big scan broke.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -784,14 +784,14 @@ fn find_exposed_secret(v: &Value) -> Option<String> {
     walk(v, "")
 }
 
-pub fn summarize(path: &Path) -> Result<String, String> {
+pub fn summarize(path: &Path, by: Grouping) -> Result<String, String> {
     // Retains the header, the config, the terminal event, and one formatted line per
     // *open* port. Everything else is dropped as it goes by: the closed and filtered
     // rows are the bulk of a large record and none of them are printed.
     let mut start: Option<Value> = None;
     let mut config: Option<Value> = None;
     let mut terminal: Option<Value> = None;
-    let mut open: Vec<String> = Vec::new();
+    let mut open: Vec<OpenPort> = Vec::new();
 
     for line in stream(path)? {
         let line = line?;
@@ -807,16 +807,11 @@ pub fn summarize(path: &Path) -> Result<String, String> {
             terminal = Some(e.clone());
         }
         if k == "probe_result" && e["state"] == "open" {
-            open.push(
-                format!(
-                    "  {}:{}/tcp  {}",
-                    e["target"].as_str().unwrap_or("?"),
-                    e["port"].as_u64().unwrap_or(0),
-                    e["service_label"].as_str().unwrap_or("")
-                )
-                .trim_end()
-                .to_string(),
-            );
+            open.push(OpenPort {
+                target: e["target"].as_str().unwrap_or("?").to_string(),
+                port: e["port"].as_u64().unwrap_or(0) as u16,
+                service: e["service_label"].as_str().unwrap_or("").to_string(),
+            });
         }
     }
 
@@ -909,13 +904,177 @@ pub fn summarize(path: &Path) -> Result<String, String> {
     }
 
     if !open.is_empty() {
-        let _ = writeln!(s, "\nopen ports:");
-        open.sort();
-        for l in open {
-            let _ = writeln!(s, "{l}");
-        }
+        s.push_str(&render_open(&mut open, by));
     }
     Ok(s)
+}
+
+/// One open result, kept structured so it can be grouped rather than only listed.
+struct OpenPort {
+    target: String,
+    port: u16,
+    service: String,
+}
+
+/// How `summarize` arranges the open ports it found.
+///
+/// Only open results are grouped, and that is not a limitation so much as the shape of
+/// the record: `open` is never collapsed into a span, so it is the one state guaranteed
+/// to have a row per probe. Counts for the other states come from the terminal event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Grouping {
+    /// One line per endpoint, the original behaviour.
+    #[default]
+    Flat,
+    /// What is each machine running?
+    Host,
+    /// Who is running this port?
+    Port,
+    /// Same, keyed by the service label rather than the number.
+    Service,
+}
+
+impl Grouping {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "flat" => Some(Self::Flat),
+            "host" => Some(Self::Host),
+            "port" => Some(Self::Port),
+            "service" => Some(Self::Service),
+            _ => None,
+        }
+    }
+
+    pub const ALL: &'static [&'static str] = &["flat", "host", "port", "service"];
+}
+
+/// Ordering key for a host: family, then address bytes, then name.
+type HostKey = (u8, [u8; 16], String);
+
+/// Sort hosts the way a reader expects: numerically when they are addresses.
+///
+/// Sorting the formatted strings put `10.0.0.10` before `10.0.0.2`, which looks like a
+/// bug in the scan rather than in the sort.
+fn host_key(target: &str) -> HostKey {
+    match target.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(a)) => {
+            let mut k = [0u8; 16];
+            k[12..].copy_from_slice(&a.octets());
+            (0, k, String::new())
+        }
+        Ok(std::net::IpAddr::V6(a)) => (1, a.octets(), String::new()),
+        // Hostnames sort after addresses, among themselves alphabetically.
+        Err(_) => (2, [0u8; 16], target.to_string()),
+    }
+}
+
+fn plural(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("{n} {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
+}
+
+fn label(service: &str) -> &str {
+    if service.is_empty() { "-" } else { service }
+}
+
+fn render_open(open: &mut [OpenPort], by: Grouping) -> String {
+    let mut s = String::new();
+    match by {
+        Grouping::Flat => {
+            open.sort_by(|a, b| {
+                host_key(&a.target)
+                    .cmp(&host_key(&b.target))
+                    .then(a.port.cmp(&b.port))
+            });
+            let _ = writeln!(s, "\nopen ports:");
+            for o in open.iter() {
+                let line = format!("  {}:{}/tcp  {}", o.target, o.port, o.service);
+                let _ = writeln!(s, "{}", line.trim_end());
+            }
+        }
+        Grouping::Host => {
+            let mut by_host: BTreeMap<HostKey, (&str, Vec<&OpenPort>)> = BTreeMap::new();
+            for o in open.iter() {
+                by_host
+                    .entry(host_key(&o.target))
+                    .or_insert_with(|| (o.target.as_str(), Vec::new()))
+                    .1
+                    .push(o);
+            }
+            let width = by_host
+                .values()
+                .map(|(t, _)| t.len())
+                .max()
+                .unwrap_or(15)
+                .max(15);
+            let _ = writeln!(
+                s,
+                "\nopen ports by host ({}):",
+                plural(by_host.len(), "host")
+            );
+            for (target, mut ports) in by_host.into_values() {
+                ports.sort_by_key(|o| o.port);
+                let list: Vec<String> = ports
+                    .iter()
+                    .map(|o| format!("{}/{}", o.port, label(&o.service)))
+                    .collect();
+                let _ = writeln!(s, "  {target:<width$}  {}", list.join("  "));
+            }
+        }
+        Grouping::Port | Grouping::Service => {
+            let mut groups: BTreeMap<String, Vec<&OpenPort>> = BTreeMap::new();
+            for o in open.iter() {
+                let key = if by == Grouping::Port {
+                    format!("{}/{}", o.port, label(&o.service))
+                } else {
+                    label(&o.service).to_string()
+                };
+                groups.entry(key).or_default().push(o);
+            }
+            // Commonest first: on a sweep, "what is everywhere" is the question.
+            let mut rows: Vec<(String, Vec<&OpenPort>)> = groups.into_iter().collect();
+            rows.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
+            let width = rows
+                .iter()
+                .map(|(k, _)| k.len())
+                .max()
+                .unwrap_or(12)
+                .max(12);
+            let noun = if by == Grouping::Port {
+                "port"
+            } else {
+                "service"
+            };
+            let _ = writeln!(s, "\nopen ports by {noun} ({} distinct):", rows.len());
+            for (key, mut hits) in rows {
+                hits.sort_by(|a, b| {
+                    host_key(&a.target)
+                        .cmp(&host_key(&b.target))
+                        .then(a.port.cmp(&b.port))
+                });
+                let hosts: Vec<String> = hits
+                    .iter()
+                    .map(|o| {
+                        if by == Grouping::Port {
+                            o.target.clone()
+                        } else {
+                            format!("{}:{}", o.target, o.port)
+                        }
+                    })
+                    .collect();
+                let _ = writeln!(
+                    s,
+                    "  {key:<width$}  {:>4}  {}",
+                    hits.len(),
+                    hosts.join("  ")
+                );
+            }
+        }
+    }
+    s
 }
 
 /// Endpoints that were not probed, suitable for `scanr run --pairs -`.
@@ -1709,7 +1868,7 @@ mod tests {
         }
         for err in [
             verify(&p).err(),
-            summarize(&p).err(),
+            summarize(&p, Grouping::Flat).err(),
             remainder(&p).err().map(|e| e.to_string()),
         ] {
             let err = err.expect("an unreadable file must be an error, not a partial answer");
@@ -2016,13 +2175,121 @@ mod tests {
     fn summarize_lists_open_ports() {
         let d = tempfile::tempdir().unwrap();
         let p = write(d.path(), "s.jsonl", &good_events());
-        let out = summarize(&p).unwrap();
+        let out = summarize(&p, Grouping::Flat).unwrap();
         assert!(out.contains("open ports:"), "{out}");
         assert!(out.contains("10.0.0.0:80/tcp  http"), "{out}");
         assert!(
             out.contains("1 open, 1 closed, 1 filtered, 1 error"),
             "{out}"
         );
+    }
+
+    fn multi_host_record() -> Vec<Value> {
+        let mut e = vec![
+            json!({"type":"scan_started","seq":0,"ts":"2026-07-31T12:00:00.000Z","scan_id":"g1","schema_version":1}),
+            json!({"type":"scan_config","seq":1,"ts":"2026-07-31T12:00:00.000Z","scan_id":"g1","scan_name":"s",
+                   "targets":{"spec":["10.0.0.0/28"],"exclude":[],"count":16,"mode":"matrix"},
+                   "ports":{"spec":"22,80","count":2},"probes_planned":32}),
+        ];
+        // Deliberately out of order, and including .2 and .10 so the sort is visible.
+        let rows = [
+            ("10.0.0.10", 22, "ssh"),
+            ("10.0.0.2", 80, "http"),
+            ("10.0.0.2", 22, "ssh"),
+            ("10.0.0.9", 80, "http"),
+        ];
+        for (i, (t, p, svc)) in rows.iter().enumerate() {
+            e.push(json!({"type":"probe_result","seq":2+i,"ts":"2026-07-31T12:00:00.000Z","scan_id":"g1",
+                   "probe_index":i,"target":t,"port":p,"protocol":"tcp","state":"open",
+                   "source":"local_stack","service_label":svc,"attempts":1,
+                   "attempt_states":["open"],"timing_ms":{"total":1.0}}));
+        }
+        e.push(
+            json!({"type":"scan_completed","seq":9,"ts":"2026-07-31T12:00:01.000Z","scan_id":"g1",
+               "termination":"natural",
+               "counts":{"planned":32,"started":32,"completed":4,"abandoned":0,"not_started":28,
+                         "open":4,"closed":0,"filtered":0,"error":0,"retried":0}}),
+        );
+        e
+    }
+
+    /// Sorting the formatted strings put `10.0.0.10` before `10.0.0.2`, which reads as a
+    /// bug in the scan rather than in the sort.
+    #[test]
+    fn hosts_sort_numerically_not_lexicographically() {
+        let d = tempfile::tempdir().unwrap();
+        let p = write(d.path(), "g.jsonl", &multi_host_record());
+        for by in [Grouping::Flat, Grouping::Host] {
+            let out = summarize(&p, by).unwrap();
+            let order: Vec<usize> = ["10.0.0.2", "10.0.0.9", "10.0.0.10"]
+                .iter()
+                .map(|h| {
+                    out.find(h)
+                        .unwrap_or_else(|| panic!("{h} missing from {out}"))
+                })
+                .collect();
+            assert!(
+                order[0] < order[1] && order[1] < order[2],
+                "{by:?} listed hosts out of numeric order:\n{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn grouping_by_host_puts_each_host_on_one_line() {
+        let d = tempfile::tempdir().unwrap();
+        let p = write(d.path(), "g.jsonl", &multi_host_record());
+        let out = summarize(&p, Grouping::Host).unwrap();
+        assert!(out.contains("open ports by host (3 hosts)"), "{out}");
+        // 10.0.0.2 has both ports, on one line, in port order.
+        let line = out
+            .lines()
+            .find(|l| l.contains("10.0.0.2"))
+            .unwrap_or_else(|| panic!("{out}"));
+        assert!(
+            line.contains("22/ssh") && line.contains("80/http"),
+            "{line}"
+        );
+        assert!(line.find("22/ssh") < line.find("80/http"), "{line}");
+    }
+
+    #[test]
+    fn grouping_by_port_ranks_the_commonest_first() {
+        let d = tempfile::tempdir().unwrap();
+        let p = write(d.path(), "g.jsonl", &multi_host_record());
+        let out = summarize(&p, Grouping::Port).unwrap();
+        assert!(out.contains("open ports by port (2 distinct)"), "{out}");
+        // 80/http appears on two hosts, 22/ssh on two as well — ties break by key, but
+        // both must list their hosts.
+        let http = out.lines().find(|l| l.contains("80/http")).unwrap();
+        assert!(
+            http.contains("10.0.0.2") && http.contains("10.0.0.9"),
+            "{http}"
+        );
+    }
+
+    #[test]
+    fn grouping_by_service_keys_on_the_label() {
+        let d = tempfile::tempdir().unwrap();
+        let p = write(d.path(), "g.jsonl", &multi_host_record());
+        let out = summarize(&p, Grouping::Service).unwrap();
+        assert!(out.contains("open ports by service"), "{out}");
+        let ssh = out
+            .lines()
+            .find(|l| l.trim_start().starts_with("ssh"))
+            .unwrap();
+        // Service grouping shows host:port, since the port is no longer in the key.
+        assert!(
+            ssh.contains("10.0.0.2:22") && ssh.contains("10.0.0.10:22"),
+            "{ssh}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_grouping_is_rejected() {
+        assert!(Grouping::parse("host").is_some());
+        assert!(Grouping::parse("hosts").is_none());
+        assert_eq!(Grouping::default(), Grouping::Flat);
     }
 
     #[test]
@@ -2157,7 +2424,7 @@ mod tests {
         std::fs::write(&p, "").unwrap();
         let r = verify(&p).unwrap();
         assert!(r.problems.iter().any(|x| x.contains("no events")));
-        assert!(summarize(&p).is_err());
+        assert!(summarize(&p, Grouping::Flat).is_err());
     }
 
     #[test]
