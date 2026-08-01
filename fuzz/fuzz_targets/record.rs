@@ -30,7 +30,14 @@ fuzz_target!(|data: &[u8]| {
         scanr::verify::Grouping::Port,
         scanr::verify::Grouping::Service,
     ] {
-        let _ = scanr::verify::summarize(&path, by);
+        // Both with and without colour: the coloured path pads to a column width and
+        // then paints, over host and service strings the fuzzer controls.
+        for style in [
+            scanr::output::human::Style::for_stream(false, true),
+            scanr::output::human::Style::for_stream(true, false),
+        ] {
+            let _ = scanr::verify::summarize(&path, by, &style);
+        }
     }
     let _ = scanr::verify::remainder(&path);
 });

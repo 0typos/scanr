@@ -264,6 +264,11 @@ that silently matches nothing.
 
 Host filters match **without expanding**, so `--hosts 10.0.0.0/8` costs nothing.
 
+States are coloured when stdout is a terminal — the same palette `run` uses, so `open`
+looks the same wherever you see it. Redirect or pipe the output and it is plain text;
+`--no-color` and `NO_COLOR` turn it off explicitly. `--json` is never coloured, and
+neither is `output cat`: both are data, and an escape sequence in them would be a bug.
+
 Results reconstructed from a span carry `"collapsed": true` in JSON output and have no
 `timing_ms` — the span keeps only aggregate timing, and inventing a per-probe number
 would be worse than omitting it. The count goes to stderr, so stdout stays pipe-clean.

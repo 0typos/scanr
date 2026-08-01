@@ -39,6 +39,21 @@ impl Style {
         self.paint(code, state.as_str())
     }
 
+    /// Paint arbitrary text in a state's colour.
+    ///
+    /// Separate from `state` so a caller can pad to a column width *first* and colour
+    /// after: ANSI escapes inflate `str::len`, so formatting a coloured string with
+    /// `{:<9}` silently stops aligning (D22).
+    pub fn paint_state(&self, state: State, text: &str) -> String {
+        let code = match state {
+            State::Open => "32",
+            State::Closed => "31",
+            State::Filtered => "33",
+            State::Error => "35",
+        };
+        self.paint(code, text)
+    }
+
     pub fn dim(&self, s: &str) -> String {
         self.paint("2", s)
     }
@@ -428,5 +443,60 @@ mod tests {
         p.clear();
         // No panic and no state change is the whole assertion.
         assert!(!p.active);
+    }
+
+    /// D22, applied to the `output` tables: pad to the column width first, then paint.
+    ///
+    /// Painting first and formatting the result with `{:<9}` silently stops aligning,
+    /// because the escape bytes count toward `str::len`. This asserts the order that
+    /// works and demonstrates the one that does not.
+    #[test]
+    fn padding_before_painting_keeps_columns_aligned() {
+        let style = Style::for_stream(true, false);
+        let visible = |s: &str| {
+            // Strip SGR sequences the way a terminal does.
+            let mut out = String::new();
+            let mut chars = s.chars();
+            while let Some(c) = chars.next() {
+                if c == '\x1b' {
+                    for c in chars.by_ref() {
+                        if c == 'm' {
+                            break;
+                        }
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            out.chars().count()
+        };
+
+        for st in State::ALL {
+            let right = style.paint_state(st, &format!("{:<9}", st.as_str()));
+            assert_eq!(
+                visible(&right),
+                9,
+                "{st:?}: padded-then-painted must occupy exactly the column width"
+            );
+
+            // The other order: the escapes are counted, so short states never reach the
+            // width and the column drifts.
+            let wrong = format!("{:<9}", style.paint_state(st, st.as_str()));
+            assert!(
+                visible(&wrong) < 9,
+                "{st:?}: painting first should under-fill the column, showing why the \
+                 order matters"
+            );
+        }
+    }
+
+    #[test]
+    fn colour_is_off_for_a_pipe_and_for_no_color() {
+        assert!(!Style::for_stream(false, false).color, "not a terminal");
+        assert!(!Style::for_stream(true, true).color, "--no-color");
+        assert!(
+            Style::for_stream(true, false).color,
+            "a terminal, no override"
+        );
     }
 }
