@@ -489,7 +489,11 @@ fn build_plan(
 ) -> Result<ScanPlan, ConfigError> {
     let files = load_config(cli)?;
     let facts = HostFacts::probe();
-    resolve(&files, scan, &overrides.to_overrides(), &facts)
+    let plan = resolve(&files, scan, &overrides.to_overrides(), &facts)?;
+    // Every `service_label` in the record and on screen reads the process table, so it
+    // has to be in place before the first probe is written.
+    crate::services::install(plan.services.clone());
+    Ok(plan)
 }
 
 // ── run ─────────────────────────────────────────────────────────────────────
@@ -625,6 +629,14 @@ pub fn render_plan(plan: &ScanPlan, facts: &HostFacts, no_color: bool) -> String
         );
     }
     row("probes", commas(plan.probe_count()), "");
+    // Advisory, but worth stating up front: it is the one field whose value depends on
+    // files outside the config, so "why does this say webcache" should be answerable
+    // here rather than only from the finished record.
+    row(
+        "labels",
+        plan.services.summary(),
+        &plan.provenance.render("services_file"),
+    );
     row(
         "order",
         format!("randomized, seed {:016x}", plan.seed),
@@ -647,7 +659,11 @@ fn plan_row(s: &mut String, style: &Style, k: &str, v: String, src: &str) {
     let line = if src.is_empty() {
         format!("{k:<16}{v}")
     } else {
-        format!("{k:<16}{v:<40}{}", style.dim(src))
+        // `{v:<40}` alone pads nothing once the value reaches the column width, so a
+        // long value ran straight into the provenance: `... + builtin (59)defaults`.
+        // Always leave a separator, and count characters rather than bytes.
+        let pad = 40usize.saturating_sub(v.chars().count()).max(1);
+        format!("{k:<16}{v}{}{}", " ".repeat(pad), style.dim(src))
     };
     s.push_str(line.trim_end());
     s.push('\n');
@@ -972,7 +988,25 @@ fn cmd_transport_test(
 
 // ── output ──────────────────────────────────────────────────────────────────
 
+/// Give the `output` commands the same label table a scan would have used.
+///
+/// Best effort on purpose. These commands read a finished record and mostly take labels
+/// straight from it; only `remainder` has to invent one, for a port that was never
+/// probed. That is not worth failing a read-only command over, so a broken or absent
+/// config here means the builtin table rather than an error — the scan commands, which
+/// do care, resolve it strictly through `build_plan`.
+fn install_services_best_effort(cli: &Cli) {
+    let configured = load_config(cli)
+        .ok()
+        .and_then(|f| f.pick(|c| c.defaults.services_file.clone()))
+        .map(|(v, _)| crate::config::expand_home(&v));
+    if let Ok(t) = crate::services::ServiceTable::resolve_from_host(configured.as_deref()) {
+        crate::services::install(t);
+    }
+}
+
 fn cmd_output(cli: &Cli, cmd: &OutputCmd) -> Result<u8, ConfigError> {
+    install_services_best_effort(cli);
     match cmd {
         OutputCmd::Summarize { file, by } => {
             let style = output_style(cli);

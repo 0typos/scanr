@@ -54,7 +54,7 @@ impl ProbeRecord {
             "state": self.outcome.state.as_str(),
             "source": self.outcome.source.as_str(),
             "reason": self.outcome.reason,
-            "service_label": crate::probe::service_label(self.port),
+            "service_label": crate::services::service_label(self.port),
             "attempts": self.attempts,
             "attempt_states": self.attempt_states.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
             "timing_ms": timing,

@@ -99,10 +99,42 @@ The one you will mostly consume.
 | `source` | `local_stack` · `proxy_reply` · `timeout` · `internal` — **where the verdict came from** |
 | `reason` | free text when not open; `null` when open |
 | `resolved_address` | `null` for hostname targets under transport DNS |
-| `service_label` | a guess from the port number, **not a fingerprint**; `null` if unknown |
+| `service_label` | a guess from the port number, **not a fingerprint**; `null` if unknown. Layered — see below |
 | `attempts` | retries are merged into one row (timeouts only) |
 | `attempt_states` | per-attempt states, so the merge loses nothing |
 | `timing_ms` | `proxy_connect` and `handshake` absent on the direct path |
+
+### Where `service_label` comes from
+
+Three layers, most specific first: a file named by `defaults.services_file`, then
+`/etc/services` if the host has one, then a compiled-in table of 59 well-known ports.
+The first layer with an answer wins, so a two-line custom file still inherits the rest.
+
+None of them is a fingerprint. Nothing connects to the service or reads a banner — the
+port answered, and a table says what usually sits on that number. Port 4444 is `krb524`
+to all three layers and is essentially never Kerberos. Key automation on `state`,
+`source` and `reason`, which are unaffected by any of this.
+
+Because `/etc/services` differs between machines, so can the labels. `scan_config`
+therefore records exactly which layers produced them:
+
+```json
+"service_labels": {
+  "layers": [
+    {"source": "/home/me/.config/scanr/services", "entries": 12,   "malformed": 0},
+    {"source": "/etc/services",                   "entries": 5862, "malformed": 0},
+    {"source": "builtin",                         "entries": 59,   "malformed": 0}
+  ]
+}
+```
+
+`entries` counts the tcp ports that layer was the first to claim, so the numbers sum to
+the table's size without double-counting a port two layers both mention. `malformed`
+counts lines the parser gave up on; UDP and SCTP rows are skipped without being counted,
+since roughly half of a real `/etc/services` is UDP. A layer that contributed nothing is
+absent; `builtin` is always last and always present.
+
+Two records that label a port differently can be reconciled from this field alone.
 
 `scan_config.transport.fidelity_source` says where the fidelity claim came from:
 `builtin` (direct, where the local stack separates states inherently), `config` (declared

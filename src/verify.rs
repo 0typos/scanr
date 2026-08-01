@@ -1253,7 +1253,7 @@ pub fn get(path: &Path, q: &Query) -> Result<Vec<Hit>, String> {
                                 state: state.to_string(),
                                 source: source.clone(),
                                 reason: reason.clone(),
-                                service: crate::probe::service_label(p).map(str::to_string),
+                                service: crate::services::service_label(p).map(str::to_string),
                                 collapsed: true,
                                 total_ms: None,
                             });

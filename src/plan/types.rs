@@ -251,6 +251,10 @@ pub struct ScanPlan {
     /// instead of one row each.
     pub spans: bool,
     pub output_dir: PathBuf,
+    /// Port-label sources for this scan, resolved and layered. Carried on the plan
+    /// rather than looked up globally so the record can state where its labels came
+    /// from, and so `plan` can show it before the scan is spent.
+    pub services: crate::services::ServiceTable,
     pub provenance: Provenance,
     pub warnings: Vec<PlanWarning>,
 }
@@ -338,6 +342,7 @@ impl ScanPlan {
             compress: false,
             spans: false,
             output_dir: PathBuf::from("(unused)"),
+            services: crate::services::ServiceTable::builtin_only(),
             provenance: Provenance::default(),
             warnings: vec![],
         }

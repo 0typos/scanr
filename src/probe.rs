@@ -196,69 +196,6 @@ pub fn classify_os_error(err: &std::io::Error, phases: Phases) -> ProbeOutcome {
     }
 }
 
-/// Port-number labels. Explicitly a guess from the port number and never a fingerprint;
-/// the docs and the JSONL field name both say so.
-pub fn service_label(port: u16) -> Option<&'static str> {
-    Some(match port {
-        21 => "ftp",
-        22 => "ssh",
-        23 => "telnet",
-        25 => "smtp",
-        53 => "domain",
-        80 => "http",
-        110 => "pop3",
-        111 => "rpcbind",
-        135 => "msrpc",
-        139 => "netbios-ssn",
-        143 => "imap",
-        161 => "snmp",
-        389 => "ldap",
-        443 => "https",
-        445 => "microsoft-ds",
-        465 => "smtps",
-        514 => "syslog",
-        587 => "submission",
-        631 => "ipp",
-        636 => "ldaps",
-        873 => "rsync",
-        993 => "imaps",
-        995 => "pop3s",
-        1080 => "socks",
-        1433 => "ms-sql",
-        1521 => "oracle",
-        1723 => "pptp",
-        2049 => "nfs",
-        2181 => "zookeeper",
-        2375 | 2376 => "docker",
-        3000 => "http-alt",
-        3128 => "squid",
-        3306 => "mysql",
-        3389 => "ms-wbt",
-        4444 => "krb524",
-        5000 => "upnp",
-        5432 => "postgresql",
-        5601 => "kibana",
-        5672 => "amqp",
-        5900 => "vnc",
-        5984 => "couchdb",
-        6379 => "redis",
-        6443 => "kube-apiserver",
-        7001 => "weblogic",
-        8000 | 8001 => "http-alt",
-        8080 | 8081 => "http-proxy",
-        8443 => "https-alt",
-        8888 => "http-alt",
-        9000 => "http-alt",
-        9092 => "kafka",
-        9200 => "elasticsearch",
-        9300 => "elasticsearch",
-        11211 => "memcached",
-        15672 => "rabbitmq-mgmt",
-        27017 | 27018 => "mongodb",
-        _ => return None,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,13 +280,5 @@ mod tests {
         assert_eq!(State::Closed.as_str(), "closed");
         assert_eq!(State::Filtered.as_str(), "filtered");
         assert_eq!(State::Error.as_str(), "error");
-    }
-
-    #[test]
-    fn service_labels_cover_common_ports() {
-        assert_eq!(service_label(22), Some("ssh"));
-        assert_eq!(service_label(443), Some("https"));
-        assert_eq!(service_label(5432), Some("postgresql"));
-        assert_eq!(service_label(64321), None);
     }
 }

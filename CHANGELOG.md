@@ -78,6 +78,16 @@ invited before then.
   SOCKS5 proxy: its listener is local, so the ephemeral-port rate cap does not apply, and
   measured against OpenSSH 10.2p1 that cap alone made 4,000 probes take 80 s under
   `proxy-careful` versus 0.16 s under `ssh`.
+- **Port labels read `/etc/services`**, and `defaults.services_file` points at a file of
+  your own that outranks it. Layered per port, so a three-line internal port map still
+  inherits the other ~5,800 entries; a compiled-in table of 59 well-known ports is the
+  floor when neither file exists. Because labels can now differ between machines, every
+  record's `scan_config` states which layers produced them and how many entries each
+  contributed. Still a guess from the port number and never a fingerprint — nothing
+  connects to the service or reads a banner.
+- `output get` and `output summarize` colour their state columns on a terminal, using the
+  same palette as `run`. Never when redirected, and never in `--json` or `output cat`,
+  which are data.
 - Shell completions for bash, zsh, fish, elvish, and PowerShell.
 
 ### Security
