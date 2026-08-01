@@ -657,8 +657,17 @@ stated in the CLI help, the schema, and the guide, because an absent banner mean
 "said nothing unprompted" and meaning "nothing there" would otherwise be indistinguishable
 to a reader.
 
-**Off by default.** It changes what the scan does to a target, so it is asked for. Same
-reasoning as every other knob here: clear limits over hidden magic.
+**On by default**, which reverses an earlier call in this entry and is worth explaining.
+The original argument was that reading changes what the scan does to a target. It does
+not, much: the service writes its greeting when it accepts the connection whether or not
+anyone reads it, and making that connection is what a connect scan already does. What
+reading costs is holding an *open* socket a little longer, bounded by the adaptive wait
+above, and open ports are rare. Against that, a scan that saw a banner and discarded it
+is a worse record — and this tool exists to produce records.
+
+`--no-banner`, or `banner = false` under `[defaults]` or on a scan, turns it off, and
+`scan_config.banner.enabled` states which happened. The knob that genuinely needs asking
+for is an *active* probe, and that is still not on offer.
 
 **The timeout is a ceiling, not a wait.** A flat 500 ms looked harmless and was not:
 concurrency here is the worker-thread count with no queue, so a worker parked in `read`

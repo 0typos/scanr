@@ -297,11 +297,11 @@ struct OverrideArgs {
     #[arg(long, conflicts_with = "spans")]
     no_spans: bool,
 
-    /// Read what open services volunteer on connect, without sending anything
+    /// Read what open services volunteer on connect, without sending anything (default)
     #[arg(long, conflicts_with = "no_banner")]
     banner: bool,
 
-    /// Do not read banners (default)
+    /// Do not read banners
     #[arg(long)]
     no_banner: bool,
 

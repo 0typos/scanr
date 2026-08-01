@@ -124,7 +124,8 @@ The one you will mostly consume.
 
 ### Banners
 
-`--banner` reads what an open service volunteers on connect. **Nothing is sent** — the
+Banners are read by default: what an open service volunteers on connect is recorded.
+**Nothing is sent** — the
 `scan_config` event records `banner.sent_bytes: 0` to say so — which is what keeps
 "scanr connected and listened" a true description of the scan.
 

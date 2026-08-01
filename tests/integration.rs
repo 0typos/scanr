@@ -1684,12 +1684,12 @@ fn config_of(events: &[Value]) -> &Value {
 }
 
 #[test]
-fn a_banner_is_read_only_when_asked_for() {
+fn banners_are_read_by_default_and_can_be_turned_off() {
     let d = tempfile::tempdir().unwrap();
     let (_l, addr) = greeting_port(b"SSH-2.0-OpenSSH_9.6p1\r\n");
     let port = addr.port().to_string();
 
-    // Default: nothing is read, and the record says so.
+    // Turned off: nothing is read, and the record says so.
     let off = scanr(
         d.path(),
         &[
@@ -1698,6 +1698,7 @@ fn a_banner_is_read_only_when_asked_for() {
             "127.0.0.1",
             "--ports",
             &port,
+            "--no-banner",
             "--output-dir",
             "off",
         ],
@@ -1711,11 +1712,11 @@ fn a_banner_is_read_only_when_asked_for() {
     );
     assert!(
         seen.iter().all(|b| b.is_null()),
-        "no banner was asked for: {seen:?}"
+        "--no-banner means nothing is read: {seen:?}"
     );
     assert_eq!(config_of(&events)["banner"]["enabled"], false);
 
-    // Asked for: the greeting is recorded verbatim.
+    // Default: the greeting is recorded verbatim, with no flag at all.
     let on = scanr(
         d.path(),
         &[
@@ -1724,7 +1725,6 @@ fn a_banner_is_read_only_when_asked_for() {
             "127.0.0.1",
             "--ports",
             &port,
-            "--banner",
             "--output-dir",
             "on",
         ],
@@ -1755,7 +1755,6 @@ fn a_silent_service_yields_no_banner_and_is_still_open() {
             "127.0.0.1",
             "--ports",
             &addr.port().to_string(),
-            "--banner",
             "--output-dir",
             "out",
         ],
@@ -1784,7 +1783,6 @@ fn a_hostile_banner_is_neutralised_on_screen_but_kept_in_the_record() {
             "127.0.0.1",
             "--ports",
             &addr.port().to_string(),
-            "--banner",
             "--output-dir",
             "out",
         ],
