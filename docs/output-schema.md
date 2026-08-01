@@ -209,6 +209,34 @@ Three buckets, summing to `planned`:
 `scan_interrupted` adds `signal`, `requested_at`, `forced`. `scan_failed` adds `error` and
 `error_code`.
 
+## Reading a record without `jq`
+
+`output summarize` arranges the open ports for you. The default is one line per endpoint;
+`--by` regroups them:
+
+```console
+$ scanr output summarize scan-*.jsonl.gz --by host
+open ports by host (3 hosts):
+  10.0.0.2         22/ssh  80/http
+  10.0.0.9         80/http
+  10.0.0.10        22/ssh
+
+$ scanr output summarize scan-*.jsonl.gz --by port
+open ports by port (2 distinct):
+  22/ssh              2  10.0.0.2  10.0.0.10
+  80/http             2  10.0.0.2  10.0.0.9
+```
+
+`--by host` answers "what is this machine running", `--by port` and `--by service`
+answer "who is running this" — the latter keyed on the service label rather than the
+number, so `http` gathers 80 and 8080 together. `--by port` and `--by service` list the
+commonest first, which is usually the question on a sweep.
+
+Only **open** results are grouped. That is the shape of the record rather than a
+limitation: `open` is never collapsed into a span, so it is the one state guaranteed to
+have a row per probe. Totals for the other states come from the terminal event's
+`counts`, which `summarize` already prints.
+
 ## Recipes
 
 Open ports, as `host:port`:

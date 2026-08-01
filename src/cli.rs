@@ -21,6 +21,7 @@ use crate::plan::types::{DnsMode, Fidelity, ScanPlan, TransportKind};
 use crate::plan::{Overrides, resolve};
 use crate::run::{RunOptions, Termination};
 use crate::units::{HumanElapsed, commas, parse_duration, render_duration};
+use crate::verify::Grouping;
 
 /// `--version` reports the commit the binary was built from, so a result file can be
 /// traced back to an exact build.
@@ -155,7 +156,12 @@ enum TransportCmd {
 #[derive(Subcommand)]
 enum OutputCmd {
     /// Summarize a scan record
-    Summarize { file: PathBuf },
+    Summarize {
+        file: PathBuf,
+        /// Arrange the open ports: flat, by host, by port, or by service
+        #[arg(long, value_name = "FIELD", default_value = "flat", value_parser = grouping_arg)]
+        by: Grouping,
+    },
     /// Check a scan record for integrity and completeness
     Verify { file: PathBuf },
     /// Print targets that were not fully probed, for feeding back into --targets
@@ -283,6 +289,10 @@ fn flag(on: bool, off: bool) -> Option<bool> {
 
 fn duration_arg(s: &str) -> Result<Duration, String> {
     parse_duration(s).map_err(|e| e.to_string())
+}
+
+fn grouping_arg(s: &str) -> Result<Grouping, String> {
+    Grouping::parse(s).ok_or_else(|| format!("expected one of: {}", Grouping::ALL.join(", ")))
 }
 
 fn dns_arg(s: &str) -> Result<DnsMode, String> {
@@ -946,8 +956,8 @@ fn cmd_transport_test(
 
 fn cmd_output(_cli: &Cli, cmd: &OutputCmd) -> Result<u8, ConfigError> {
     match cmd {
-        OutputCmd::Summarize { file } => {
-            let report = crate::verify::summarize(file).map_err(ConfigError::new)?;
+        OutputCmd::Summarize { file, by } => {
+            let report = crate::verify::summarize(file, *by).map_err(ConfigError::new)?;
             let _ = write!(std::io::stdout(), "{}", report);
             Ok(EXIT_OK)
         }

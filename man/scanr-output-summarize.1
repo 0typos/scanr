@@ -4,10 +4,13 @@
 .SH NAME
 scanr\-output\-summarize \- Summarize a scan record
 .SH SYNOPSIS
-\fBscanr\-output\-summarize\fR [\fB\-h\fR|\fB\-\-help\fR] <\fIFILE\fR> 
+\fBscanr\-output\-summarize\fR [\fB\-\-by\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIFILE\fR> 
 .SH DESCRIPTION
 Summarize a scan record
 .SH OPTIONS
+.TP
+\fB\-\-by\fR \fI<FIELD>\fR [default: flat]
+Arrange the open ports: flat, by host, by port, or by service
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help
