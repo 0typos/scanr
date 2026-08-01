@@ -299,21 +299,28 @@ impl Socks5Transport {
     ///
     /// A chain that could not be built is an `error` about the chain. Nothing else.
     fn blame_hop(&self, o: ProbeOutcome, index: usize) -> ProbeOutcome {
-        if self.hops.len() == 1 {
-            return o;
-        }
         let what = o
             .reason
-            .unwrap_or_else(|| "chain could not be established".into());
-        ProbeOutcome::new(
-            State::Error,
-            Source::ProxyReply,
+            .unwrap_or_else(|| "the SOCKS5 handshake failed".into());
+        // Single proxy and chain alike. The `hops.len() == 1` early return this replaces
+        // was where the whole point of the function leaked away: a lone proxy that accepts
+        // TCP and then stalls made `io_failure` classify the *destination* as `filtered`,
+        // for a port nothing had reached. Retryable and span-collapsible, so a stalled
+        // proxy produced a scan-wide sweep of confident false negatives.
+        let at = if self.hops.len() == 1 {
+            format!("with proxy {}", self.hops[0].address)
+        } else {
             format!(
-                "{what} (at hop {} of {}, {})",
+                "at hop {} of {}, {}",
                 index + 1,
                 self.hops.len(),
                 self.hops[index].address
-            ),
+            )
+        };
+        ProbeOutcome::new(
+            State::Error,
+            Source::ProxyReply,
+            format!("{what} ({at})"),
             o.phases,
         )
     }
@@ -429,6 +436,21 @@ impl Socks5Transport {
         read_exact(s, &mut resp)
             .map_err(|e| io_failure(&e, "reading authentication reply", *phases))?;
 
+        // RFC 1929: the reply is VER STATUS with VER = X'01'. Checking it matters because
+        // "authenticated" is asserted here on a message not otherwise confirmed to be an
+        // authentication reply — every other peer octet in this module is version-checked.
+        if resp[0] != AUTH_VERSION {
+            phases.total = started.elapsed();
+            return Err(ProbeOutcome::new(
+                State::Error,
+                Source::ProxyReply,
+                format!(
+                    "authentication reply had version 0x{:02x}, expected 0x01 (RFC 1929)",
+                    resp[0]
+                ),
+                *phases,
+            ));
+        }
         // RFC 1929: any non-zero status is a failure.
         if resp[1] != 0 {
             phases.total = started.elapsed();
@@ -763,6 +785,45 @@ mod tests {
         let c = Socks5Fixture::start(Behavior::Faithful);
         let o = chain(&[&a, &b, &c]).probe(&Destination::Addr(open), &timing());
         assert_eq!(o.state, State::Open, "{:?}", o.reason);
+    }
+
+    /// The common deployment, and the case the chain fix left behind: ONE proxy that
+    /// accepts TCP then stalls. `io_failure` classifies a timeout as `filtered` because it
+    /// is written for the destination probe — applied here it fabricates a verdict on a
+    /// port nothing reached, retryable and span-collapsible, so a stalled proxy produced a
+    /// scan-wide sweep of confident false negatives.
+    #[test]
+    fn a_single_proxy_that_stalls_is_an_error_not_a_filtered_port() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = l.local_addr().expect("addr");
+        // Accept and never speak.
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for s in l.incoming() {
+                held.push(s);
+            }
+        });
+        let t = Socks5Transport::chained(
+            "one".into(),
+            vec![Hop {
+                address: addr,
+                username: None,
+                password: None,
+            }],
+            Fidelity::Full,
+        );
+        let mut tm = timing();
+        tm.handshake_timeout = std::time::Duration::from_millis(200);
+
+        let o = t.probe(&Destination::Addr("10.0.0.9:443".parse().unwrap()), &tm);
+        assert_eq!(o.state, State::Error, "nothing reached 10.0.0.9:443");
+        assert_eq!(o.source, Source::ProxyReply);
+        assert!(!o.is_retryable(), "a stalled proxy is not worth retrying");
+        let reason = o.reason.unwrap_or_default();
+        assert!(
+            reason.contains(&addr.to_string()),
+            "must name the proxy: {reason}"
+        );
     }
 
     /// A link that *times out* is the case that matters, and the one the original test
