@@ -92,10 +92,9 @@ invited before then.
   which are data.
 - Shell completions for bash, zsh, fish, elvish, and PowerShell.
 
-### Added
-
-- **`--banner` reads what open services volunteer**, without sending anything — the record
-  states `banner.sent_bytes: 0`. Off by default; 1024 bytes and 500 ms by default,
+- **Banners are read from open services by default**, without sending anything — the
+  record states `banner.sent_bytes: 0`. `--no-banner` or `banner = false` turns it off.
+  1024 bytes and 500 ms by default,
   tunable per profile via `banner_bytes` and `banner_timeout` — which is a ceiling, not a
   fixed wait: the read scales off each host's measured connect time, because a worker
   waiting on a silent port is a worker issuing no probes. Only services that greet

@@ -524,8 +524,17 @@ fn resolve_flag(
 
 /// Whether to read what open services volunteer, and within what limits.
 ///
-/// The toggle is a scan-level choice (it changes what the scan does to a target); the
-/// limits are timing, so they live on the profile beside the other timeouts.
+/// On by default. Reading is not an extra act against the target: the service wrote its
+/// greeting when it accepted the connection, whether or not anyone reads it, and the
+/// connection itself is what a connect scan already makes. What it costs is holding an
+/// *open* socket a little longer — bounded by `Banner::wait_for` — and open ports are
+/// rare. Against that, a scan that saw a banner and threw it away is a worse record.
+///
+/// `--no-banner`, `banner = false` under `[defaults]`, or the same on a scan turns it
+/// off, and the record states which.
+///
+/// The toggle is a scan-level choice; the limits are timing, so they live on the profile
+/// beside the other timeouts.
 fn resolve_banner(
     files: &Layered,
     scan_name: Option<&str>,
@@ -540,7 +549,7 @@ fn resolve_banner(
         ov.banner,
         |s| s.banner,
         |c| c.defaults.banner,
-        false,
+        true,
         prov,
     );
     if !on {

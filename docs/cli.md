@@ -81,8 +81,8 @@ A few that are not self-explanatory:
 - `--pairs` takes exact `host:port` endpoints instead of a target × port matrix. This is
   what makes `scanr output remainder … | scanr run --pairs -` resume without re-probing
   anything that already finished.
-- `--banner` reads what open services volunteer on connect, **without sending anything**.
-  Off by default. Only services that greet first say anything — SSH, SMTP, FTP, POP3,
+- `--banner` / `--no-banner` controls reading what open services volunteer on connect,
+  **without sending anything**. On by default. Only services that greet first say anything — SSH, SMTP, FTP, POP3,
   IMAP, MySQL — so an empty banner means "said nothing unprompted", not "nothing there".
   HTTP and anything behind TLS greet nobody.
 
