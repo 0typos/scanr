@@ -142,7 +142,10 @@ nothing.
 > rewrites the window title. `scanr` renders banners as printable ASCII only, replacing
 > everything else with `.`; anything consuming the record should do the same.
 
-`scan_config.banner` records the settings the scan ran with:
+`timeout_ms` is the ceiling. The wait scales off each host's measured connect time — a
+greeting arrives about a round trip after the connection is established — so a fast host
+is not waited on for half a second. `scan_config.banner` records the settings the scan
+ran with:
 
 ```json
 {"banner": {"enabled": true, "sent_bytes": 0, "max_bytes": 1024, "timeout_ms": 500}}

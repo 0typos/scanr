@@ -333,13 +333,20 @@ enum ResultFormat {
     List,
 }
 
-impl From<ResultFormat> for crate::verify::Handoff {
-    fn from(f: ResultFormat) -> Self {
-        match f {
-            ResultFormat::Json => crate::verify::Handoff::Json,
-            ResultFormat::Nmap => crate::verify::Handoff::Nmap,
-            // `Table` never reaches here.
-            _ => crate::verify::Handoff::List,
+impl ResultFormat {
+    const ALL: &'static [&'static str] = &["table", "json", "nmap", "list"];
+
+    /// `None` is the human table; every other shape is for another tool.
+    ///
+    /// Exhaustive on purpose. The catch-all this replaced mapped a forgotten variant to
+    /// `list` output, so adding a format and missing the conversion compiled and emitted
+    /// the wrong thing instead of failing the build.
+    fn handoff(self) -> Option<crate::verify::Handoff> {
+        match self {
+            Self::Table => None,
+            Self::Json => Some(crate::verify::Handoff::Json),
+            Self::Nmap => Some(crate::verify::Handoff::Nmap),
+            Self::List => Some(crate::verify::Handoff::List),
         }
     }
 }
@@ -350,7 +357,8 @@ fn format_arg(s: &str) -> Result<ResultFormat, String> {
         "json" => Ok(ResultFormat::Json),
         "nmap" => Ok(ResultFormat::Nmap),
         "list" => Ok(ResultFormat::List),
-        _ => Err("expected one of: table, json, nmap, list".into()),
+        // Built from the list, so the message cannot drift from what is accepted.
+        _ => Err(format!("expected one of: {}", ResultFormat::ALL.join(", "))),
     }
 }
 
@@ -745,6 +753,20 @@ fn render_plan_timing(s: &mut String, plan: &ScanPlan, style: &Style) {
             &plan.provenance.render("proxy_connect_timeout"),
         );
     }
+    // It changes what the scan *does to a target*, which is a stronger reason to confirm
+    // it before a run than anything else on this screen.
+    row(
+        "banner",
+        match &plan.timing.banner {
+            None => "off".to_string(),
+            Some(b) => format!(
+                "up to {} B, {} max wait",
+                b.bytes(),
+                render_duration(b.timeout())
+            ),
+        },
+        &plan.provenance.render("banner"),
+    );
     row(
         "retries",
         format!(
@@ -1152,24 +1174,26 @@ fn cmd_output_results(
     }
 
     let hits = crate::verify::get(file, &q).map_err(ConfigError::new)?;
-    let style = output_style(cli);
     let mut out = std::io::stdout().lock();
-    if format != ResultFormat::Table {
-        // Feeding another tool a list dominated by closed ports is almost never what was
-        // meant, and the mistake is silent otherwise.
-        let non_open = hits.iter().filter(|h| h.state != "open").count();
-        if format != ResultFormat::Json && non_open > 0 {
-            let _ = writeln!(
-                std::io::stderr(),
-                "note: {non_open} of {} results are not open; add `--states open` unless \
-                 you meant to hand those on too",
-                hits.len()
-            );
+    if let Some(how) = format.handoff() {
+        if how.feeds_a_tool() {
+            // Handing another tool a list dominated by closed ports is almost never what
+            // was meant, and the mistake is silent otherwise.
+            let non_open = hits.iter().filter(|h| h.state != "open").count();
+            if non_open > 0 {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "note: {non_open} of {} results are not open; add `--states open` \
+                     unless you meant to hand those on too",
+                    hits.len()
+                );
+            }
         }
-        let _ = write!(out, "{}", crate::verify::handoff(&hits, format.into()));
+        let _ = crate::verify::handoff(&hits, how, &mut out);
         return Ok(EXIT_OK);
     }
     {
+        let style = output_style(cli);
         let width = hits
             .iter()
             .map(|h| h.target.len() + h.port.to_string().len() + 5)

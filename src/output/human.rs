@@ -95,7 +95,7 @@ pub struct ResultPrinter {
 /// So the display form is printable ASCII only — everything else becomes `.`, the way a
 /// hex dump has always done it — collapsed onto one line and truncated. The record keeps
 /// the bytes exactly as they arrived; this is only what reaches a screen.
-pub fn safe_banner(bytes: &[u8], width: usize) -> String {
+pub(crate) fn safe_banner(bytes: &[u8], width: usize) -> String {
     let mut out: String = bytes
         .iter()
         .take(width)

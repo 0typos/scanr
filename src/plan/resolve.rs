@@ -15,7 +15,7 @@ use crate::config::builtin::{
 };
 use crate::config::error::{ConfigError, suggest};
 use crate::config::expand_home;
-use crate::config::raw::{Layered, Origin, RawProfile};
+use crate::config::raw::{Layered, Origin, RawConfig, RawProfile, RawScan};
 use crate::diag::HostFacts;
 use crate::net::ports::PortSummary;
 use crate::net::target::{DEFAULT_MAX_TARGETS, TargetSet, TargetSpec};
@@ -89,7 +89,7 @@ pub fn resolve(
 
     let (profile, base) = resolve_profile(files, scan_name, ov, &transport, &mut prov)?;
 
-    let mut timing = resolve_timing(files, scan_name, &profile, &base, ov, &mut prov)?;
+    let timing = resolve_timing(files, scan_name, &profile, &base, ov, &mut prov)?;
 
     let (dns_requested, dns_effective) =
         resolve_dns(files, scan_name, &transport, &transport_name, ov, &mut prov)?;
@@ -153,7 +153,6 @@ pub fn resolve(
     let compress = resolve_compress(files, scan_name, ov, &mut prov);
     let spans = resolve_spans(files, scan_name, ov, &mut prov);
     let seed = resolve_seed(ov, &mut prov);
-    timing.banner = resolve_banner(files, scan_name, &profile, ov, &mut prov)?;
     let services = resolve_services(files, &mut prov, &mut warnings)?;
 
     let port_spec = port_spec_override.unwrap_or_else(|| PortSummary(&ports).to_string());
@@ -317,8 +316,7 @@ fn resolve_timing(
             base.timing.connect_timeout,
             profile,
         )?,
-        // Resolved by the caller, which knows whether the scan asked for banners at all.
-        banner: None,
+        banner: resolve_banner(files, scan_name, profile, ov, prov)?,
         retry_delay: duration_field(
             prov,
             "retry_delay",
@@ -475,41 +473,54 @@ fn resolve_compress(
     ov: &Overrides,
     prov: &mut Provenance,
 ) -> bool {
-    match ov.compress {
-        Some(v) => {
-            prov.set("compress", Origin::Cli);
-            v
-        }
-        None => {
-            let from_scan =
-                scan_name.and_then(|n| files.pick(|c| c.scans.get(n).and_then(|s| s.compress)));
-            match from_scan.or_else(|| files.pick(|c| c.defaults.compress)) {
-                Some((v, path)) => {
-                    prov.set("compress", Origin::Defaults(path));
-                    v
-                }
-                None => {
-                    prov.set("compress", Origin::Default);
-                    true
-                }
-            }
-        }
-    }
+    resolve_flag(
+        files,
+        scan_name,
+        "compress",
+        ov.compress,
+        |s| s.compress,
+        |c| c.defaults.compress,
+        true,
+        prov,
+    )
 }
 
 /// Collapsing bulk outcomes into spans. On by default: it takes a million-probe record
 /// from 391 MB to 2.6 KB, and what it drops is the per-probe timestamp and exact timing
 /// of results that all said the same thing. `--no-spans` keeps a row per probe.
-/// Enough for every greeting a real service sends: SSH is ~40 bytes, SMTP ~100.
-const DEFAULT_BANNER_BYTES: u32 = 1024;
-
-/// A hostile service can send as much as you will read. 4 KiB per open port is the most
-/// this will put in a record.
-const MAX_BANNER_BYTES: u32 = 4096;
-
-/// A service that volunteers a greeting does so immediately — this is a read on a
-/// connection that is already established, not another connect.
-const DEFAULT_BANNER_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+/// The CLI-then-scan-then-defaults cascade every boolean setting follows.
+///
+/// Written out four times before this existed, which meant four places to keep in step
+/// on the order of the rungs and the `Origin` recorded at each.
+// Eight parameters, and each one is a rung of the cascade or the field it reads. The
+// alternative to the count is four hand-written copies, which is what this replaced.
+#[allow(clippy::too_many_arguments)]
+fn resolve_flag(
+    files: &Layered,
+    scan_name: Option<&str>,
+    name: &str,
+    cli: Option<bool>,
+    from_scan: impl Fn(&RawScan) -> Option<bool>,
+    from_defaults: impl Fn(&RawConfig) -> Option<bool>,
+    fallback: bool,
+    prov: &mut Provenance,
+) -> bool {
+    if let Some(v) = cli {
+        prov.set(name, Origin::Cli);
+        return v;
+    }
+    let scan_hit = scan_name.and_then(|n| files.pick(|c| c.scans.get(n).and_then(&from_scan)));
+    match scan_hit.or_else(|| files.pick(|c| from_defaults(c))) {
+        Some((v, path)) => {
+            prov.set(name, Origin::Defaults(path));
+            v
+        }
+        None => {
+            prov.set(name, Origin::Default);
+            fallback
+        }
+    }
+}
 
 /// Whether to read what open services volunteer, and within what limits.
 ///
@@ -522,26 +533,16 @@ fn resolve_banner(
     ov: &Overrides,
     prov: &mut Provenance,
 ) -> Result<Option<Banner>, ConfigError> {
-    let on = match ov.banner {
-        Some(v) => {
-            prov.set("banner", Origin::Cli);
-            v
-        }
-        None => {
-            let from_scan =
-                scan_name.and_then(|n| files.pick(|c| c.scans.get(n).and_then(|s| s.banner)));
-            match from_scan.or_else(|| files.pick(|c| c.defaults.banner)) {
-                Some((v, path)) => {
-                    prov.set("banner", Origin::Defaults(path));
-                    v
-                }
-                None => {
-                    prov.set("banner", Origin::Default);
-                    false
-                }
-            }
-        }
-    };
+    let on = resolve_flag(
+        files,
+        scan_name,
+        "banner",
+        ov.banner,
+        |s| s.banner,
+        |c| c.defaults.banner,
+        false,
+        prov,
+    );
     if !on {
         return Ok(None);
     }
@@ -554,12 +555,6 @@ fn resolve_banner(
         DEFAULT_BANNER_BYTES,
         profile,
     );
-    if bytes == 0 || bytes > MAX_BANNER_BYTES {
-        return Err(ConfigError::new(format!(
-            "banner_bytes must be between 1 and {MAX_BANNER_BYTES}, got {bytes}"
-        ))
-        .help("a greeting is tens of bytes; the cap exists so one record cannot be inflated by a hostile service"));
-    }
     let timeout = duration_field(
         prov,
         "banner_timeout",
@@ -568,7 +563,13 @@ fn resolve_banner(
         DEFAULT_BANNER_TIMEOUT,
         profile,
     )?;
-    Ok(Some(Banner { bytes, timeout }))
+    // The type owns the caps, so this is the only place they can be violated.
+    Banner::new(bytes, timeout).map(Some).map_err(|e| {
+        ConfigError::new(e).help(
+            "a greeting is tens of bytes; the cap exists so one record cannot be inflated \
+             by a hostile service",
+        )
+    })
 }
 
 fn resolve_spans(
@@ -577,26 +578,16 @@ fn resolve_spans(
     ov: &Overrides,
     prov: &mut Provenance,
 ) -> bool {
-    match ov.spans {
-        Some(v) => {
-            prov.set("spans", Origin::Cli);
-            v
-        }
-        None => {
-            let from_scan =
-                scan_name.and_then(|n| files.pick(|c| c.scans.get(n).and_then(|s| s.spans)));
-            match from_scan.or_else(|| files.pick(|c| c.defaults.spans)) {
-                Some((v, path)) => {
-                    prov.set("spans", Origin::Defaults(path));
-                    v
-                }
-                None => {
-                    prov.set("spans", Origin::Default);
-                    true
-                }
-            }
-        }
-    }
+    resolve_flag(
+        files,
+        scan_name,
+        "spans",
+        ov.spans,
+        |s| s.spans,
+        |c| c.defaults.spans,
+        true,
+        prov,
+    )
 }
 
 fn resolve_open_only(
@@ -605,26 +596,16 @@ fn resolve_open_only(
     ov: &Overrides,
     prov: &mut Provenance,
 ) -> bool {
-    match ov.open_only {
-        Some(v) => {
-            prov.set("open_only", Origin::Cli);
-            v
-        }
-        None => {
-            let from_scan =
-                scan_name.and_then(|n| files.pick(|c| c.scans.get(n).and_then(|s| s.open_only)));
-            match from_scan.or_else(|| files.pick(|c| c.defaults.open_only)) {
-                Some((v, path)) => {
-                    prov.set("open_only", Origin::Defaults(path));
-                    v
-                }
-                None => {
-                    prov.set("open_only", Origin::Default);
-                    true
-                }
-            }
-        }
-    }
+    resolve_flag(
+        files,
+        scan_name,
+        "open_only",
+        ov.open_only,
+        |s| s.open_only,
+        |c| c.defaults.open_only,
+        true,
+        prov,
+    )
 }
 
 fn resolve_seed(ov: &Overrides, prov: &mut Provenance) -> u64 {
