@@ -16,10 +16,34 @@ And what may change within version 2:
 
 - **new optional fields** may appear on any event
 - **new event types** may appear
+- **new values** may appear in the open-ended enumerations listed below
 
 So a consumer must dispatch on `type` and ignore both unknown fields and unknown event
 types. It must **not** assume any one event type accounts for every probe — `probe_span`
 already breaks that assumption, and it is on by default.
+
+### Which enumerations are closed
+
+A field carrying one of a fixed set of strings is only safe to match exhaustively if that
+set is closed. These are:
+
+| field | set | may gain values? |
+|---|---|---|
+| `state` | `open`, `closed`, `filtered`, `error` | **no** — closed within a version |
+| `source` | `local_stack`, `proxy_reply`, `timeout`, `internal` | **no** — closed within a version |
+| `transport.type` | `direct`, `socks5`, `chain`, `pool` | yes — a new transport type adds one |
+| `fidelity` / `measured_fidelity` | `full`, `open_only`, `unknown` | yes |
+| `fidelity_source` | how fidelity was determined | yes |
+| `scan_warning.code` | see [`scan_warning`](#scan_warning) | yes — new diagnostics are added routinely |
+| terminal `error_code` | see the terminal events | yes |
+
+`state` and `source` are the two a consumer is most likely to `match` on exhaustively, and
+they are the two that will not move. Everything else needs a default branch: a reader that
+rejects an unrecognised `scan_warning.code` will break the first time a new diagnostic
+ships, which is a normal within-version change and not a schema break.
+
+Widening a closed set is a version bump. `chain` and `pool` joining `transport.type` was
+not, which is exactly the distinction this table exists to make.
 
 **The terminal event's `counts` are the authority on totals**, not the number of lines of
 any given type. `scanr output verify` reconciles the two and fails if they disagree, so

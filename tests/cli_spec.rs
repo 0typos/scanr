@@ -242,6 +242,99 @@ fn usage_errors_exit_one_and_help_exits_zero() {
     }
 }
 
+/// A minimal well-formed record: two IP targets, one open and one closed, schema 2.
+fn write_minimal_record(dir: &std::path::Path) -> std::path::PathBuf {
+    let path = dir.join("good.jsonl");
+    std::fs::write(
+        &path,
+        concat!(
+            r#"{"type":"scan_started","seq":0,"ts":"2026-07-30T12:00:00.000Z","scan_id":"a1","schema_version":2,"tool_version":"0.1.0"}"#,
+            "\n",
+            r#"{"type":"scan_config","seq":1,"ts":"2026-07-30T12:00:00.000Z","scan_id":"a1","scan_name":"s","targets":{"spec":["10.0.0.0/31"],"exclude":[],"count":2},"ports":{"spec":"80","count":1},"probes_planned":2,"permutation":{"seed":"00000000000000ff"},"transport":{"name":"direct","type":"direct","measured_fidelity":"full","password":null}}"#,
+            "\n",
+            r#"{"type":"probe_result","seq":2,"ts":"2026-07-30T12:00:00.000Z","scan_id":"a1","probe_index":0,"target":"10.0.0.0","port":80,"protocol":"tcp","state":"open","source":"local_stack","service_label":"http","attempts":1,"attempt_states":["open"],"timing_ms":{"connect":1.5,"total":1.5}}"#,
+            "\n",
+            r#"{"type":"probe_result","seq":3,"ts":"2026-07-30T12:00:00.000Z","scan_id":"a1","probe_index":1,"target":"10.0.0.1","port":80,"protocol":"tcp","state":"closed","source":"local_stack","service_label":"http","attempts":1,"attempt_states":["closed"],"timing_ms":{"connect":1.5,"total":1.5}}"#,
+            "\n",
+            r#"{"type":"scan_completed","seq":4,"ts":"2026-07-30T12:00:00.000Z","scan_id":"a1","termination":"natural","duration_ms":12,"exit_code":0,"counts":{"planned":2,"started":2,"completed":2,"not_started":0,"open":1,"closed":1,"filtered":0,"error":0,"retried":0}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    path
+}
+
+/// `output verify` must not answer "I could not check" and "I checked and it is bad"
+/// with the same number, which is the one distinction its exit code exists to carry.
+#[test]
+fn verify_separates_an_unreadable_record_from_a_bad_one() {
+    const BIN: &str = env!("CARGO_BIN_EXE_scanr");
+    let dir = tempfile::tempdir().unwrap();
+
+    let bad = dir.path().join("bad.jsonl");
+    std::fs::write(&bad, "not json at all\n").unwrap();
+
+    let good = write_minimal_record(dir.path());
+
+    let code = |p: &std::path::Path| {
+        std::process::Command::new(BIN)
+            .args(["output", "verify"])
+            .arg(p)
+            .output()
+            .expect("binary should run")
+            .status
+            .code()
+    };
+
+    assert_eq!(code(&good), Some(0), "a clean record must exit 0");
+    assert_eq!(
+        code(&dir.path().join("no-such-file.jsonl")),
+        Some(1),
+        "an unreadable record must exit 1, as a usage error does everywhere else"
+    );
+    assert_eq!(
+        code(&bad),
+        Some(2),
+        "a record with problems must exit 2, distinct from not being able to read one"
+    );
+}
+
+/// A `--hosts` filter naming something the record holds as an address returns nothing,
+/// and an empty result is indistinguishable from "nothing was open". Host filters are
+/// deliberately not resolved — the record is read offline, and a scan using
+/// transport-side DNS never resolved the name locally either — so the tool has to say so.
+#[test]
+fn a_name_filter_that_matches_nothing_explains_itself() {
+    const BIN: &str = env!("CARGO_BIN_EXE_scanr");
+    let dir = tempfile::tempdir().unwrap();
+    let rec = write_minimal_record(dir.path());
+
+    let run = |filter: &str| {
+        let out = std::process::Command::new(BIN)
+            .args(["output", "results"])
+            .arg(&rec)
+            .args(["--hosts", filter])
+            .output()
+            .expect("binary should run");
+        String::from_utf8_lossy(&out.stderr).to_string()
+    };
+
+    assert!(
+        run("example.com").contains("are not resolved"),
+        "a name filter matching nothing must explain why"
+    );
+    // Not for an address: "no results for 10.9.9.9" is already unambiguous, and a note on
+    // every empty address query would be noise.
+    assert!(
+        !run("10.9.9.9").contains("are not resolved"),
+        "an address filter needs no explanation"
+    );
+    assert!(
+        !run("10.0.0.0").contains("are not resolved"),
+        "a filter that matched must not warn"
+    );
+}
+
 // ── the profile table ───────────────────────────────────────────────────────
 
 /// `docs/configuration.md` must describe the profiles that exist, with their real values.
