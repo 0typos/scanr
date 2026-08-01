@@ -7,7 +7,7 @@ All notable changes to `scanr` are recorded here. The format follows
 ## About the version number
 
 `scanr` is released at `0.x` deliberately. The JSONL scan record is additive-stable
-within `schema_version 1` — new optional fields **and new event types** may appear, while
+within a `schema_version` — new optional fields **and new event types** may appear, while
 existing fields keep their type and meaning and are not removed. Consumers dispatch on
 `type`, ignore what they do not recognise, and read totals from the terminal event's
 `counts` rather than by counting lines of any one type. That promise is not yet hardened
@@ -16,6 +16,32 @@ parsed a record and told us what the format is missing. Schema feedback is expli
 invited before then.
 
 ## [Unreleased]
+
+### Changed
+
+- **Span ranges are now counter indices, and `schema_version` is `2`.** `probe_span.probe_indices`
+  encoded matrix positions, which meant the run-length encoding depended on probe *order*:
+  order is randomised, so each drain window covered a scattered subset of the matrix and
+  the ranges degenerated toward one per probe. Measured on a rate-limited 20,001-probe scan
+  long enough to drain repeatedly, matrix space produced 10,023 ranges against counter
+  space's 595 — an 11x smaller record (53,765 B to 4,893 B). Counter space is contiguous by
+  construction, so the collapse no longer decays with scan duration.
+
+  Expanding a span now requires the permutation seed, which `scan_config` has always
+  recorded; run a counter index through the permutation to get the old `probe_index`, then
+  map it as before. `scanr output results`, `summarize` and `remainder` do this for you.
+  This build **writes** version 2 and **reads** versions 1 and 2 — older records keep
+  working unchanged. A version 1 reader correctly refuses a version 2 record rather than
+  expanding it to the wrong endpoints, which is why the version was bumped.
+
+### Fixed
+
+- **`output verify` accepted only the exact schema version this build writes**, so it
+  would have rejected every older record the moment the version moved. It now accepts any
+  version the build can read and names them when it refuses.
+- **A version 2 record with a missing or unparseable permutation seed is now reported.**
+  Its spans cannot be expanded, and the failure was silent: the reader produced the right
+  number of well-formed endpoints, all of them wrong.
 
 ## [0.2.2] - 2026-08-01
 

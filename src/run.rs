@@ -538,7 +538,10 @@ impl Collector<'_> {
                     // A bulk outcome goes into the span accumulator instead of getting
                     // a row, and is written out at the next progress tick alongside
                     // every probe that shared its outcome.
-                    let absorbed = self.spans.as_mut().is_some_and(|s| s.absorb(&record));
+                    let absorbed = self
+                        .spans
+                        .as_mut()
+                        .is_some_and(|s| s.absorb(raw_index, &record));
                     if !absorbed {
                         emit(writer, writer_error, "probe_result", record.to_json());
                     }

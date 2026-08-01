@@ -11,12 +11,23 @@
 //! to derive what was missed. What is lost: the per-probe timestamp, and exact timing
 //! for probes whose timing was "the timeout fired". Aggregate timing is kept.
 //!
-//! Endpoints are recorded as ranges over `probe_index`, which is the target-major
-//! position in the planned matrix — `probe_index / port_count` selects the target and
-//! `probe_index % port_count` the port. The permutation decides only the *order* probes
-//! are visited, never the mapping, so a consumer expands a span with arithmetic and the
-//! specs already in `scan_config`. A scan whose results are uniform collapses to a
-//! handful of ranges.
+//! Endpoints are recorded as ranges over the *counter* index — the order the work counter
+//! issued each probe — not the permuted `probe_index` it maps to. Run a counter index
+//! through the recorded permutation and you get the target-major matrix position, where
+//! `probe_index / port_count` selects the target and `probe_index % port_count` the port.
+//! Both numbers are derivable from `scan_config` alone, so a consumer still expands a span
+//! with arithmetic and no extra state.
+//!
+//! The indirection buys the collapse. Probe order is randomised, so a drain window holds a
+//! scattered subset of the matrix: encoded in matrix space the ranges degenerate to about
+//! one per probe. Measured on a rate-limited 20,001-probe scan long enough to drain
+//! repeatedly, matrix space produced 10,023 ranges and counter space 595 — an 11× smaller
+//! record (53,765 bytes to 4,893). In counter space a drain window is contiguous by
+//! construction, so a scan whose results are uniform collapses to a handful of ranges
+//! however the order was shuffled.
+//!
+//! This is what `schema_version` 2 means; version 1 wrote matrix indices, and readers
+//! still expand those correctly by skipping the permutation step.
 
 use std::collections::BTreeMap;
 
@@ -148,8 +159,17 @@ impl Spans {
 
     /// Absorb a record, returning whether it was taken. A refused record must still be
     /// written as its own row.
-    pub fn absorb(&mut self, record: &ProbeRecord) -> bool {
-        if self.exhausted || !Self::is_bulk(record) || record.probe_index >= self.planned {
+    /// `index` is the *counter* index — the order the work counter issued this probe,
+    /// before the permutation was applied.
+    ///
+    /// Not the permuted `probe_index`. Probe order is randomised, so a drain window holds
+    /// a scattered subset of the matrix and the run-length encoding degenerated to about
+    /// one range per probe: measured, the documented 151,000x collapse fell to 118x on a
+    /// scan of realistic duration, because the ratio only survived while a scan finished
+    /// inside one progress interval. In counter space a window is a near-contiguous block,
+    /// which is the same reason the resume set is expressed there.
+    pub fn absorb(&mut self, index: u64, record: &ProbeRecord) -> bool {
+        if self.exhausted || !Self::is_bulk(record) || index >= self.planned {
             return false;
         }
         let key = (
@@ -163,10 +183,10 @@ impl Spans {
             self.exhausted = true;
             return false;
         }
-        self.groups.entry(key).or_insert_with(Group::new).add(
-            record.probe_index,
-            record.outcome.phases.total.as_secs_f64() * 1000.0,
-        );
+        self.groups
+            .entry(key)
+            .or_insert_with(Group::new)
+            .add(index, record.outcome.phases.total.as_secs_f64() * 1000.0);
         true
     }
 
@@ -217,6 +237,31 @@ mod tests {
     use super::*;
     use crate::probe::{Phases, ProbeOutcome};
     use std::time::Duration;
+
+    /// The span records the *counter* index it was handed, never the record's own
+    /// `probe_index`.
+    ///
+    /// These two are the same number only when the permutation is the identity, which is
+    /// exactly what every other test in this module uses — so a version that stored
+    /// `record.probe_index` passed all of them and still shipped ranges that expanded to
+    /// the wrong endpoints, including ones already reported open. Keep the two spaces
+    /// visibly different here.
+    #[test]
+    fn the_counter_index_is_stored_not_the_probe_index() {
+        let mut s = Spans::new(4);
+        for (counter, permuted) in [(0u64, 2u64), (1, 3), (2, 1)] {
+            let mut r = record(permuted, 80, State::Closed, 1);
+            r.probe_index = permuted;
+            assert!(s.absorb(counter, &r));
+        }
+        let bodies = s.drain_events();
+        let ranges = &bodies[0]["probe_indices"];
+        assert_eq!(
+            ranges.to_string(),
+            "[[0,2]]",
+            "expected the contiguous counter range, got the scattered permuted one"
+        );
+    }
 
     fn record(index: u64, port: u16, state: State, ms: u64) -> ProbeRecord {
         ProbeRecord {
@@ -291,11 +336,11 @@ mod tests {
     #[test]
     fn attempts_separate_spans_and_are_reported() {
         let mut s = Spans::new(10);
-        s.absorb(&record(0, 80, State::Filtered, 300));
+        s.absorb(0, &record(0, 80, State::Filtered, 300));
         let mut r = record(1, 80, State::Filtered, 300);
         r.attempts = 2;
         r.attempt_states = vec![State::Filtered, State::Filtered];
-        s.absorb(&r);
+        s.absorb(r.probe_index, &r);
         let events = s.drain_events();
         assert_eq!(
             events.len(),
@@ -314,7 +359,7 @@ mod tests {
     fn contiguous_probes_collapse_to_one_range() {
         let mut s = Spans::new(100);
         for i in 0..100 {
-            assert!(s.absorb(&record(i, 80, State::Filtered, 300)));
+            assert!(s.absorb(i, &record(i, 80, State::Filtered, 300)));
         }
         let events = s.drain_events();
         assert_eq!(events.len(), 1, "one outcome class, one span");
@@ -327,7 +372,7 @@ mod tests {
     fn a_hole_splits_the_range() {
         let mut s = Spans::new(10);
         for i in [0, 1, 2, 5, 6, 9] {
-            s.absorb(&record(i, 80, State::Filtered, 300));
+            s.absorb(i, &record(i, 80, State::Filtered, 300));
         }
         assert_eq!(
             s.drain_events()[0]["probe_indices"],
@@ -338,8 +383,8 @@ mod tests {
     #[test]
     fn distinct_outcomes_get_distinct_spans() {
         let mut s = Spans::new(10);
-        s.absorb(&record(0, 80, State::Filtered, 300));
-        s.absorb(&record(1, 80, State::Closed, 1));
+        s.absorb(0, &record(0, 80, State::Filtered, 300));
+        s.absorb(1, &record(1, 80, State::Closed, 1));
         let events = s.drain_events();
         assert_eq!(events.len(), 2);
         let states: Vec<&str> = events
@@ -356,7 +401,7 @@ mod tests {
     fn timing_is_summarised_not_discarded() {
         let mut s = Spans::new(10);
         for (i, ms) in [(0u64, 100u64), (1, 200), (2, 300)] {
-            s.absorb(&record(i, 80, State::Filtered, ms));
+            s.absorb(i, &record(i, 80, State::Filtered, ms));
         }
         let t = &s.drain_events()[0]["timing_ms"];
         assert_eq!(t["min"], 100.0);
@@ -372,7 +417,7 @@ mod tests {
         for i in 0..(MAX_GROUPS as u64 + 10) {
             let mut r = record(i, 80, State::Filtered, 300);
             r.outcome.reason = Some(format!("reason {i}"));
-            let taken = s.absorb(&r);
+            let taken = s.absorb(r.probe_index, &r);
             if i >= MAX_GROUPS as u64 {
                 assert!(!taken, "group {i} should not have been absorbed");
             }
@@ -386,7 +431,7 @@ mod tests {
     fn draining_empties_the_accumulator() {
         let mut s = Spans::new(100);
         for i in 0..10 {
-            s.absorb(&record(i, 80, State::Filtered, 300));
+            s.absorb(i, &record(i, 80, State::Filtered, 300));
         }
         let first = s.drain_events();
         assert_eq!(first.len(), 1);
@@ -402,7 +447,7 @@ mod tests {
 
         // Probes after a drain form their own span, disjoint from the first.
         for i in 10..15 {
-            s.absorb(&record(i, 80, State::Filtered, 300));
+            s.absorb(i, &record(i, 80, State::Filtered, 300));
         }
         let second = s.drain_events();
         assert_eq!(second[0]["count"], 5);
@@ -415,8 +460,11 @@ mod tests {
     #[test]
     fn a_huge_plan_costs_nothing_until_probes_arrive() {
         let mut s = Spans::new(u64::MAX);
-        assert!(s.absorb(&record(u64::MAX - 1, 80, State::Filtered, 300)));
-        assert!(s.absorb(&record(7, 80, State::Filtered, 300)));
+        assert!(s.absorb(
+            u64::MAX - 1,
+            &record(u64::MAX - 1, 80, State::Filtered, 300)
+        ));
+        assert!(s.absorb(7, &record(7, 80, State::Filtered, 300)));
         let ev = s.drain_events();
         assert_eq!(ev[0]["count"], 2);
         assert_eq!(
@@ -436,7 +484,7 @@ mod tests {
             // A distinct reason per probe, so each opens its own group.
             let mut r = record(i * 1_000_000, 80, State::Filtered, 300);
             r.outcome.reason = Some(format!("reason {i}"));
-            assert!(s.absorb(&r));
+            assert!(s.absorb(r.probe_index, &r));
         }
         assert_eq!(s.groups.len(), 64, "the class ceiling, all allocated");
         let total: u64 = s
@@ -454,7 +502,7 @@ mod tests {
     fn count_matches_the_ranges_it_reports() {
         let mut s = Spans::new(100);
         for i in [5u64, 1, 3, 2, 1, 5] {
-            s.absorb(&record(i, 80, State::Filtered, 300));
+            s.absorb(i, &record(i, 80, State::Filtered, 300));
         }
         let ev = s.drain_events();
         assert_eq!(ev[0]["probe_indices"], json!([[1, 3], [5, 5]]));
@@ -473,7 +521,7 @@ mod tests {
         let mut with = |i: u64, member: &str| {
             let mut r = record(i, 80, State::Filtered, 300);
             r.outcome.via = Some(std::sync::Arc::from(member));
-            assert!(s.absorb(&r));
+            assert!(s.absorb(r.probe_index, &r));
         };
         with(0, "exit-a");
         with(1, "exit-b");
@@ -497,8 +545,8 @@ mod tests {
     #[test]
     fn an_index_beyond_the_plan_is_refused_rather_than_panicking() {
         let mut s = Spans::new(10);
-        assert!(!s.absorb(&record(10, 80, State::Filtered, 300)));
-        assert!(!s.absorb(&record(u64::MAX, 80, State::Filtered, 300)));
+        assert!(!s.absorb(10, &record(10, 80, State::Filtered, 300)));
+        assert!(!s.absorb(u64::MAX, &record(u64::MAX, 80, State::Filtered, 300)));
         assert!(s.groups.is_empty());
     }
 }

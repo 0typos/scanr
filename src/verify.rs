@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 use crate::net::target::{TargetSet, TargetSpec, format_pair, parse_pair};
 use crate::net::{Target, parse_ports, parse_target};
 use crate::output::human::Style;
+use crate::plan::Permutation;
 use crate::probe::State;
 use crate::units::{HumanElapsed, commas};
 
@@ -304,6 +305,12 @@ struct Verifier {
     span_probes: u64,
     spans: u64,
     resumed_from: Option<String>,
+    /// Whether `scan_config` carried a parseable permutation seed.
+    ///
+    /// From schema 2 on, span ranges are counter indices and the seed is what turns them
+    /// back into endpoints. Without it a reader cannot expand a span at all — and the way
+    /// it fails is silent, producing plausible endpoints that are simply the wrong ones.
+    seed_usable: bool,
 
     credential_problems: Vec<String>,
     values: ValueProblems,
@@ -344,6 +351,9 @@ impl Verifier {
             self.saw_config = true;
             self.planned = e["probes_planned"].as_u64();
             self.resumed_from = e["resumed_from"].as_str().map(str::to_string);
+            self.seed_usable = e["permutation"]["seed"]
+                .as_str()
+                .is_some_and(|s| u64::from_str_radix(s, 16).is_ok());
         }
         if k == "probe_result" {
             self.observed_probes += 1;
@@ -476,12 +486,35 @@ impl Verifier {
                 self.second_kind.as_deref().unwrap_or("")
             ));
         }
+        // Every version this build knows how to read, not just the one it writes.
+        // Bumping the writer must not make yesterday's records unreadable — the whole
+        // point of the field is that a reader can tell which shape it has and act on it,
+        // and `walk_results` does exactly that for span index space.
         if let Some(v) = self.schema_version
-            && v != crate::output::SCHEMA_VERSION as u64
+            && !crate::output::SUPPORTED_SCHEMA_VERSIONS.contains(&(v as u32))
         {
             problems.push(format!(
-                "schema_version {v} is not supported by this build ({})",
-                crate::output::SCHEMA_VERSION
+                "schema_version {v} is not supported by this build (reads {})",
+                crate::output::SUPPORTED_SCHEMA_VERSIONS
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        // From schema 2 on, span ranges are counter indices and only the seed maps them
+        // back to endpoints. Say so rather than expanding without it: the result would be
+        // the right *number* of well-formed endpoints, all of them wrong, with nothing in
+        // the file to show for it.
+        if self.spans > 0
+            && self.saw_config
+            && !self.seed_usable
+            && self.schema_version.is_some_and(|v| v >= 2)
+        {
+            problems.push(format!(
+                "{} probe_span event(s) need the permutation seed to expand, \
+                 but scan_config has none that parses",
+                self.spans
             ));
         }
     }
@@ -1646,6 +1679,29 @@ struct ResultRow<'a> {
     total_ms: Option<f64>,
 }
 
+/// The permutation a v2 record's span indices must be run through, if any.
+///
+/// `None` means the ranges are already matrix indices, which is what version 1 wrote.
+///
+/// Pair scans are *not* an exception: `run` builds the permutation unconditionally and
+/// indexes the pair list with the permuted value, so a pair scan's counter index needs the
+/// same round trip as a matrix scan's. Only the final step differs — the permuted value
+/// indexes `targets.pairs` directly instead of being divided by the port count.
+fn span_permutation(cfg: &Value, scan: &RecordScan) -> Option<Permutation> {
+    let version = scan
+        .header
+        .as_ref()
+        .and_then(|h| h["schema_version"].as_u64())
+        .unwrap_or(1);
+    if version < 2 {
+        return None;
+    }
+    let planned = cfg["probes_planned"].as_u64()?;
+    let seed = cfg["permutation"]["seed"].as_str()?;
+    let seed = u64::from_str_radix(seed, 16).ok()?;
+    Some(Permutation::new(planned.max(1), seed))
+}
+
 /// Walk every probe result in a record — rows and span-expanded alike.
 ///
 /// The shared spine of `results` and `summarize`, and the reason either can be trusted:
@@ -1658,6 +1714,10 @@ struct ResultRow<'a> {
 fn walk_results(path: &Path, mut f: impl FnMut(ResultRow<'_>)) -> Result<RecordScan, String> {
     let mut scan = RecordScan::default();
     let mut expected: Option<Expected> = None;
+    // v2 records write span ranges in counter space, so expanding one means undoing the
+    // permutation. v1 wrote permuted indices directly. Both are readable; which applies is
+    // decided by the record, not by this build.
+    let mut unpermute: Option<Option<Permutation>> = None;
 
     for line in stream(path)? {
         let line = line?;
@@ -1707,8 +1767,10 @@ fn walk_results(path: &Path, mut f: impl FnMut(ResultRow<'_>)) -> Result<RecordS
                         format!("{} has a probe_span before its scan_config", path.display())
                     })?;
                     expected = Some(expected_endpoints(cfg, path)?);
+                    unpermute = Some(span_permutation(cfg, &scan));
                 }
                 let exp = expected.as_ref().expect("just built");
+                let perm = unpermute.as_ref().expect("just built").as_ref();
                 let source = e["source"].as_str().unwrap_or("");
                 let reason = e["reason"].as_str();
                 let stride = exp.stride();
@@ -1720,7 +1782,9 @@ fn walk_results(path: &Path, mut f: impl FnMut(ResultRow<'_>)) -> Result<RecordS
                     let (Some(a), Some(b)) = (r[0].as_u64(), r[1].as_u64()) else {
                         continue;
                     };
-                    for i in a..=b {
+                    for raw in a..=b {
+                        // Counter index in, matrix index out.
+                        let i = perm.map_or(raw, |p| p.apply(raw));
                         let slot = i / stride;
                         if cached.as_ref().is_none_or(|(s, _)| *s != slot) {
                             let Some((name, _)) = exp.at(i) else { continue };
@@ -2376,6 +2440,65 @@ mod tests {
                    "counts":{"planned":4,"started":4,"completed":4,"not_started":0,
                              "open":1,"closed":1,"filtered":1,"error":1,"retried":0}}),
         ]
+    }
+
+    /// A version 2 record whose seed is missing or unparseable cannot have its spans
+    /// expanded, and the failure mode is silent: without this check the reader falls back
+    /// to treating counter indices as matrix indices and emits the right *number* of
+    /// well-formed endpoints, every one of them wrong.
+    #[test]
+    fn a_v2_span_without_a_usable_seed_is_reported() {
+        let d = tempfile::tempdir().unwrap();
+        for (label, seed) in [("missing", None), ("unparseable", Some("not-hex"))] {
+            let mut events = good_events();
+            events[0]["schema_version"] = json!(2);
+            match seed {
+                Some(v) => events[1]["permutation"]["seed"] = json!(v),
+                None => {
+                    events[1]["permutation"] = json!({});
+                }
+            }
+            // Replace the four rows with one span covering them.
+            events.splice(
+                2..6,
+                [json!({"type":"probe_span","seq":2,"ts":"2026-07-30T12:00:00.000Z","scan_id":"a1",
+                        "state":"closed","source":"local_stack","protocol":"tcp","attempts":1,
+                        "count":4,"probe_indices":[[0,3]],
+                        "timing_ms":{"min":1.0,"mean":1.0,"max":1.0}})],
+            );
+            events[3]["counts"] = json!({"planned":4,"started":4,"completed":4,"not_started":0,
+                                         "open":0,"closed":4,"filtered":0,"error":0,"retried":0});
+            let p = write(d.path(), &format!("seed-{label}.jsonl"), &events);
+            let r = verify(&p).unwrap();
+            assert!(
+                r.problems.iter().any(|p| p.contains("permutation seed")),
+                "{label} seed went unreported: {:?}",
+                r.problems
+            );
+        }
+    }
+
+    /// ...and the same record with a good seed must stay clean, or the check above is
+    /// just firing on every spanned record.
+    #[test]
+    fn a_v2_span_with_a_usable_seed_is_accepted() {
+        let d = tempfile::tempdir().unwrap();
+        let mut events = good_events();
+        events[0]["schema_version"] = json!(2);
+        events.splice(
+            2..6,
+            [
+                json!({"type":"probe_span","seq":2,"ts":"2026-07-30T12:00:00.000Z","scan_id":"a1",
+                    "state":"closed","source":"local_stack","protocol":"tcp","attempts":1,
+                    "count":4,"probe_indices":[[0,3]],
+                    "timing_ms":{"min":1.0,"mean":1.0,"max":1.0}}),
+            ],
+        );
+        events[3]["counts"] = json!({"planned":4,"started":4,"completed":4,"not_started":0,
+                                     "open":0,"closed":4,"filtered":0,"error":0,"retried":0});
+        let p = write(d.path(), "seed-ok.jsonl", &events);
+        let r = verify(&p).unwrap();
+        assert!(r.problems.is_empty(), "{:?}", r.problems);
     }
 
     #[test]

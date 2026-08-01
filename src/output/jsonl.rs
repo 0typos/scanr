@@ -18,7 +18,14 @@ use serde_json::{Map, Value, json};
 
 use crate::timefmt::{now_epoch_ms, rfc3339_ms};
 
-pub const SCHEMA_VERSION: u32 = 1;
+/// Bumped to 2 when `probe_span.probe_indices` moved from permuted to counter space.
+/// A v1 reader handed a v2 record would expand every span to the wrong endpoints, which
+/// is exactly the silent misread a version field exists to prevent.
+pub const SCHEMA_VERSION: u32 = 2;
+
+/// Versions this build can *read*. Writing moves forward; reading does not drop support,
+/// because a record is an archive and the tool that wrote it may be long gone.
+pub const SUPPORTED_SCHEMA_VERSIONS: &[u32] = &[1, 2];
 const FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Events whose loss would make the file uninterpretable are flushed immediately.

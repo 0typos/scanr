@@ -7,7 +7,7 @@ use std::net::IpAddr;
 use crate::probe::{ProbeOutcome, State};
 
 pub use human::{Progress, ResultPrinter, Style};
-pub use jsonl::{Counts, JsonlWriter, SCHEMA_VERSION, new_scan_id};
+pub use jsonl::{Counts, JsonlWriter, SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS, new_scan_id};
 pub use span::Spans;
 
 /// Lowercase hex, for banner bytes that are not valid UTF-8.
