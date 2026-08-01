@@ -60,11 +60,26 @@ pub fn reply_name(code: u8) -> &'static str {
 }
 
 /// One SOCKS5 server on the path to the destination.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Hop {
     pub address: SocketAddr,
     pub username: Option<String>,
     pub password: Option<String>,
+}
+
+/// Hand-written so a credential cannot reach a log, a panic message or a fuzz dump.
+///
+/// `ResolvedHop` holds a `Secret`, whose own `Debug` redacts (D14). `build` unwraps that
+/// into a bare `String` here, and a derived `Debug` handed it straight back out —
+/// `Socks5Transport` had no `Debug` at all before this, so no `{:?}` could reach one.
+impl std::fmt::Debug for Hop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Hop")
+            .field("address", &self.address)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
 }
 
 /// A SOCKS5 path: one server, or a chain of them.
@@ -112,11 +127,6 @@ impl Socks5Transport {
             hops,
             fidelity,
         }
-    }
-
-    /// The first hop — what a probe actually opens a socket to.
-    pub fn address(&self) -> SocketAddr {
-        self.hops[0].address
     }
 
     pub fn hops(&self) -> &[Hop] {
@@ -184,7 +194,13 @@ impl Socks5Transport {
             if i == last {
                 break;
             }
-            // Ask this hop for a tunnel to the next one.
+            // Ask this hop for a tunnel to the next one. That reply waits on a real TCP
+            // connect from hop N to hop N+1, so it gets the destination budget — the
+            // handshake budget is for a local exchange with a proxy already connected to,
+            // and a chain across a WAN link exceeds it routinely.
+            if let Err(o) = set_timeouts(&s, timing.connect_timeout) {
+                return detailed(o, None);
+            }
             let next = Destination::Addr(self.hops[i + 1].address);
             if let Err(o) = self.open_tunnel(&mut s, &next, &mut phases, started, i) {
                 return detailed(o, None);
@@ -271,24 +287,35 @@ impl Socks5Transport {
         }
     }
 
-    /// Name the hop a failure happened at.
+    /// Re-attribute a failure to the hop it happened at.
     ///
-    /// Without this every chain failure reads as one anonymous proxy error, and finding
-    /// which link is down means bisecting the chain by hand.
-    fn blame_hop(&self, mut o: ProbeOutcome, index: usize) -> ProbeOutcome {
-        if self.hops.len() > 1 {
-            let at = format!(
-                " (at hop {} of {}, {})",
+    /// **This must rewrite `state`, not just `reason`.** The classifiers underneath are
+    /// written for a probe of a destination: a timeout becomes `filtered`, a refusal
+    /// becomes `closed`. Applied to a chain that failed while being *established*, those
+    /// verdicts are about a port nothing ever reached. Left alone, a single slow link
+    /// reported every port in the scan as `filtered` — and because `Source::Timeout` is
+    /// retryable and `filtered` is collapsible, each was retried and then folded into a
+    /// span, which drops the reason string that held the only hint of the truth.
+    ///
+    /// A chain that could not be built is an `error` about the chain. Nothing else.
+    fn blame_hop(&self, o: ProbeOutcome, index: usize) -> ProbeOutcome {
+        if self.hops.len() == 1 {
+            return o;
+        }
+        let what = o
+            .reason
+            .unwrap_or_else(|| "chain could not be established".into());
+        ProbeOutcome::new(
+            State::Error,
+            Source::ProxyReply,
+            format!(
+                "{what} (at hop {} of {}, {})",
                 index + 1,
                 self.hops.len(),
                 self.hops[index].address
-            );
-            o.reason = Some(match o.reason {
-                Some(r) => format!("{r}{at}"),
-                None => format!("chain failed{at}"),
-            });
-        }
-        o
+            ),
+            o.phases,
+        )
     }
 
     /// Greeting, method selection, and optional authentication.
@@ -736,6 +763,48 @@ mod tests {
         let c = Socks5Fixture::start(Behavior::Faithful);
         let o = chain(&[&a, &b, &c]).probe(&Destination::Addr(open), &timing());
         assert_eq!(o.state, State::Open, "{:?}", o.reason);
+    }
+
+    /// A link that *times out* is the case that matters, and the one the original test
+    /// missed: port 1 answers immediately, so it exercised the reply-code path and left
+    /// the timeout path — where the underlying classifier says `filtered` — untested.
+    /// A whole scan through one slow link reported every port as filtered.
+    #[test]
+    fn a_timed_out_link_is_not_a_verdict_on_the_destination() {
+        let a = Socks5Fixture::start(Behavior::Faithful);
+        // TEST-NET-1 never answers, so hop 1's CONNECT to hop 2 hangs.
+        let t = Socks5Transport::chained(
+            "c".into(),
+            vec![
+                Hop {
+                    address: a.addr(),
+                    username: None,
+                    password: None,
+                },
+                Hop {
+                    address: "192.0.2.1:1080".parse().expect("valid literal"),
+                    username: None,
+                    password: None,
+                },
+            ],
+            Fidelity::Full,
+        );
+        let mut t_ = timing();
+        t_.handshake_timeout = std::time::Duration::from_millis(300);
+        t_.connect_timeout = std::time::Duration::from_millis(300);
+
+        let o = t.probe(&Destination::Addr("10.0.0.9:443".parse().unwrap()), &t_);
+        assert_eq!(
+            o.state,
+            State::Error,
+            "nothing reached 10.0.0.9:443, so nothing may be claimed about it"
+        );
+        assert_eq!(o.source, Source::ProxyReply);
+        // ...and it must not look retryable or collapsible, or the truth in the reason
+        // string is retried and then folded into a span.
+        assert!(!o.is_retryable(), "a dead chain is not worth retrying");
+        let reason = o.reason.clone().unwrap_or_default();
+        assert!(reason.contains("hop 1"), "{reason}");
     }
 
     /// A broken link is a fact about the chain, not a verdict on a port nothing reached.

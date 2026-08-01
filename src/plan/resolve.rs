@@ -826,6 +826,10 @@ fn resolve_transport_inner(
                 .at(path));
             }
             let mut hops = Vec::with_capacity(names.len());
+            // Folded as we go. Resolving each hop a second time for its fidelity doubled
+            // the env/file reads behind `load_password` and made a pool of chains of
+            // chains resolve every leaf 2^depth times.
+            let mut fidelity = Fidelity::Full;
             for hop_name in &names {
                 let resolved = resolve_transport_at(files, hop_name, visiting)?;
                 // Only SOCKS5 can carry another hop: a chain is built out of CONNECTs,
@@ -843,6 +847,9 @@ fn resolve_transport_inner(
                     .at(path.clone())
                     .help("every hop of a chain must be a `socks5` transport"));
                 };
+                // One collapsing link flattens everything behind it, so the path can
+                // only claim what its weakest hop can.
+                fidelity = fidelity.weakest(resolved.fidelity);
                 hops.push(ResolvedHop {
                     name: hop_name.to_string(),
                     address,
@@ -850,16 +857,6 @@ fn resolve_transport_inner(
                     password,
                 });
             }
-            // One collapsing link flattens everything behind it, so the path can only
-            // claim what its weakest hop can.
-            let fidelity = names
-                .iter()
-                .map(|n| {
-                    resolve_transport_at(files, n, visiting)
-                        .map(|t| t.fidelity)
-                        .unwrap_or(Fidelity::Unknown)
-                })
-                .fold(Fidelity::Full, Fidelity::weakest);
             Ok(ResolvedTransport {
                 name: name.to_string(),
                 kind: TransportKind::Chain { hops },

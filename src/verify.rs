@@ -1587,6 +1587,8 @@ pub struct Hit {
     pub source: String,
     pub reason: Option<String>,
     pub service: Option<String>,
+    /// Which pool member produced it, when the transport was a pool.
+    pub via: Option<String>,
     /// Reconstructed from a `probe_span`, so it has no per-probe timing or timestamp.
     pub collapsed: bool,
     pub total_ms: Option<f64>,
@@ -1603,6 +1605,9 @@ impl Hit {
             "reason": self.reason,
             "service_label": self.service,
         });
+        if let Some(member) = &self.via {
+            v["via"] = json!(member);
+        }
         // Marked rather than silently absent: a consumer that sees no timing should know
         // whether the probe was fast or the detail was collapsed away.
         if self.collapsed {
@@ -1636,6 +1641,7 @@ struct ResultRow<'a> {
     source: &'a str,
     reason: Option<&'a str>,
     service: Option<&'a str>,
+    via: Option<&'a str>,
     collapsed: bool,
     total_ms: Option<f64>,
 }
@@ -1686,6 +1692,7 @@ fn walk_results(path: &Path, mut f: impl FnMut(ResultRow<'_>)) -> Result<RecordS
                     source: e["source"].as_str().unwrap_or(""),
                     reason: e["reason"].as_str(),
                     service: e["service_label"].as_str(),
+                    via: e["via"].as_str(),
                     collapsed: false,
                     total_ms: e["timing_ms"]["total"].as_f64(),
                 });
@@ -1728,6 +1735,8 @@ fn walk_results(path: &Path, mut f: impl FnMut(ResultRow<'_>)) -> Result<RecordS
                             source,
                             reason,
                             service: crate::services::service_label(p),
+                            // Spans carry it too, now that it is part of their key.
+                            via: e["via"].as_str(),
                             collapsed: true,
                             total_ms: None,
                         });
@@ -1759,6 +1768,7 @@ pub fn get(path: &Path, q: &Query) -> Result<Vec<Hit>, String> {
                 source: r.source.to_string(),
                 reason: r.reason.map(str::to_string),
                 service: r.service.map(str::to_string),
+                via: r.via.map(str::to_string),
                 collapsed: r.collapsed,
                 total_ms: r.total_ms,
             });
@@ -3350,6 +3360,7 @@ mod tests {
             source: "local_stack".into(),
             reason: None,
             service: None,
+            via: None,
             collapsed: false,
             total_ms: Some(1.0),
         }

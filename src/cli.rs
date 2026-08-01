@@ -613,21 +613,51 @@ pub fn render_plan(plan: &ScanPlan, facts: &HostFacts, no_color: bool) -> String
         format!("{} ({})", plan.transport.name, plan.transport.type_name()),
         &plan.provenance.render("transport"),
     );
-    if let TransportKind::Socks5 {
-        address, username, ..
-    } = &plan.transport.kind
-    {
-        row("  address", address.to_string(), "");
-        if let Some(u) = username {
-            row("  username", format!("{u} (password [redacted])"), "");
+    // Every proxied kind, not just the single-proxy one. Skipping chains and pools hid
+    // the "not measured" warning for exactly the transports whose fidelity is least
+    // certain — a chain inherits `unknown` from any one unmeasured hop.
+    match &plan.transport.kind {
+        TransportKind::Direct => {}
+        TransportKind::Socks5 {
+            address, username, ..
+        } => {
+            row("  address", address.to_string(), "");
+            if let Some(u) = username {
+                row("  username", format!("{u} (password [redacted])"), "");
+            }
         }
+        TransportKind::Chain { hops } => {
+            for (i, h) in hops.iter().enumerate() {
+                let creds = match &h.username {
+                    Some(u) => format!(" as {u} (password [redacted])"),
+                    None => String::new(),
+                };
+                row(
+                    &format!("  hop {}", i + 1),
+                    format!("{} ({}){creds}", h.address, h.name),
+                    "",
+                );
+            }
+        }
+        TransportKind::Pool { members } => {
+            for m in members {
+                row(
+                    "  member",
+                    format!("{} ({}, {})", m.name, m.type_name(), m.fidelity),
+                    "",
+                );
+            }
+        }
+    }
+    if !matches!(plan.transport.kind, TransportKind::Direct) {
         row(
             "  fidelity",
             plan.transport.fidelity.to_string(),
-            if plan.transport.fidelity == Fidelity::Unknown {
-                "not measured"
-            } else {
-                "declared in config"
+            match (&plan.transport.kind, plan.transport.fidelity) {
+                (_, Fidelity::Unknown) => "not measured",
+                (TransportKind::Chain { .. }, _) => "weakest hop",
+                (TransportKind::Pool { .. }, _) => "weakest member",
+                _ => "declared in config",
             },
         );
     }

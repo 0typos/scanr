@@ -177,7 +177,11 @@ pub fn measure(
                     .collect(),
                 Fidelity::Unknown,
             ),
-            hops[0].address,
+            // The *last* hop issues the CONNECT that reaches the calibration targets, so
+            // reachability has to be judged from its vantage point. Using hop 1's address
+            // made scanr bind a loopback listener and ask a remote exit node to reach it,
+            // then report a working chain as unmeasurable.
+            hops[hops.len() - 1].address,
         ),
     };
 
@@ -207,7 +211,7 @@ pub fn measure(
             ("known-closed", closed_dest, "closed", timing),
             ("blackholed", blackhole, "filtered", &short),
         ],
-        client.hops()[0].username.is_some(),
+        client.hops().iter().any(|h| h.username.is_some()),
     );
 
     let closed_reply = checks
@@ -231,7 +235,7 @@ pub fn measure(
 
     Ok(FidelityReport {
         transport: transport.name.clone(),
-        kind: "socks5".into(),
+        kind: transport.type_name().into(),
         address: Some(address.to_string()),
         reachable,
         auth,
@@ -541,11 +545,19 @@ impl FidelityReport {
 
         // Measuring is only half the job — recording it in config is what silences the
         // per-scan warning and puts the fact in version control (D8).
+        //
+        // Only for a single proxy. A chain's fidelity is its weakest hop's and a pool's
+        // its weakest member's, both derived, and the config refuses a declared one — so
+        // telling an operator to write it there would be advice that fails validation.
         if self.kind == "socks5" && self.fidelity != Fidelity::Unknown {
             s.push_str(&format!(
                 "\n  to record this, add to [transports.{}]:\n      fidelity = \"{}\"\n",
                 self.transport, self.fidelity
             ));
+        } else if self.kind == "chain" && self.fidelity != Fidelity::Unknown {
+            s.push_str(
+                "\n  a chain's fidelity is derived from its hops; record it on the socks5\n                   transports the chain names, not on the chain itself.\n",
+            );
         }
         s
     }
