@@ -31,7 +31,12 @@ use crate::units::{HumanElapsed, commas};
 const CHANNEL_DEPTH: usize = 4096;
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
 /// Upper bound on how long we wait for in-flight probes after an interrupt. The real
-/// bound is the connect timeout; this stops a very long timeout from feeling hung.
+/// How long the *collector* keeps reading results after an interrupt.
+///
+/// Not a bound on shutdown. Once this expires the collector stops, but workers already
+/// inside a blocking `connect` are still joined, and that can take the full phase budget
+/// — 21s on `proxy-careful`. The bound on shutdown is the second interrupt, which
+/// `join_workers` now observes while waiting; the first one drains, as the tool says.
 const MAX_DRAIN: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,6 +243,14 @@ pub(crate) fn execute_with(
     }
     .run(&rx, &mut writer, &mut writer_error);
 
+    // Before joining. The collector can stop while workers are still parked in
+    // `SyncSender::send` — that is exactly what the drain budget expiring means when the
+    // channel is full — and nothing receives again, so `join` waited forever. Dropping
+    // the receiver makes those sends fail, which `worker` already treats as "stop"
+    // (a `SendError` means nobody is listening). The buffered results discarded here are
+    // already accounted as `abandoned`, which the drain-budget break had implied anyway.
+    drop(rx);
+
     let mut counts = collected.counts;
     counts.started = counter.issued();
 
@@ -408,13 +421,31 @@ fn spawn_workers(
 /// outcome this tool exists to make impossible.
 ///
 /// A forced stop skips the join entirely: process exit will reap them.
+///
+/// The flag is re-read while waiting, not sampled once. `MAX_DRAIN` bounds the collector
+/// loop and nothing else, so a worker inside a blocking `connect` can hold this for the
+/// full phase budget — 21s on `proxy-careful`, 15s on `ssh-slow`. Sampling once meant the
+/// second Ctrl-C the tool explicitly promises ("interrupt again to exit immediately")
+/// arrived after the check and was ignored for that whole window.
 fn join_workers(handles: Vec<std::thread::JoinHandle<()>>, cancel: &Cancel) -> u32 {
-    if cancel.is_forced() {
-        return 0;
+    let mut pending = handles;
+    let mut panics = 0;
+    while !pending.is_empty() {
+        if cancel.is_forced() {
+            return panics;
+        }
+        // Reap whatever has finished; keep waiting on the rest.
+        let (done, still_running): (Vec<_>, Vec<_>) =
+            pending.into_iter().partition(|h| h.is_finished());
+        for h in done {
+            panics += u32::from(h.join().is_err());
+        }
+        pending = still_running;
+        if !pending.is_empty() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
-    handles
-        .into_iter()
-        .fold(0, |n, h| n + u32::from(h.join().is_err()))
+    panics
 }
 
 /// The collection loop's inputs. Bundled rather than passed individually because the

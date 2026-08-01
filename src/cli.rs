@@ -454,7 +454,6 @@ fn spawn_signal_watcher(cancel: Cancel) {
 
 pub fn main() -> ExitCode {
     let cli = Cli::parse();
-    install_signal_handler();
     ExitCode::from(dispatch(cli))
 }
 
@@ -550,6 +549,12 @@ fn build_plan(
 
 fn cmd_run(cli: &Cli, scan: Option<&str>, overrides: &OverrideArgs) -> Result<u8, ConfigError> {
     let plan = Arc::new(build_plan(cli, scan, overrides)?);
+    // Installed here, beside the only thing that reads the counter. Installing it in
+    // `main` replaced SIGINT and SIGTERM disposition for every subcommand while nothing
+    // observed them, so `plan`, `config`, `output` and friends became unkillable by
+    // anything short of SIGKILL — including a `run` still blocked reading targets from
+    // stdin, before this point.
+    install_signal_handler();
     let cancel = Cancel::new();
     spawn_signal_watcher(cancel.clone());
 

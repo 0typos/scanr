@@ -16,6 +16,14 @@ pub const DEFAULT_MAX_TARGETS: u64 = 4_000_000;
 /// 65,536 addresses; a /64 is 18 quintillion and is never what someone meant.
 pub const MIN_IPV6_PREFIX: u8 = 112;
 
+/// The most addresses any expansion may materialise, opt-in or not.
+///
+/// `--allow-large-range` means "I know this is big", not "iterate 2^128 addresses".
+/// Without this ceiling `::/0` under the flag entered a loop that cannot terminate and
+/// cannot be interrupted, because expansion happens before the signal watcher exists.
+/// 16,777,216 `Target`s is already ~400 MB.
+const MAX_EXPANDABLE: u128 = 16_777_216;
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TargetParseError {
     #[error("empty target")]
@@ -57,6 +65,15 @@ pub enum ExpandError {
          pass --allow-large-range if this is intentional"
     )]
     TooLarge { count: u64, limit: u64 },
+    #[error(
+        "`{spec}` expands to {approx} addresses, which no scan can hold in memory\n\
+         --allow-large-range raises the review threshold, not this ceiling of {limit}"
+    )]
+    BeyondExpansion {
+        spec: String,
+        approx: String,
+        limit: u128,
+    },
     #[error(
         "IPv6 prefix /{prefix} in `{spec}` covers {approx} addresses\n\
          scanr refuses IPv6 prefixes shorter than /{min} unless --allow-large-range is set"
@@ -310,10 +327,9 @@ impl TargetSpec {
 
     /// Check expansion is permitted before doing it.
     fn check_expandable(&self, allow_large: bool) -> Result<(), ExpandError> {
-        if allow_large {
-            return Ok(());
-        }
-        if let TargetSpec::Cidr { base, prefix } = self
+        // The specific diagnostic first — it names the prefix and the remedy.
+        if !allow_large
+            && let TargetSpec::Cidr { base, prefix } = self
             && base.is_ipv6()
             && *prefix < MIN_IPV6_PREFIX
         {
@@ -324,6 +340,17 @@ impl TargetSpec {
                 min: MIN_IPV6_PREFIX,
             });
         }
+        // Then the ceiling, which applies even under the opt-in. `--allow-large-range`
+        // means "I know this is big", not "iterate 2^128 addresses": before this, `::/0`
+        // with the flag entered a loop that cannot terminate and cannot be interrupted,
+        // because expansion happens before the signal watcher exists.
+        if self.count() > MAX_EXPANDABLE {
+            return Err(ExpandError::BeyondExpansion {
+                spec: self.to_string(),
+                approx: approx_count(self.count()),
+                limit: MAX_EXPANDABLE,
+            });
+        }
         Ok(())
     }
 
@@ -331,11 +358,14 @@ impl TargetSpec {
         match self {
             TargetSpec::Addr(a) => out.push(Target::Addr(*a)),
             TargetSpec::Host(h) => out.push(Target::Host(h.clone())),
-            TargetSpec::Cidr { base, prefix } => {
+            TargetSpec::Cidr { base, .. } => {
                 let is_v4 = base.is_ipv4();
-                let width = if is_v4 { 32u32 } else { 128 };
                 let start = to_u128(*base);
-                let n = 1u128 << (width - *prefix as u32);
+                // Through the checked path, as `count()` already does. `1u128 << 128` is
+                // a debug panic and a release wrap, so `::/0` reported covering exactly
+                // one address — the defect docs/security.md described in the past tense
+                // while it was still live in this arm.
+                let n = self.count();
                 for i in 0..n {
                     out.push(Target::Addr(from_u128(start + i, is_v4)));
                 }
@@ -604,6 +634,24 @@ mod tests {
         assert_eq!(t("10.0.0.0/16").count(), 65536);
         assert_eq!(t("2001:db8::/112").count(), 65536);
         assert_eq!(t("10.0.0.1-10.0.0.10").count(), 10);
+    }
+
+    /// `--allow-large-range` raises the review threshold, not the memory ceiling. Before
+    /// this, `::/0` under the flag shifted past `u128` (a debug panic, a release wrap to
+    /// one address) and, once that was checked, entered a loop over 2^128 that cannot be
+    /// interrupted — expansion happens before the signal watcher exists.
+    #[test]
+    fn expansion_is_bounded_even_under_the_opt_in() {
+        let set = TargetSet {
+            include: vec![t("::/0")],
+            exclude: vec![],
+        };
+        assert!(matches!(
+            set.expand(true, u64::MAX),
+            Err(ExpandError::BeyondExpansion { .. })
+        ));
+        // And the count itself no longer overflows.
+        assert_eq!(t("::/0").count(), u128::MAX);
     }
 
     #[test]

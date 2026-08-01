@@ -99,15 +99,58 @@ impl std::error::Error for ConfigError {}
 /// Mask the value of a credential-shaped assignment so an error that points at a
 /// password line does not print the password.
 fn redact_secret_value(line: &str) -> String {
-    let Some(eq) = line.find('=') else {
-        return line.to_string();
+    // Redacts every credential assignment on the line, not just one keyed off the first
+    // `=`. In a TOML inline table the first `=` belongs to the table's own name, so
+    // `lab = { ..., password = "hunter2" }` read as key `lab`, was judged non-credential,
+    // and was echoed whole into the caret diagnostic — on stderr, on every command. The
+    // single-key form redacted correctly, which is the form the test covered.
+    let is_credential_key = |k: &str| {
+        let k = k.trim().trim_matches('"').to_ascii_lowercase();
+        k == "password" || k == "secret" || k.ends_with("_password") || k.ends_with("_secret")
     };
-    let key = line[..eq].trim().trim_matches('"').to_ascii_lowercase();
-    if key == "password" || key.ends_with("_password") || key.ends_with("secret") {
-        format!("{}= \"[redacted]\"", &line[..eq])
-    } else {
-        line.to_string()
+
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut key_start = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            // A separator ends whatever key was being accumulated.
+            b'{' | b',' => {
+                out.push_str(&line[key_start..=i]);
+                key_start = i + 1;
+                i += 1;
+            }
+            b'=' => {
+                let key = &line[key_start..i];
+                out.push_str(key);
+                out.push('=');
+                i += 1;
+                // The value runs to the next top-level separator or the line's end.
+                let mut end = i;
+                let mut in_quotes = false;
+                while end < bytes.len() {
+                    match bytes[end] {
+                        b'"' => in_quotes = !in_quotes,
+                        b',' | b'}' if !in_quotes => break,
+                        _ => {}
+                    }
+                    end += 1;
+                }
+                let value = &line[i..end];
+                if is_credential_key(key) && !value.trim().is_empty() {
+                    out.push_str(" \"[redacted]\"");
+                } else {
+                    out.push_str(value);
+                }
+                i = end;
+                key_start = end;
+            }
+            _ => i += 1,
+        }
     }
+    out.push_str(&line[key_start..]);
+    out
 }
 
 fn display_path(p: &Path) -> String {
@@ -226,6 +269,19 @@ mod tests {
         );
         assert!(out.contains("[redacted]"), "{out}");
         assert!(out.contains('^'), "the caret should still be drawn: {out}");
+    }
+
+    /// The form that leaked: in a TOML inline table the first `=` belongs to the table's
+    /// own name, so the old rule read the key as `lab`, judged the line non-credential,
+    /// and echoed the password into the caret diagnostic on every command.
+    #[test]
+    fn an_inline_table_password_is_redacted_too() {
+        let line = r#"lab = { type = "socks5", password = "hunter2", bogus = 1 }"#;
+        let out = redact_secret_value(line);
+        assert!(!out.contains("hunter2"), "credential survived: {out}");
+        assert!(out.contains("[redacted]"), "{out}");
+        // Everything else on the line is preserved, so the diagnostic stays useful.
+        assert!(out.contains("socks5") && out.contains("bogus"), "{out}");
     }
 
     #[test]
