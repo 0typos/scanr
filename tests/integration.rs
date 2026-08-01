@@ -877,7 +877,7 @@ fn a_sigkilled_scan_keeps_the_probes_its_spans_stood_for() {
     );
 }
 
-/// `output cat` exists so a documented `jq` recipe works the same on every platform:
+/// `output events` exists so a documented `jq` recipe works the same on every platform:
 /// `zcat -f`'s pass-through of uncompressed input is a GNU extension, and macOS ships
 /// BSD gzip. It must be byte-faithful on both record formats.
 #[test]
@@ -1638,5 +1638,74 @@ fn output_results_labels_span_rows_from_the_configured_table() {
         stdout(&got).contains("collapsed-svc"),
         "the span row should be labelled from the configured table: {}",
         stdout(&got)
+    );
+}
+
+/// `summarize` against a real record — gzipped and span-collapsed, the default shape —
+/// with a configured services file.
+///
+/// There was no end-to-end `summarize` test at all, which is how it shipped reading
+/// labels from a table nothing had installed: `results` said `collapsed-svc` and
+/// `summarize` said null, for the same record in the same directory.
+#[test]
+fn summarize_and_results_agree_about_a_spanned_record() {
+    let d = tempfile::tempdir().unwrap();
+    let closed = closed_port();
+    std::fs::write(
+        d.path().join("my-services"),
+        format!("collapsed-svc  {}/tcp\n", closed.port()),
+    )
+    .unwrap();
+    std::fs::write(
+        d.path().join("scanr.toml"),
+        format!(
+            "version = 1\n[defaults]\noutput_dir = \"out\"\nservices_file = \"{}\"\n",
+            d.path().join("my-services").display()
+        ),
+    )
+    .unwrap();
+
+    let (_l, open) = open_port();
+    let out = scanr(
+        d.path(),
+        &[
+            "run",
+            "--targets",
+            "127.0.0.1",
+            "--ports",
+            &format!("{},{}", open.port(), closed.port()),
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let rec = scanr::testsupport::find_record(&d.path().join("out")).expect("a record");
+    let path = rec.to_str().unwrap();
+
+    let sum = scanr(d.path(), &["output", "summarize", path]);
+    assert_eq!(code(&sum), 0, "{}", stderr(&sum));
+    let text = stdout(&sum);
+
+    // The closed probe lives only in a span, so it is counted here only if spans expand.
+    assert!(text.contains("by host"), "{text}");
+    assert!(
+        text.contains("collapsed-svc"),
+        "the span row must be labelled from the configured table, as `results` does:\n{text}"
+    );
+
+    // ...and the two commands must not disagree about the same file.
+    let res = scanr(d.path(), &["output", "results", "--states", "closed", path]);
+    assert!(
+        stdout(&res).contains("collapsed-svc"),
+        "results: {}",
+        stdout(&res)
+    );
+
+    // The JSON carries the same, and identifies the scan it came from.
+    let js = scanr(d.path(), &["output", "summarize", "--json", path]);
+    let v: Value = serde_json::from_str(stdout(&js).trim()).expect("valid JSON");
+    assert!(v["scan_id"].is_string(), "{v}");
+    let svcs = v["services"].as_array().expect("services");
+    assert!(
+        svcs.iter().any(|s| s["service"] == "collapsed-svc"),
+        "{svcs:?}"
     );
 }

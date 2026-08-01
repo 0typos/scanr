@@ -292,35 +292,63 @@ look at a record you have not seen.
 
 ```console
 $ scanr output summarize scan-*.jsonl.gz
-  scope           3 targets x 7 ports = 21 probes
-  states          4 open, 17 closed, 0 filtered, 0 error
+  scan            internal-web
+  started         2026-08-01T09:14:02.117Z  (scanr 0.1.0)
+  transport       lab via socks5 (full)
+  scope           3 targets x 3 ports = 9 probes
+  seed            9f2c00a1b4de7731
+  result          scan_completed (natural)
+  duration        0.98s
+  states          4 open, 2 closed, 3 filtered, 0 error
 
 by host (3 hosts):
   host               open closed filtered  error  open ports
-  10.0.0.2              2      5        0      0  22/ssh 80/http
-  10.0.0.9              1      6        0      0  80/http
+  10.0.0.2              2      0        1      0  22/ssh 80/http
+  10.0.0.9              1      1        1      0  80/http
+  10.0.0.10             1      1        1      0  22/ssh
 
 by network (1 network):
   network              hosts  with-open   open filtered
-  10.0.0.0/24              3          3      4        0
+  10.0.0.0/24              3          3      4        3
 
-by service (2 services):
-  service            open closed filtered  ports
-  http                  2      1        0  80
-  ssh                   2      0        4  22
+by port (3 ports):
+  port     service            open closed filtered  error
+  22       ssh                   2      1        0      0
+  80       http                  2      1        0      0
+  445      microsoft-ds          0      0        3      0
+
+by service (3 services):
+  service            open closed filtered  error  ports
+  http                  2      1        0      0  80
+  ssh                   2      1        0      0  22
+  microsoft-ds          0      0        3      0  445
 ```
 
 `--by host`, `--by network`, `--by port`, `--by service` or `--by scan` narrows to one
 section. `--json` emits the same aggregates as one object, for anything that wants to
 compare two scans.
 
-Every state is counted, not just `open` — which is the point. "445 was filtered on 200
-hosts" is often the finding, and it needs the spans expanded to see. Networks are fixed
-`/24` (IPv6 `/64`) buckets rather than your target specs, because specs can overlap or
-nest and every record should bucket the same way if two are to be compared.
+Every state is counted, not just `open` — which is the point. Port 445 above was never
+open on any host and is still reported, because "445 was filtered on every host" is
+usually the finding. Ports and services are ranked by open, then filtered, so what
+answered comes first.
 
-This folds into counters as it streams, so summarising a /16 costs hosts plus ports
-rather than probes.
+Getting those counts means expanding spans, so `summarize` sees every probe even though
+most have no row of their own.
+
+Networks are fixed `/24` (IPv6 `/64`) buckets rather than your target specs: specs can
+overlap or nest, so there is no single network a host belongs to, and fixed buckets are
+what let two records be compared.
+
+The unnarrowed view caps each section at 25 rows and says what it left out — a /16 has
+65,536 hosts. `--by <section>` shows that section in full. Counting streams into
+counters, so a summary costs hosts plus ports rather than probes.
+
+Two things are reported rather than hidden. A result whose port the record states as out
+of range is counted in a `note` line and left out of the tables, instead of vanishing
+and leaving the totals unsupported. A state that is none of the four is counted
+separately rather than as `error`, so the tables cannot contradict the totals above
+them.
 
 ## Looking up results
 
