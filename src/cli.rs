@@ -414,9 +414,22 @@ extern "C" fn on_sigint(_sig: libc::c_int) {
     // SIGINT and SIGTERM, so a SIGTERM can nest inside a running SIGINT handler on the
     // same thread: both read 0, both store 1, and the user's escalation to forced is lost.
     // `fetch_update` lowers to a CAS loop — no allocation, no lock, still signal-safe.
-    let _ = SIGINT_COUNT.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-        Some(n.saturating_add(1))
-    });
+    // A compare-exchange loop rather than a load and a separate store. The same handler
+    // serves SIGINT and SIGTERM, so a SIGTERM can nest inside a running SIGINT handler on
+    // the same thread: both read 0, both store 1, and the escalation to forced is lost.
+    //
+    // Written as CAS rather than `fetch_update`, which nightly has deprecated in favour of
+    // `try_update` — a name stable does not have yet. This spelling compiles on both, and
+    // the fuzz job builds on nightly with `-D warnings`. No allocation, no lock, so it
+    // stays async-signal-safe.
+    let mut seen = SIGINT_COUNT.load(Ordering::SeqCst);
+    while seen < 2 {
+        match SIGINT_COUNT.compare_exchange_weak(seen, seen + 1, Ordering::SeqCst, Ordering::SeqCst)
+        {
+            Ok(_) => break,
+            Err(actual) => seen = actual,
+        }
+    }
 }
 
 fn install_signal_handler() {
