@@ -87,8 +87,8 @@ invited before then.
   connects to the service or reads a banner. `defaults.use_etc_services = false` drops
   the host layer for labels that match on every machine, and the record distinguishes
   declining it from the file being absent.
-- `output get` and `output summarize` colour their state columns on a terminal, using the
-  same palette as `run`. Never when redirected, and never in `--json` or `output cat`,
+- `output results` and `output summarize` colour their state columns on a terminal, using the
+  same palette as `run`. Never when redirected, and never in `--json` or `output events`,
   which are data.
 - Shell completions for bash, zsh, fish, elvish, and PowerShell.
 

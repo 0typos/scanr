@@ -992,12 +992,17 @@ fn cmd_transport_test(
 
 // ── output ──────────────────────────────────────────────────────────────────
 
-/// Give `output get` the label table a scan would have used.
+/// Give the commands that expand spans the label table a scan would have used.
 ///
-/// Only `get` needs one, and only for rows it expands out of a `probe_span`: those have
-/// no `service_label` of their own, because the span collapsed them. Every other
-/// `output` command reads labels straight from the record, so making them all pay a
-/// config load and an `/etc/services` parse bought nothing.
+/// That is `results` and `summarize`: both walk every result, and rows recovered from a
+/// `probe_span` have no `service_label` of their own, because the span collapsed them.
+/// `events`, `verify` and `remainder` read labels straight from the record or not at
+/// all, so they do not pay for a config load and an `/etc/services` parse.
+///
+/// Wired per command rather than at the `output` entry point, and that has now bitten
+/// twice: once when moving it out dropped it entirely, and again when `summarize` grew a
+/// call to `service_label` and nobody re-wired it — leaving `results` and `summarize`
+/// disagreeing about the same record. Both are covered by tests now.
 ///
 /// Best effort: a broken or absent config here means the builtin table rather than a
 /// failed read-only command. The precedence itself comes from `resolve_services`, the
@@ -1015,6 +1020,8 @@ fn install_services_best_effort(cli: &Cli) {
 fn cmd_output(cli: &Cli, cmd: &OutputCmd) -> Result<u8, ConfigError> {
     match cmd {
         OutputCmd::Summarize { file, by, json } => {
+            // Span-expanded rows carry no label of their own; see the note on the fn.
+            install_services_best_effort(cli);
             let style = output_style(cli);
             let report =
                 crate::verify::summarize(file, *by, *json, &style).map_err(ConfigError::new)?;
@@ -1036,7 +1043,7 @@ fn cmd_output(cli: &Cli, cmd: &OutputCmd) -> Result<u8, ConfigError> {
             ports,
             states,
             json,
-        } => cmd_output_get(
+        } => cmd_output_results(
             cli,
             file,
             hosts.as_deref(),
@@ -1070,8 +1077,8 @@ fn output_style(cli: &Cli) -> Style {
     )
 }
 
-/// `scanr output get` — filter the results in a record.
-fn cmd_output_get(
+/// `scanr output results` — filter the results in a record.
+fn cmd_output_results(
     cli: &Cli,
     file: &std::path::Path,
     hosts: Option<&[String]>,

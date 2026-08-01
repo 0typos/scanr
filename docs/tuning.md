@@ -252,14 +252,24 @@ streams, so it does not matter how large the file is:
 
 | command | peak resident on the 374 MB record |
 |---|---|
-| `output summarize` | 2.7 MB |
 | `output verify` | 3.1 MB |
+| `output events` | negligible — it is a decompressing pipe |
+| `output summarize` | hosts + ports, not probes (see below) |
+| `output results` | the rows that match your filter |
 | `output remainder` | 96 MB |
 
-`remainder` is the outlier because it must hold the set of endpoints already probed in
-order to subtract it — that set is the question being asked. The other two retain
-nothing but their counters, the config event, and, for `summarize`, the open ports it is
-about to print.
+`verify` retains nothing but its counters and the config event. `remainder` is the
+outlier because it must hold the set of endpoints already probed in order to subtract
+it — that set is the question being asked.
+
+`summarize` folds into per-host and per-port counters as it streams, so its cost follows
+the *shape* of the scan rather than its length: a /16 × 1,000 ports is 65,536 host
+entries and at most 65,535 port entries, however many probes ran. `--json` additionally
+builds the output tree before serializing it. The earlier 2.7 MB figure was measured
+when `summarize` only collected open ports, and no longer describes what it does.
+
+`results` holds what matches, so a narrow filter is cheap and `results` with no filter
+is the whole scan — use `events` if you want to stream rather than collect.
 
 Before this was fixed, all three loaded the whole record into memory first and needed
 **4.2 GB** for that 374 MB file — about 11× the file size. The tool could write a
