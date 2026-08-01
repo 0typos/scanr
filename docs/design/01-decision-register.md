@@ -593,3 +593,44 @@ asserted only that the marker appeared, and passed against a build that ignored 
 entirely: the row read `/etc/services (5862) ... [/etc/services off]`, contradicting
 itself, and nothing objected. The test now requires the marker *and* the layer's
 absence, and fails without the fix.
+
+**Amended: the accumulator is sparse, not a bitset.** Each outcome class originally held
+one bit per planned probe, sized at the moment the class first appeared. That is
+`planned / 8` bytes per class regardless of how many probes ever land in it: 8.2 MB each
+for a 65M-probe scan, and ~200 MB each for a `/8 x 100`, which `--allow-large-range`
+permits — against a 64-class ceiling, up to ~12 GB for a scan that had so far reported
+sixty-four results. `Reported` in `run.rs` is the same shape and explicitly refuses to
+allocate above `MAX_TRACKED_PROBES` for this reason; the span accumulator had no ceiling
+at all, and spans are on by default.
+
+Each class now keeps a plain list of the indices it absorbed. Draining on every progress
+tick — added so a killed process keeps its spans — is what makes this the better shape
+anyway: a class only ever holds one interval's worth of probes, so memory follows
+throughput rather than scan size. It beats the bitset whenever an interval absorbs fewer
+than `planned / 64` probes, which at any real scan rate it does by orders of magnitude.
+
+Probes complete out of order, so the list is sorted at drain time and deduplicated. The
+dedup preserves an invariant the bitset gave for free: a span's `count` is the number of
+endpoints its ranges cover, which is what a consumer expanding it gets back. One record
+per probe means a duplicate should never arise, but the old code would have counted one
+twice while setting a single bit, leaving the span's count disagreeing with its own
+ranges.
+
+`Spans::total()` and `Spans::is_empty()` were removed with it. Neither had a caller
+outside the module's own tests, and `total()`'s contract — "total probes represented,
+which the terminal counts must still account for" — stopped being true the moment
+draining became periodic: after any drain it returned zero. Accounting reads `counts`,
+which is maintained independently, so nothing depended on it; a future reader might not
+have been so lucky.
+
+**Amended: what the `builtin` row of `service_labels` counts.** The file layers report
+ports they were the first to claim; the builtin row reported its full 59 regardless of
+what shadowed it, so the rows described overlapping sets and did not sum to the table
+they came from. It now reports what it still answers for — typically 2, because a stock
+Linux `/etc/services` names 57 of the 59.
+
+Worth stating precisely, because I got it wrong first time by measuring the wrong thing:
+this counts ports a file layer *claimed*, not ports it *relabelled*. `/etc/services`
+agrees with the builtin that 22 is `ssh`, and 22 still belongs to the layer that got
+there first. Measuring differing labels instead gives 27, which is a real number
+answering a question nobody asked.

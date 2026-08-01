@@ -227,6 +227,25 @@ impl ServiceTable {
         self.stats.iter().filter(|s| s.malformed > 0)
     }
 
+    /// Ports the builtin is still the answer for — those no file layer claimed.
+    ///
+    /// Reported instead of the flat table size so `entries` means the same thing on
+    /// every row: what that layer contributed. A stock Linux `/etc/services` names 57 of
+    /// the builtin's 59 ports, so the flat figure double-counted almost all of them and
+    /// the rows did not sum to the size of the table they described.
+    ///
+    /// Note this counts ports *claimed*, not ports *relabelled* — `/etc/services` agrees
+    /// with the builtin about `ssh` on 22, and 22 still belongs to the layer that got
+    /// there first.
+    ///
+    /// A full sweep of the port space, once per scan, against a `HashMap` that is at
+    /// most a few thousand entries.
+    fn builtin_contribution(&self) -> usize {
+        (0..=u16::MAX)
+            .filter(|p| builtin(*p).is_some() && !self.learned.contains_key(p))
+            .count()
+    }
+
     /// One line naming the layers in effect, for `plan`.
     pub fn summary(&self) -> String {
         let mut parts: Vec<String> = self
@@ -248,7 +267,7 @@ impl ServiceTable {
                 format!("{name} ({})", s.entries)
             })
             .collect();
-        parts.push(format!("builtin ({BUILTIN_PORTS})"));
+        parts.push(format!("builtin ({})", self.builtin_contribution()));
         let mut s = parts.join(" + ");
         if self.etc_suppressed {
             s.push_str(" [/etc/services off]");
@@ -273,7 +292,7 @@ impl ServiceTable {
         // Always last, always present: every table ends here.
         layers.push(serde_json::json!({
             "source": Layer::Builtin.to_string(),
-            "entries": BUILTIN_PORTS,
+            "entries": self.builtin_contribution(),
             "malformed": 0,
         }));
         serde_json::json!({
@@ -612,9 +631,44 @@ http-alt        8080/tcp        webcache
         let etc = tmp("sum-etc", ETC);
         let t = ServiceTable::resolve(None, Some(&etc)).expect("fixture is readable");
         let s = t.summary();
-        assert!(s.ends_with(&format!("builtin ({BUILTIN_PORTS})")), "{s}");
         assert!(s.contains(" + "), "{s}");
+        // The fixture claims 22, 53, 80 and 8080, all of which the builtin also has, so
+        // the builtin is left answering for four fewer ports than it holds. Reporting
+        // its flat size here double-counted them.
+        assert!(
+            s.ends_with(&format!("builtin ({})", BUILTIN_PORTS - 4)),
+            "{s}"
+        );
         let _ = std::fs::remove_file(&etc);
+    }
+
+    /// The documented meaning of `entries` is "what this layer contributed", so the rows
+    /// have to account for exactly the ports the table can answer for. The builtin row
+    /// reported its full size regardless of shadowing, which broke this: a stock
+    /// `/etc/services` claims 57 of its 59.
+    #[test]
+    fn layer_entries_account_for_every_port_exactly_once() {
+        let etc = tmp("sum-inv-etc", ETC);
+        let mine = tmp(
+            "sum-inv-mine",
+            "internal-api 8080/tcp\nbuild-cache 9099/tcp\n",
+        );
+        let t = ServiceTable::resolve(Some(&mine), Some(&etc)).expect("fixtures are readable");
+
+        let reported: u64 = t.provenance()["layers"]
+            .as_array()
+            .expect("layers array")
+            .iter()
+            .map(|l| l["entries"].as_u64().expect("entries"))
+            .sum();
+        let answerable = (0..=u16::MAX).filter(|p| t.lookup(*p).is_some()).count() as u64;
+        assert_eq!(
+            reported, answerable,
+            "the layer rows must sum to the ports the table answers for"
+        );
+
+        let _ = std::fs::remove_file(&etc);
+        let _ = std::fs::remove_file(&mine);
     }
 
     #[test]

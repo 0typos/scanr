@@ -858,7 +858,11 @@ pub fn summarize(path: &Path, by: Grouping, style: &Style) -> Result<String, Str
         if k == "probe_result" && e["state"] == "open" {
             open.push(OpenPort {
                 target: e["target"].as_str().unwrap_or("?").to_string(),
-                port: e["port"].as_u64().unwrap_or(0) as u16,
+                // Kept as the raw value. `as u16` silently rendered a corrupt 65616 as
+                // 80 and a missing port as 0 — the same truncation already fixed in
+                // `remainder`, and worse here, because this is the surface that is
+                // supposed to make a bad record obvious rather than plausible.
+                port: e["port"].as_u64(),
                 service: e["service_label"].as_str().unwrap_or("").to_string(),
             });
         }
@@ -970,8 +974,20 @@ pub fn summarize(path: &Path, by: Grouping, style: &Style) -> Result<String, Str
 /// One open result, kept structured so it can be grouped rather than only listed.
 struct OpenPort {
     target: String,
-    port: u16,
+    /// `None` when the record had no port at all; otherwise exactly what it said, even
+    /// if that is out of range. `output verify` is what judges a record; this reports it.
+    port: Option<u64>,
     service: String,
+}
+
+impl OpenPort {
+    /// Renders an absent port as `?` rather than as a plausible number.
+    fn port_label(&self) -> String {
+        match self.port {
+            Some(p) => p.to_string(),
+            None => "?".to_string(),
+        }
+    }
 }
 
 /// How `summarize` arranges the open ports it found.
@@ -1049,7 +1065,7 @@ fn render_open(open: &mut [OpenPort], by: Grouping) -> String {
             });
             let _ = writeln!(s, "\nopen ports:");
             for o in open.iter() {
-                let line = format!("  {}:{}/tcp  {}", o.target, o.port, o.service);
+                let line = format!("  {}:{}/tcp  {}", o.target, o.port_label(), o.service);
                 let _ = writeln!(s, "{}", line.trim_end());
             }
         }
@@ -1077,7 +1093,7 @@ fn render_open(open: &mut [OpenPort], by: Grouping) -> String {
                 ports.sort_by_key(|o| o.port);
                 let list: Vec<String> = ports
                     .iter()
-                    .map(|o| format!("{}/{}", o.port, label(&o.service)))
+                    .map(|o| format!("{}/{}", o.port_label(), label(&o.service)))
                     .collect();
                 let _ = writeln!(s, "  {target:<width$}  {}", list.join("  "));
             }
@@ -1086,7 +1102,7 @@ fn render_open(open: &mut [OpenPort], by: Grouping) -> String {
             let mut groups: BTreeMap<String, Vec<&OpenPort>> = BTreeMap::new();
             for o in open.iter() {
                 let key = if by == Grouping::Port {
-                    format!("{}/{}", o.port, label(&o.service))
+                    format!("{}/{}", o.port_label(), label(&o.service))
                 } else {
                     label(&o.service).to_string()
                 };
@@ -1119,7 +1135,7 @@ fn render_open(open: &mut [OpenPort], by: Grouping) -> String {
                         if by == Grouping::Port {
                             o.target.clone()
                         } else {
-                            format!("{}:{}", o.target, o.port)
+                            format!("{}:{}", o.target, o.port_label())
                         }
                     })
                     .collect();
@@ -2478,6 +2494,46 @@ mod tests {
         assert!(
             ssh.contains("10.0.0.2:22") && ssh.contains("10.0.0.10:22"),
             "{ssh}"
+        );
+    }
+
+    /// 65616 is 0x10050; `as u16` dropped the high bit and printed 80. A summary that
+    /// turns a corrupt record into a plausible one is worse than useless, because the
+    /// reader has no way to tell.
+    #[test]
+    fn a_port_beyond_range_is_reported_not_truncated() {
+        let d = tempfile::tempdir().unwrap();
+        let mut ev = good_events();
+        for e in ev.iter_mut() {
+            if e["type"] == "probe_result" && e["state"] == "open" {
+                e["port"] = json!(65616);
+            }
+        }
+        let p = write(d.path(), "s.jsonl", &ev);
+        let out = summarize(&p, Grouping::Flat, &Style::for_stream(false, true)).unwrap();
+        assert!(out.contains("65616"), "the record's own value: {out}");
+        assert!(
+            !out.contains(":80/tcp"),
+            "80 is what truncation invents from 65616: {out}"
+        );
+    }
+
+    /// The other half of the same cast: `unwrap_or(0)` turned a missing port into port 0.
+    #[test]
+    fn a_missing_port_is_marked_unknown_rather_than_zero() {
+        let d = tempfile::tempdir().unwrap();
+        let mut ev = good_events();
+        for e in ev.iter_mut() {
+            if e["type"] == "probe_result" && e["state"] == "open" {
+                e.as_object_mut().expect("object").remove("port");
+            }
+        }
+        let p = write(d.path(), "s.jsonl", &ev);
+        let out = summarize(&p, Grouping::Flat, &Style::for_stream(false, true)).unwrap();
+        assert!(out.contains(":?/tcp"), "{out}");
+        assert!(
+            !out.contains(":0/tcp"),
+            "0 is a port, and this record has none: {out}"
         );
     }
 

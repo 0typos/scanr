@@ -37,19 +37,30 @@ type GroupKey = (State, Source, Option<String>, u32);
 
 /// One outcome class and the probes that shared it.
 struct Group {
-    /// A bit per planned probe: 128 KB per group for a million-probe scan.
-    bits: Vec<u64>,
-    count: u64,
+    /// Indices absorbed since the last drain, in arrival order.
+    ///
+    /// Sparse rather than a bit per planned probe. The bitset this replaced cost
+    /// `planned / 8` bytes per outcome class no matter how few probes landed in it —
+    /// 8.2 MB each for a 65M-probe scan, and ~200 MB each for a `/8 x 100`, which
+    /// `--allow-large-range` permits. `Reported` in `run.rs` refuses to allocate its
+    /// identically shaped bitset above `MAX_TRACKED_PROBES` for exactly that reason;
+    /// this one had no ceiling at all, and spans are on by default.
+    ///
+    /// Draining on every progress tick is what makes sparse the better shape anyway: a
+    /// group only ever holds one interval's worth of probes, so memory follows
+    /// throughput rather than scan size. It beats the bitset whenever an interval
+    /// absorbs fewer than `planned / 64` probes, which at any real scan rate it does by
+    /// orders of magnitude.
+    indices: Vec<u64>,
     min_ms: f64,
     max_ms: f64,
     sum_ms: f64,
 }
 
 impl Group {
-    fn new(planned: u64) -> Self {
+    fn new() -> Self {
         Self {
-            bits: vec![0u64; (planned as usize).div_ceil(64).max(1)],
-            count: 0,
+            indices: Vec::new(),
             min_ms: f64::INFINITY,
             max_ms: 0.0,
             sum_ms: 0.0,
@@ -57,40 +68,31 @@ impl Group {
     }
 
     fn add(&mut self, index: u64, ms: f64) {
-        self.bits[(index / 64) as usize] |= 1 << (index % 64);
-        self.count += 1;
+        self.indices.push(index);
         self.min_ms = self.min_ms.min(ms);
         self.max_ms = self.max_ms.max(ms);
         self.sum_ms += ms;
     }
 
-    /// Set bits as inclusive `[start, end]` ranges.
+    /// Inclusive `[start, end]` ranges, and how many probes they cover.
     ///
-    /// Word at a time, skipping empty ones. Testing every bit individually cost
-    /// `planned` iterations per outcome class, which on a 65M-probe scan against the
-    /// 64-class ceiling is billions of iterations between the last probe and the
-    /// terminal event — a scan that looks hung after reporting itself complete.
-    fn ranges(&self, planned: u64) -> Vec<[u64; 2]> {
+    /// Probes complete out of order — the permutation decides visit order — so this
+    /// sorts. `dedup` holds the invariant the bitset used to give for free: `count` is
+    /// the number of indices the ranges actually cover, so a consumer expanding a span
+    /// gets back exactly `count` endpoints. One record per probe means duplicates should
+    /// not arise; if one ever did, the old code counted it twice while setting one bit,
+    /// and the span's own count disagreed with its ranges.
+    fn ranges(&mut self) -> (Vec<[u64; 2]>, u64) {
+        self.indices.sort_unstable();
+        self.indices.dedup();
         let mut out: Vec<[u64; 2]> = Vec::new();
-        for (w, &word) in self.bits.iter().enumerate() {
-            if word == 0 {
-                continue;
-            }
-            for b in 0..64u64 {
-                if word & (1 << b) == 0 {
-                    continue;
-                }
-                let i = w as u64 * 64 + b;
-                if i >= planned {
-                    break;
-                }
-                match out.last_mut() {
-                    Some(r) if r[1] + 1 == i => r[1] = i,
-                    _ => out.push([i, i]),
-                }
+        for &i in &self.indices {
+            match out.last_mut() {
+                Some(r) if r[1] + 1 == i => r[1] = i,
+                _ => out.push([i, i]),
             }
         }
-        out
+        (out, self.indices.len() as u64)
     }
 }
 
@@ -149,25 +151,11 @@ impl Spans {
             self.exhausted = true;
             return false;
         }
-        let planned = self.planned;
-        self.groups
-            .entry(key)
-            .or_insert_with(|| Group::new(planned))
-            .add(
-                record.probe_index,
-                record.outcome.phases.total.as_secs_f64() * 1000.0,
-            );
+        self.groups.entry(key).or_insert_with(Group::new).add(
+            record.probe_index,
+            record.outcome.phases.total.as_secs_f64() * 1000.0,
+        );
         true
-    }
-
-    /// Whether anything was absorbed, and so whether spans will be written.
-    pub fn is_empty(&self) -> bool {
-        self.groups.is_empty()
-    }
-
-    /// Total probes represented, which the terminal counts must still account for.
-    pub fn total(&self) -> u64 {
-        self.groups.values().map(|g| g.count).sum()
     }
 
     /// One `probe_span` body per outcome class, emptying the accumulator.
@@ -179,23 +167,23 @@ impl Spans {
     /// Draining bounds that to one progress interval, and several spans of the same
     /// class are as valid as one — their ranges are disjoint and their counts add.
     pub fn drain_events(&mut self) -> Vec<Value> {
-        let planned = self.planned;
         std::mem::take(&mut self.groups)
             .into_iter()
-            .map(|((state, source, reason, attempts), g)| {
+            .map(|((state, source, reason, attempts), mut g)| {
                 let round = |v: f64| (v * 100.0).round() / 100.0;
+                let (ranges, count) = g.ranges();
                 json!({
                     "state": state.as_str(),
                     "source": source.as_str(),
                     "reason": reason,
                     "protocol": "tcp",
                     "attempts": attempts,
-                    "count": g.count,
-                    "probe_indices": g.ranges(planned),
+                    "count": count,
+                    "probe_indices": ranges,
                     "timing_ms": {
                         "min": round(g.min_ms),
                         "max": round(g.max_ms),
-                        "mean": round(g.sum_ms / g.count as f64),
+                        "mean": round(g.sum_ms / count as f64),
                     },
                 })
             })
@@ -380,7 +368,10 @@ mod tests {
         let first = s.drain_events();
         assert_eq!(first.len(), 1);
         assert_eq!(first[0]["count"], 10);
-        assert!(s.is_empty(), "the drained probes must not still be held");
+        assert!(
+            s.groups.is_empty(),
+            "the drained probes must not still be held"
+        );
         assert!(
             s.drain_events().is_empty(),
             "a second drain has nothing to say"
@@ -395,11 +386,66 @@ mod tests {
         assert_eq!(second[0]["probe_indices"], json!([[10, 14]]));
     }
 
+    /// The bit-per-planned-probe layout allocated up front, per outcome class, whether
+    /// or not any probe ever landed in it. This plan would have asked for 2 exabytes and
+    /// aborted the process before the first probe was absorbed.
+    #[test]
+    fn a_huge_plan_costs_nothing_until_probes_arrive() {
+        let mut s = Spans::new(u64::MAX);
+        assert!(s.absorb(&record(u64::MAX - 1, 80, State::Filtered, 300)));
+        assert!(s.absorb(&record(7, 80, State::Filtered, 300)));
+        let ev = s.drain_events();
+        assert_eq!(ev[0]["count"], 2);
+        assert_eq!(
+            ev[0]["probe_indices"],
+            json!([[7, 7], [u64::MAX - 1, u64::MAX - 1]]),
+            "sorted, and sparse rather than one bit per planned probe"
+        );
+    }
+
+    /// `/8 x 100`, which `--allow-large-range` permits, against the 64-class ceiling.
+    /// The old layout wanted ~200 MB per class here — ~12 GB in total — for a scan that
+    /// had so far reported sixty-four probes.
+    #[test]
+    fn a_billion_probe_plan_holds_only_what_it_absorbed() {
+        let mut s = Spans::new(1_677_721_600);
+        for i in 0..64u64 {
+            // A distinct reason per probe, so each opens its own group.
+            let mut r = record(i * 1_000_000, 80, State::Filtered, 300);
+            r.outcome.reason = Some(format!("reason {i}"));
+            assert!(s.absorb(&r));
+        }
+        assert_eq!(s.groups.len(), 64, "the class ceiling, all allocated");
+        let total: u64 = s
+            .drain_events()
+            .iter()
+            .map(|e| e["count"].as_u64().unwrap())
+            .sum();
+        assert_eq!(total, 64);
+    }
+
+    /// `count` has to be the number of endpoints the ranges cover, because that is what a
+    /// consumer expanding the span gets back. The bitset gave this for free; a plain
+    /// index list has to dedup to keep it.
+    #[test]
+    fn count_matches_the_ranges_it_reports() {
+        let mut s = Spans::new(100);
+        for i in [5u64, 1, 3, 2, 1, 5] {
+            s.absorb(&record(i, 80, State::Filtered, 300));
+        }
+        let ev = s.drain_events();
+        assert_eq!(ev[0]["probe_indices"], json!([[1, 3], [5, 5]]));
+        assert_eq!(
+            ev[0]["count"], 4,
+            "four distinct endpoints, not six absorptions"
+        );
+    }
+
     #[test]
     fn an_index_beyond_the_plan_is_refused_rather_than_panicking() {
         let mut s = Spans::new(10);
         assert!(!s.absorb(&record(10, 80, State::Filtered, 300)));
         assert!(!s.absorb(&record(u64::MAX, 80, State::Filtered, 300)));
-        assert!(s.is_empty());
+        assert!(s.groups.is_empty());
     }
 }

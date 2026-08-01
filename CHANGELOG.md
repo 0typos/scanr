@@ -92,6 +92,22 @@ invited before then.
   which are data.
 - Shell completions for bash, zsh, fish, elvish, and PowerShell.
 
+### Fixed
+
+- The span accumulator no longer sizes itself from the *planned* probe count. It held one
+  bit per planned probe per outcome class, so a `/8 x 100` scan wanted ~200 MB per class
+  against a 64-class ceiling; it now keeps only the indices it absorbed, which one
+  progress interval bounds.
+- `output summarize` reports a record's port as the record states it. An out-of-range
+  port was truncated to a plausible one (65616 printed as 80) and a missing port printed
+  as 0, on the surface whose job is to make a bad record obvious.
+- A record's `service_labels` provenance now describes the table that actually produced
+  its labels, rather than the one the plan was carrying. They agree in every current
+  path, but nothing enforced it.
+- The `builtin` row of `service_labels` reports the ports it still answers for rather than
+  its full size, so the layer counts sum to the table without double-counting ports that
+  a file layer above shadowed.
+
 ### Security
 
 - Inline passwords in configuration are a hard validation error, not a warning, since
