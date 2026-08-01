@@ -1494,3 +1494,93 @@ fn the_plan_names_its_label_sources() {
         "value and provenance need a separator: {line:?}"
     );
 }
+
+#[test]
+fn use_etc_services_false_makes_labels_host_independent() {
+    let d = tempfile::tempdir().unwrap();
+    services_fixture(d.path(), "use_etc_services = false\n");
+
+    // 8080 is `internal-api` in the fixture, `http-proxy` in the builtin, and usually
+    // `http-alt` in /etc/services. 5432 is in the builtin. 70 is normally only in
+    // /etc/services, so its label is the tell that the host file was skipped.
+    let out = scanr(
+        d.path(),
+        &[
+            "run",
+            "--targets",
+            "127.0.0.1",
+            "--ports",
+            "70,5432,8080",
+            "--no-spans",
+            "--all",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+
+    let events = read_events(d.path());
+    let label = |port: u64| -> Value {
+        events
+            .iter()
+            .find(|e| e["type"] == "probe_result" && e["port"] == port)
+            .expect("probed")["service_label"]
+            .clone()
+    };
+    assert_eq!(
+        label(8080),
+        "internal-api",
+        "the configured file still wins"
+    );
+    assert_eq!(label(5432), "postgresql", "the builtin still answers");
+    assert_eq!(
+        label(70),
+        Value::Null,
+        "gopher comes from /etc/services, which was declined"
+    );
+
+    let cfg = events
+        .iter()
+        .find(|e| e["type"] == "scan_config")
+        .expect("config event");
+    let sl = &cfg["service_labels"];
+    assert_eq!(sl["use_etc_services"], false);
+    let sources: Vec<&str> = sl["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["source"].as_str().unwrap())
+        .collect();
+    assert!(
+        !sources.contains(&"/etc/services"),
+        "the host layer must not appear: {sources:?}"
+    );
+    assert_eq!(
+        cfg["provenance"]["use_etc_services"], "defaults",
+        "and the plan should say the config asked for it"
+    );
+}
+
+#[test]
+fn the_plan_marks_etc_services_as_declined() {
+    let d = tempfile::tempdir().unwrap();
+    services_fixture(d.path(), "use_etc_services = false\n");
+    let out = scanr(
+        d.path(),
+        &["plan", "--targets", "127.0.0.1", "--ports", "8080"],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let so = stdout(&out);
+    let line = so
+        .lines()
+        .find(|l| l.starts_with("labels"))
+        .expect("a labels row");
+    // "off" rather than merely absent: a container with no /etc/services and a config
+    // that declined it would otherwise render identically.
+    assert!(line.contains("[/etc/services off]"), "{line}");
+    // And the marker has to agree with what was actually read. Asserting only the
+    // marker let a build that ignored the flag entirely still pass this test, printing
+    // `/etc/services (5862) ... [/etc/services off]` — a row contradicting itself.
+    assert!(
+        !line.contains("/etc/services ("),
+        "declined, yet the layer contributed: {line}"
+    );
+}

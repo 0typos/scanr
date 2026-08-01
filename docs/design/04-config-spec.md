@@ -44,6 +44,7 @@ open_only = true                  # stdout only; JSONL always records everything
 # Port labels, ahead of /etc/services and the builtin table. Optional; `~` expands.
 # An /etc/services-format file: `name port/proto [aliases...]`, `#` comments.
 services_file = "~/.config/scanr/services"
+use_etc_services = true           # false: labels depend only on this config + the binary
 
 # ── Profiles ────────────────────────────────────────────────────────
 # Flat and complete. No inheritance (D-register: rejected for v1).

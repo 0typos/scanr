@@ -996,11 +996,18 @@ fn cmd_transport_test(
 /// config here means the builtin table rather than an error — the scan commands, which
 /// do care, resolve it strictly through `build_plan`.
 fn install_services_best_effort(cli: &Cli) {
-    let configured = load_config(cli)
-        .ok()
+    let files = load_config(cli).ok();
+    let configured = files
+        .as_ref()
         .and_then(|f| f.pick(|c| c.defaults.services_file.clone()))
         .map(|(v, _)| crate::config::expand_home(&v));
-    if let Ok(t) = crate::services::ServiceTable::resolve_from_host(configured.as_deref()) {
+    let use_etc = files
+        .as_ref()
+        .and_then(|f| f.pick(|c| c.defaults.use_etc_services))
+        .map(|(v, _)| v)
+        .unwrap_or(true);
+    if let Ok(t) = crate::services::ServiceTable::resolve_from_host(configured.as_deref(), use_etc)
+    {
         crate::services::install(t);
     }
 }

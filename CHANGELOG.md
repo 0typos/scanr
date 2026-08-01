@@ -84,7 +84,9 @@ invited before then.
   floor when neither file exists. Because labels can now differ between machines, every
   record's `scan_config` states which layers produced them and how many entries each
   contributed. Still a guess from the port number and never a fingerprint — nothing
-  connects to the service or reads a banner.
+  connects to the service or reads a banner. `defaults.use_etc_services = false` drops
+  the host layer for labels that match on every machine, and the record distinguishes
+  declining it from the file being absent.
 - `output get` and `output summarize` colour their state columns on a terminal, using the
   same palette as `run`. Never when redirected, and never in `--json` or `output cat`,
   which are data.
