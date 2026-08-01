@@ -23,7 +23,7 @@ confidence-threshold = 0.9
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
-# The dependency list is short and deliberate (see docs/design/03-architecture.md).
+# The dependency list is short and deliberate (see docs/design/architecture.md).
 # Anything arriving here that pulls in an async runtime contradicts D1 and should be a
 # conscious decision rather than a transitive surprise.
 deny = [

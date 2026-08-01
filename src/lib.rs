@@ -1,6 +1,6 @@
 //! scanr — proxy-aware TCP connect scanner with reproducible, durable scan records.
 //!
-//! See `docs/design/` for the decision register and specifications. The short version:
+//! See `docs/design/decisions.md` for why it is built this way. The short version:
 //!
 //! * Blocking sockets on a bounded thread pool, no async runtime (D1). There is no work
 //!   queue — N worker threads means exactly N probes in flight, so backpressure and
@@ -15,8 +15,8 @@
 //! `scanr` ships as a binary. These modules are public so that the integration tests,
 //! the man-page generator, and the fuzz targets can reach them — not because they are a
 //! supported API. Nothing here is covered by semantic versioning, and internals move
-//! whenever the binary needs them to. Depend on the JSONL record (`docs/design/05`) or
-//! the CLI (`docs/design/06`), both of which have drift tests holding them still.
+//! whenever the binary needs them to. Depend on the JSONL record (`docs/output-schema.md`)
+//! or the CLI (`docs/cli.md`), both of which have drift tests holding them still.
 
 pub mod cancel;
 pub mod cli;

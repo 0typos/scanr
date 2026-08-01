@@ -75,7 +75,7 @@ codegen-units = 1
 strip = "symbols"
 # panic = "unwind" (the default) is deliberate, not an oversight: a panicking worker
 # thread must not prevent the writer from finalizing the scan record. Aborting would
-# leave a .partial file and destroy the tool's core guarantee. (see docs/design)
+# leave a .partial file and destroy the tool's core guarantee. (see docs/design/decisions.md)
 
 [profile.bench]
 inherits = "release"
