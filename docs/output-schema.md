@@ -123,14 +123,18 @@ therefore records exactly which layers produced them:
   "layers": [
     {"source": "/home/me/.config/scanr/services", "entries": 12,   "malformed": 0},
     {"source": "/etc/services",                   "entries": 5862, "malformed": 0},
-    {"source": "builtin",                         "entries": 59,   "malformed": 0}
+    {"source": "builtin",                         "entries": 2,    "malformed": 0}
   ],
   "use_etc_services": true
 }
 ```
 
-`entries` counts the tcp ports that layer was the first to claim, so the numbers sum to
-the table's size without double-counting a port two layers both mention. `malformed`
+`entries` counts the tcp ports that layer was the first to claim, so the rows sum to the
+number of ports the table can answer for, with no port counted twice. Note what that
+means for the builtin row: it holds 59 ports but reports only those no file above it
+claimed, and a stock Linux `/etc/services` names 57 of them. A small number there is the
+normal case, not a sign that something is missing — it is the count of ports the builtin
+is still the answer for. `malformed`
 counts lines the parser gave up on; UDP and SCTP rows are skipped without being counted,
 since roughly half of a real `/etc/services` is UDP. A layer that contributed nothing is
 absent; `builtin` is always last and always present.

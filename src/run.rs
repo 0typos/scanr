@@ -250,8 +250,9 @@ pub(crate) fn execute_with(
         );
     }
 
-    // Written here rather than as they accumulate: probes complete out of order, so a
-    // span is only whole once the scan is.
+    // The last drain, not the only one: ticks flush spans as the scan runs so a killed
+    // process keeps them (see the progress branch). This picks up whatever accumulated
+    // since the final tick.
     if let Some(mut spans) = collected.spans {
         for body in spans.drain_events() {
             emit(&mut writer, &mut writer_error, "probe_span", body);
@@ -476,8 +477,9 @@ impl Collector<'_> {
                     {
                         self.report_pressure(p, writer, writer_error);
                     }
-                    // A bulk outcome goes into the span accumulator and is written
-                    // once, at the end, alongside every probe that shared it.
+                    // A bulk outcome goes into the span accumulator instead of getting
+                    // a row, and is written out at the next progress tick alongside
+                    // every probe that shared its outcome.
                     let absorbed = self.spans.as_mut().is_some_and(|s| s.absorb(&record));
                     if !absorbed {
                         emit(writer, writer_error, "probe_result", record.to_json());
@@ -873,7 +875,13 @@ fn config_event(plan: &ScanPlan, facts: &HostFacts) -> serde_json::Value {
         // Where `service_label` came from. Labels can now differ between machines,
         // because /etc/services does; this is what makes such a difference explainable
         // from the record alone rather than a mystery (D31).
-        "service_labels": plan.services.provenance(),
+        //
+        // Read from the installed table rather than from `plan.services`, because the
+        // installed one is what `service_label` actually consults. They are the same
+        // object in every current path — the CLI installs the plan's — but nothing
+        // enforced it, and a field whose whole job is to be trustworthy should not
+        // depend on two things staying in step.
+        "service_labels": crate::services::active().provenance(),
         "output": {
             "dir": plan.output_dir.to_string_lossy(),
             "open_only": plan.open_only,
@@ -1748,5 +1756,40 @@ mod tests {
                 + c["abandoned"].as_u64().unwrap()
                 + c["not_started"].as_u64().unwrap()
         );
+    }
+    /// The record must describe the table `service_label` actually consulted, not
+    /// whatever the plan happens to be carrying.
+    ///
+    /// Discriminating because the two are deliberately different here: the plan holds a
+    /// two-layer table while nothing is installed, so the process is still labelling
+    /// from the builtin. Reporting the plan's would claim a provenance the labels in the
+    /// very same record did not come from.
+    #[test]
+    fn the_config_event_reports_the_table_the_labels_came_from() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("scanr-run-services-{}", std::process::id()));
+        std::fs::write(&path, "internal-api 8080/tcp\n").expect("write fixture");
+
+        let mut plan = ScanPlan::for_test(vec![80], 4);
+        plan.services =
+            crate::services::ServiceTable::resolve(Some(&path), None).expect("fixture reads");
+        assert_eq!(
+            plan.services.layers().len(),
+            1,
+            "the plan carries a file layer"
+        );
+
+        let ev = config_event(&plan, &HostFacts::probe());
+        let layers = ev["service_labels"]["layers"]
+            .as_array()
+            .expect("layers array");
+        assert_eq!(
+            layers.len(),
+            1,
+            "nothing was installed, so only the builtin can have produced labels: {layers:?}"
+        );
+        assert_eq!(layers[0]["source"], "builtin");
+
+        let _ = std::fs::remove_file(&path);
     }
 }
