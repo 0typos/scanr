@@ -29,6 +29,28 @@ invited before then.
   scan stays reproducible — and every result records which member produced it. Not
   failover: a dead member fails its share rather than having it taken over.
 
+### Fixed
+
+- A chain that failed while being *established* reported the destination port as
+  `filtered` rather than reporting the chain as broken — a verdict on a port nothing
+  reached. Because `filtered` is retryable and collapsible, a single slow link had every
+  port in the scan retried and then folded into a span, discarding the reason string that
+  held the only hint. A chain that cannot be built is now an `error` about the chain.
+- Spans dropped `via`, so a pooled scan lost member attribution for exactly the results
+  that reveal a broken member — with spans on by default.
+- `output results` did not emit `via`, so the documented `jq -r .via` recipe printed null.
+- A chain's calibration targets were judged from the first hop's vantage point although
+  the last hop issues the CONNECT, so a working chain could report as unmeasurable.
+- `transport test` reported authentication only if the *first* hop had credentials.
+- A pool of pools overwrote the inner member's name with the container's.
+- A declared `fidelity` on a chain or pool was silently discarded; it is now refused, and
+  `transport test` no longer advises writing one.
+- `scanr plan` showed no hops, members, or fidelity for a chain or pool — hiding the
+  "not measured" warning for the transports whose fidelity is least certain.
+- `Hop`'s derived `Debug` printed a password in the clear.
+- Hop-to-hop CONNECT ran under the handshake budget although it waits on a real TCP
+  connect, and each hop was resolved twice.
+
 ### Changed
 
 - The one-proxy-per-scan limitation is lifted; the note about it under 0.1.0's known

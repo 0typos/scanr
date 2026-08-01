@@ -196,7 +196,10 @@ Two records that label a port differently can be reconciled from this field alon
 
 `scan_config.transport.fidelity_source` says where the fidelity claim came from:
 `builtin` (direct, where the local stack separates states inherently), `config` (declared
-from a `transport test` measurement), or `unmeasured`.
+from a `transport test` measurement), `unmeasured`, `weakest_hop` (a chain, which can only
+claim what its least capable hop can) or `weakest_member` (a pool). A chain or pool whose
+underlying proxies were never measured reports `measured_fidelity: "unknown"` alongside
+the derived source, so "nothing was measured" is still visible.
 
 **Read `source` before trusting a non-open `state`.** Through a proxy that cannot
 distinguish refused from filtered, non-open results are `error` with

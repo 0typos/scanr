@@ -2,7 +2,8 @@
 
 A transport is how `scanr` reaches a destination. Two exist: `direct` and `socks5`.
 
-One transport per scan. Multiple proxies and proxy chains are deferred, not planned.
+One transport per scan — but a transport can be a chain through several proxies, or
+a pool spread across them. See below.
 
 ## Why SOCKS4 is not supported
 

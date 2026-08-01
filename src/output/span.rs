@@ -32,8 +32,19 @@ use crate::probe::{Source, State};
 /// would defeat the memory bound. Beyond it every probe keeps its own row.
 const MAX_GROUPS: usize = 64;
 
-/// Attempts is part of the key so a span can state how many each probe took.
-type GroupKey = (State, Source, Option<String>, u32);
+/// Attempts is part of the key so a span can state how many each probe took, and `via`
+/// so a pooled scan does not lose which member produced a collapsed run.
+///
+/// Leaving `via` out grouped a broken pool member's timeouts together with genuine ones
+/// from healthy members and emitted them with no attribution at all — destroying, by
+/// default, the exact distinction the field exists to draw.
+type GroupKey = (
+    State,
+    Source,
+    Option<String>,
+    u32,
+    Option<std::sync::Arc<str>>,
+);
 
 /// One outcome class and the probes that shared it.
 struct Group {
@@ -146,6 +157,7 @@ impl Spans {
             record.outcome.source,
             record.outcome.reason.clone(),
             record.attempts,
+            record.outcome.via.clone(),
         );
         if !self.groups.contains_key(&key) && self.groups.len() >= MAX_GROUPS {
             self.exhausted = true;
@@ -169,10 +181,10 @@ impl Spans {
     pub fn drain_events(&mut self) -> Vec<Value> {
         std::mem::take(&mut self.groups)
             .into_iter()
-            .map(|((state, source, reason, attempts), mut g)| {
+            .map(|((state, source, reason, attempts, via), mut g)| {
                 let round = |v: f64| (v * 100.0).round() / 100.0;
                 let (ranges, count) = g.ranges();
-                json!({
+                let mut body = json!({
                     "state": state.as_str(),
                     "source": source.as_str(),
                     "reason": reason,
@@ -185,7 +197,11 @@ impl Spans {
                         "max": round(g.max_ms),
                         "mean": round(g.sum_ms / count as f64),
                     },
-                })
+                });
+                if let Some(v) = via {
+                    body["via"] = json!(v.as_ref());
+                }
+                body
             })
             .collect()
     }
@@ -441,6 +457,36 @@ mod tests {
             ev[0]["count"], 4,
             "four distinct endpoints, not six absorptions"
         );
+    }
+
+    /// Spans are on by default, so dropping `via` would destroy pool attribution for
+    /// exactly the results that reveal a broken member: its timeouts are `filtered`,
+    /// which is collapsible, and they would merge with healthy members' timeouts.
+    #[test]
+    fn results_from_different_pool_members_do_not_merge() {
+        let mut s = Spans::new(100);
+        let mut with = |i: u64, member: &str| {
+            let mut r = record(i, 80, State::Filtered, 300);
+            r.outcome.via = Some(std::sync::Arc::from(member));
+            assert!(s.absorb(&r));
+        };
+        with(0, "exit-a");
+        with(1, "exit-b");
+        with(2, "exit-a");
+
+        let ev = s.drain_events();
+        assert_eq!(ev.len(), 2, "one span per member, not one for all: {ev:?}");
+        let mut by_member: Vec<(String, u64)> = ev
+            .iter()
+            .map(|e| {
+                (
+                    e["via"].as_str().expect("a span must carry it").to_string(),
+                    e["count"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        by_member.sort();
+        assert_eq!(by_member, vec![("exit-a".into(), 2), ("exit-b".into(), 1)]);
     }
 
     #[test]

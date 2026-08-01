@@ -357,8 +357,27 @@ fn validate_transport_kind(
         // Structure only. Whether the names resolve, form a cycle, or point at something
         // that cannot carry a hop is decided by the resolver, which is the one place that
         // can see every layer at once.
-        "chain" => {
-            if t.hops.as_ref().map(|h| h.items().len()).unwrap_or(0) == 0 {
+        "chain" | "pool" => {
+            // A chain's fidelity is its weakest hop's and a pool's its weakest member's,
+            // both derived. Accepting a declared one silently would leave the operator
+            // believing a measurement had been recorded when nothing reads it.
+            if t.fidelity.is_some() {
+                errors.push(
+                    err_at(
+                        files,
+                        p,
+                        Some(table),
+                        "fidelity",
+                        format!("`{name}` is a {kind}; its fidelity is derived, not declared"),
+                    )
+                    .help(
+                        "a chain can only claim what its weakest hop can, and a pool what \
+                         its weakest member can. Declare `fidelity` on the socks5 \
+                         transports underneath instead.",
+                    ),
+                );
+            }
+            if kind == "chain" && t.hops.as_ref().map(|h| h.items().len()).unwrap_or(0) == 0 {
                 errors.push(
                     err_at(
                         files,
@@ -370,9 +389,7 @@ fn validate_transport_kind(
                     .help("hops = [\"first\", \"second\"] — each a socks5 transport, in order"),
                 );
             }
-        }
-        "pool" => {
-            if t.members.as_ref().map(|m| m.items().len()).unwrap_or(0) == 0 {
+            if kind == "pool" && t.members.as_ref().map(|m| m.items().len()).unwrap_or(0) == 0 {
                 errors.push(
                     err_at(
                         files,

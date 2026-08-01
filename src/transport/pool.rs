@@ -26,6 +26,10 @@ use crate::probe::ProbeOutcome;
 pub struct PoolTransport {
     name: String,
     members: Vec<Box<dyn Transport>>,
+    /// One handle per member, cloned onto each result. Built here rather than per probe:
+    /// `Arc::from(name.to_string())` on the hot path allocated a fresh `String` *and* a
+    /// fresh `Arc` for every probe, which is the opposite of what an `Arc` is for.
+    labels: Vec<Arc<str>>,
     /// The weakest member's fidelity — see [`PoolTransport::new`].
     fidelity: Fidelity,
 }
@@ -42,15 +46,13 @@ impl PoolTransport {
             .iter()
             .map(|m| m.fidelity())
             .fold(Fidelity::Full, Fidelity::weakest);
+        let labels = members.iter().map(|m| Arc::from(m.name())).collect();
         Self {
             name,
             members,
+            labels,
             fidelity,
         }
-    }
-
-    pub fn members(&self) -> &[Box<dyn Transport>] {
-        &self.members
     }
 
     /// Which member handles an endpoint.
@@ -89,10 +91,14 @@ impl PoolTransport {
 impl Transport for PoolTransport {
     fn probe(&self, dest: &Destination, timing: &Timing) -> ProbeOutcome {
         let i = self.pick(dest);
-        let member = &self.members[i];
-        member
-            .probe(dest, timing)
-            .via(Arc::from(member.name().to_string()))
+        let mut o = self.members[i].probe(dest, timing);
+        // Only if nothing deeper already claimed it. A pool of pools would otherwise
+        // overwrite the inner member's name with the container's, so the record would
+        // name a bag of proxies rather than the proxy that answered.
+        if o.via.is_none() {
+            o.via = Some(self.labels[i].clone());
+        }
+        o
     }
 
     /// Only if *every* member does. A pool that resolves names on some hops and not
@@ -203,6 +209,28 @@ mod tests {
         assert_eq!(
             pool(&[Fidelity::Full, Fidelity::Unknown]).fidelity(),
             Fidelity::Unknown
+        );
+    }
+
+    /// A pool of pools must name the proxy that answered, not the bag it was in.
+    #[test]
+    fn a_nested_pool_keeps_the_inner_members_name() {
+        let inner = PoolTransport::new(
+            "inner".into(),
+            vec![Box::new(Marker {
+                name: "exit-b".into(),
+                fidelity: Fidelity::Full,
+            })],
+        );
+        let outer = PoolTransport::new("outer".into(), vec![Box::new(inner)]);
+        let o = outer.probe(
+            &addr("10.0.0.7:443"),
+            &crate::plan::types::Timing::for_test(),
+        );
+        assert_eq!(
+            o.via.as_deref(),
+            Some("exit-b"),
+            "the outer pool must not overwrite what answered"
         );
     }
 
