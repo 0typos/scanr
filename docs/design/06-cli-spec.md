@@ -17,6 +17,7 @@ output summarize
 output verify
 output remainder
 output cat
+output get
 completion
 ```
 
@@ -39,7 +40,8 @@ scanr
 │   ├── summarize <file>       counts, duration, open ports
 │   ├── verify <file>          integrity and completeness checks
 │   ├── remainder <file>       emit un-probed targets as a target list
-│   └── cat <file>             the record as plain JSONL, decompressing it
+│   ├── cat <file>             the record as plain JSONL, decompressing it
+│   └── get <file>             look up results, filtering by host/port/state
 └── completion <shell>
 ```
 

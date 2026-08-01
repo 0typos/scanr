@@ -1,0 +1,28 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH scanr-output-get 1  "scanr-output-get " 
+.SH NAME
+scanr\-output\-get \- Look up results in a record, filtering by host, port, or state
+.SH SYNOPSIS
+\fBscanr\-output\-get\fR [\fB\-\-hosts\fR] [\fB\-\-ports\fR] [\fB\-\-states\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIFILE\fR> 
+.SH DESCRIPTION
+Look up results in a record, filtering by host, port, or state
+.SH OPTIONS
+.TP
+\fB\-\-hosts\fR \fI<SPEC>\fR
+Only these hosts: IPs, CIDR blocks, or ranges (repeatable, comma\-separated)
+.TP
+\fB\-\-ports\fR \fI<SPEC>\fR
+Only these ports: `80`, `1\-1024`, or a list
+.TP
+\fB\-\-states\fR \fI<LIST>\fR
+Only these states: open, closed, filtered, error (comma\-separated)
+.TP
+\fB\-\-json\fR
+Emit JSON Lines instead of a table
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+<\fIFILE\fR>
+

@@ -15,9 +15,9 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
-use crate::net::target::{TargetSet, format_pair, parse_pair};
+use crate::net::target::{TargetSet, TargetSpec, format_pair, parse_pair};
 use crate::net::{Target, parse_ports, parse_target};
 use crate::units::{HumanElapsed, commas};
 
@@ -1122,6 +1122,144 @@ fn render_open(open: &mut [OpenPort], by: Grouping) -> String {
         }
     }
     s
+}
+
+/// A filter over the results in a record.
+///
+/// An empty field matches everything, so `get` with no flags is every result.
+#[derive(Default)]
+pub struct Query {
+    pub hosts: Vec<TargetSpec>,
+    pub ports: BTreeSet<u16>,
+    pub states: BTreeSet<String>,
+}
+
+impl Query {
+    fn wants(&self, target: &str, port: u16, state: &str) -> bool {
+        (self.hosts.is_empty() || self.hosts.iter().any(|h| h.matches(target)))
+            && (self.ports.is_empty() || self.ports.contains(&port))
+            && (self.states.is_empty() || self.states.contains(state))
+    }
+}
+
+/// One matching result.
+pub struct Hit {
+    pub target: String,
+    pub port: u16,
+    pub state: String,
+    pub source: String,
+    pub reason: Option<String>,
+    pub service: Option<String>,
+    /// Reconstructed from a `probe_span`, so it has no per-probe timing or timestamp.
+    pub collapsed: bool,
+    pub total_ms: Option<f64>,
+}
+
+impl Hit {
+    pub fn to_json(&self) -> Value {
+        let mut v = json!({
+            "target": self.target,
+            "port": self.port,
+            "protocol": "tcp",
+            "state": self.state,
+            "source": self.source,
+            "reason": self.reason,
+            "service_label": self.service,
+        });
+        // Marked rather than silently absent: a consumer that sees no timing should know
+        // whether the probe was fast or the detail was collapsed away.
+        if self.collapsed {
+            v["collapsed"] = json!(true);
+        } else {
+            v["timing_ms"] = json!({ "total": self.total_ms });
+        }
+        v
+    }
+}
+
+/// Query the results in a record.
+///
+/// Reads rows *and* expands spans, which is the whole point: with collapsing on by
+/// default a `closed` result usually has no row of its own, so `jq` over `probe_result`
+/// cannot answer "what was 10.0.0.5:443?" and this can.
+///
+/// Streams. Memory is the matches plus, for a matrix scan containing spans, the expanded
+/// target list needed to turn a span index back into an endpoint.
+pub fn get(path: &Path, q: &Query) -> Result<Vec<Hit>, String> {
+    let mut config: Option<Value> = None;
+    let mut expected: Option<Expected> = None;
+    let mut hits = Vec::new();
+
+    for line in stream(path)? {
+        let Some(e) = line?.event else { continue };
+        match kind(&e) {
+            "scan_config" if config.is_none() => config = Some(e),
+            "probe_result" => {
+                let (Some(t), Some(p), Some(st)) = (
+                    e["target"].as_str(),
+                    e["port"].as_u64().and_then(|p| u16::try_from(p).ok()),
+                    e["state"].as_str(),
+                ) else {
+                    continue;
+                };
+                if q.wants(t, p, st) {
+                    hits.push(Hit {
+                        target: t.to_string(),
+                        port: p,
+                        state: st.to_string(),
+                        source: e["source"].as_str().unwrap_or("").to_string(),
+                        reason: e["reason"].as_str().map(str::to_string),
+                        service: e["service_label"].as_str().map(str::to_string),
+                        collapsed: false,
+                        total_ms: e["timing_ms"]["total"].as_f64(),
+                    });
+                }
+            }
+            "probe_span" => {
+                let Some(state) = e["state"].as_str() else {
+                    continue;
+                };
+                // Only pay for expansion once, and only if a span is actually present.
+                if expected.is_none() {
+                    let cfg = config.as_ref().ok_or_else(|| {
+                        format!("{} has a probe_span before its scan_config", path.display())
+                    })?;
+                    expected = Some(expected_endpoints(cfg, path)?);
+                }
+                let exp = expected.as_ref().expect("just built");
+                let source = e["source"].as_str().unwrap_or("").to_string();
+                let reason = e["reason"].as_str().map(str::to_string);
+                for r in e["probe_indices"].as_array().into_iter().flatten() {
+                    let (Some(a), Some(b)) = (r[0].as_u64(), r[1].as_u64()) else {
+                        continue;
+                    };
+                    for i in a..=b {
+                        let Some((t, p)) = exp.at(i) else { continue };
+                        if q.wants(&t, p, state) {
+                            hits.push(Hit {
+                                target: t,
+                                port: p,
+                                state: state.to_string(),
+                                source: source.clone(),
+                                reason: reason.clone(),
+                                service: crate::probe::service_label(p).map(str::to_string),
+                                collapsed: true,
+                                total_ms: None,
+                            });
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    hits.sort_by(|a, b| {
+        host_key(&a.target)
+            .cmp(&host_key(&b.target))
+            .then(a.port.cmp(&b.port))
+    });
+    Ok(hits)
 }
 
 /// Endpoints that were not probed, suitable for `scanr run --pairs -`.
@@ -2337,6 +2475,116 @@ mod tests {
         assert!(Grouping::parse("host").is_some());
         assert!(Grouping::parse("hosts").is_none());
         assert_eq!(Grouping::default(), Grouping::Flat);
+    }
+
+    /// A record whose `closed` results live only in a span — the default shape. The
+    /// point of `get` is that they are still findable.
+    fn spanned_record() -> Vec<Value> {
+        vec![
+            json!({"type":"scan_started","seq":0,"ts":"2026-07-31T12:00:00.000Z","scan_id":"q1","schema_version":1}),
+            json!({"type":"scan_config","seq":1,"ts":"2026-07-31T12:00:00.000Z","scan_id":"q1","scan_name":"s",
+                   "targets":{"spec":["10.0.0.0/30"],"exclude":[],"count":4,"mode":"matrix"},
+                   "ports":{"spec":"22,80","count":2},"probes_planned":8}),
+            // Index 0 = 10.0.0.0:22, open, with its own row.
+            json!({"type":"probe_result","seq":2,"ts":"2026-07-31T12:00:00.000Z","scan_id":"q1",
+                   "probe_index":0,"target":"10.0.0.0","port":22,"protocol":"tcp","state":"open",
+                   "source":"local_stack","service_label":"ssh","attempts":1,
+                   "attempt_states":["open"],"timing_ms":{"total":1.5}}),
+            // Indices 1..=7 collapsed: no rows at all.
+            json!({"type":"probe_span","seq":3,"ts":"2026-07-31T12:00:00.000Z","scan_id":"q1",
+                   "state":"closed","source":"local_stack","reason":"connection refused",
+                   "protocol":"tcp","attempts":1,"count":7,"probe_indices":[[1,7]],
+                   "timing_ms":{"min":0.1,"mean":0.2,"max":0.3}}),
+            json!({"type":"scan_completed","seq":4,"ts":"2026-07-31T12:00:01.000Z","scan_id":"q1",
+                   "termination":"natural",
+                   "counts":{"planned":8,"started":8,"completed":8,"abandoned":0,"not_started":0,
+                             "open":1,"closed":7,"filtered":0,"error":0,"retried":0}}),
+        ]
+    }
+
+    #[test]
+    fn get_finds_results_that_only_exist_inside_a_span() {
+        let d = tempfile::tempdir().unwrap();
+        let p = write(d.path(), "q.jsonl", &spanned_record());
+
+        let all = get(&p, &Query::default()).unwrap();
+        assert_eq!(all.len(), 8, "every probe, rows and spans alike");
+
+        let closed = get(
+            &p,
+            &Query {
+                states: ["closed".to_string()].into_iter().collect(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(closed.len(), 7, "all seven live in the span");
+        assert!(closed.iter().all(|h| h.collapsed));
+        assert!(
+            closed.iter().all(|h| h.total_ms.is_none()),
+            "a collapsed hit has no per-probe timing, and must not invent one"
+        );
+        // The span's reason survives expansion.
+        assert_eq!(closed[0].reason.as_deref(), Some("connection refused"));
+    }
+
+    #[test]
+    fn get_filters_by_host_port_and_state() {
+        let d = tempfile::tempdir().unwrap();
+        let p = write(d.path(), "q.jsonl", &spanned_record());
+        let q = |h: &str, ports: &[u16], st: &[&str]| Query {
+            hosts: if h.is_empty() {
+                vec![]
+            } else {
+                vec![parse_target(h).unwrap()]
+            },
+            ports: ports.iter().copied().collect(),
+            states: st.iter().map(|s| s.to_string()).collect(),
+        };
+
+        // A CIDR filter matches without expanding.
+        assert_eq!(get(&p, &q("10.0.0.0/31", &[], &[])).unwrap().len(), 4);
+        assert_eq!(get(&p, &q("10.0.0.3", &[], &[])).unwrap().len(), 2);
+        assert_eq!(get(&p, &q("", &[22], &[])).unwrap().len(), 4);
+        assert_eq!(get(&p, &q("", &[22], &["open"])).unwrap().len(), 1);
+        assert_eq!(get(&p, &q("10.0.0.0", &[22], &["open"])).unwrap().len(), 1);
+        // A filter that matches nothing is empty, not an error.
+        assert!(get(&p, &q("192.0.2.0/24", &[], &[])).unwrap().is_empty());
+    }
+
+    #[test]
+    fn get_marks_collapsed_hits_in_json() {
+        let d = tempfile::tempdir().unwrap();
+        let p = write(d.path(), "q.jsonl", &spanned_record());
+        let hits = get(&p, &Query::default()).unwrap();
+
+        let row = hits.iter().find(|h| !h.collapsed).unwrap().to_json();
+        assert_eq!(row["timing_ms"]["total"], 1.5);
+        assert!(row.get("collapsed").is_none());
+
+        let span = hits.iter().find(|h| h.collapsed).unwrap().to_json();
+        assert_eq!(span["collapsed"], true);
+        assert!(
+            span.get("timing_ms").is_none(),
+            "no timing rather than a fabricated one: {span}"
+        );
+    }
+
+    #[test]
+    fn get_returns_results_in_host_then_port_order() {
+        let d = tempfile::tempdir().unwrap();
+        let p = write(d.path(), "q.jsonl", &spanned_record());
+        let hits = get(&p, &Query::default()).unwrap();
+        let seen: Vec<String> = hits
+            .iter()
+            .map(|h| format!("{}:{}", h.target, h.port))
+            .collect();
+        let mut sorted = seen.clone();
+        sorted.sort_by_key(|s| {
+            let (h, p) = s.rsplit_once(':').unwrap();
+            (host_key(h), p.parse::<u16>().unwrap())
+        });
+        assert_eq!(seen, sorted, "{seen:?}");
     }
 
     #[test]

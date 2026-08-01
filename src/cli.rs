@@ -168,6 +168,22 @@ enum OutputCmd {
     Remainder { file: PathBuf },
     /// Write the record as plain JSONL, decompressing it if needed
     Cat { file: PathBuf },
+    /// Look up results in a record, filtering by host, port, or state
+    Get {
+        file: PathBuf,
+        /// Only these hosts: IPs, CIDR blocks, or ranges (repeatable, comma-separated)
+        #[arg(long, value_name = "SPEC", action = clap::ArgAction::Append)]
+        hosts: Option<Vec<String>>,
+        /// Only these ports: `80`, `1-1024`, or a list
+        #[arg(long, value_name = "SPEC", action = clap::ArgAction::Append)]
+        ports: Option<Vec<String>>,
+        /// Only these states: open, closed, filtered, error (comma-separated)
+        #[arg(long, value_name = "LIST")]
+        states: Option<String>,
+        /// Emit JSON Lines instead of a table
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 // `PowerShell` trips enum_variant_names, but the name is the shell's, not ours.
@@ -972,6 +988,19 @@ fn cmd_output(_cli: &Cli, cmd: &OutputCmd) -> Result<u8, ConfigError> {
                 EXIT_USAGE
             })
         }
+        OutputCmd::Get {
+            file,
+            hosts,
+            ports,
+            states,
+            json,
+        } => cmd_output_get(
+            file,
+            hosts.as_deref(),
+            ports.as_deref(),
+            states.as_deref(),
+            *json,
+        ),
         OutputCmd::Cat { file } => {
             let mut out = std::io::stdout().lock();
             crate::verify::cat(file, &mut out).map_err(ConfigError::new)?;
@@ -984,6 +1013,70 @@ fn cmd_output(_cli: &Cli, cmd: &OutputCmd) -> Result<u8, ConfigError> {
             Ok(EXIT_OK)
         }
     }
+}
+
+/// `scanr output get` — filter the results in a record.
+fn cmd_output_get(
+    file: &std::path::Path,
+    hosts: Option<&[String]>,
+    ports: Option<&[String]>,
+    states: Option<&str>,
+    json: bool,
+) -> Result<u8, ConfigError> {
+    use crate::verify::Query;
+
+    let mut q = Query::default();
+    for spec in hosts.unwrap_or(&[]).iter().flat_map(|s| s.split(',')) {
+        let spec = spec.trim();
+        if spec.is_empty() {
+            continue;
+        }
+        q.hosts
+            .push(crate::net::parse_target(spec).map_err(|e| ConfigError::new(e.to_string()))?);
+    }
+    for spec in ports.unwrap_or(&[]).iter() {
+        q.ports
+            .extend(crate::net::parse_ports(spec).map_err(|e| ConfigError::new(e.to_string()))?);
+    }
+    if let Some(list) = states {
+        for st in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            // Checked against the defined states so a typo is an error rather than a
+            // query that silently matches nothing.
+            if crate::probe::State::parse(st).is_none() {
+                return Err(ConfigError::new(format!("unknown state `{st}`"))
+                    .help("expected one of: open, closed, filtered, error"));
+            }
+            q.states.insert(st.to_string());
+        }
+    }
+
+    let hits = crate::verify::get(file, &q).map_err(ConfigError::new)?;
+    let mut out = std::io::stdout().lock();
+    if json {
+        for h in &hits {
+            let _ = writeln!(out, "{}", h.to_json());
+        }
+    } else {
+        let width = hits
+            .iter()
+            .map(|h| h.target.len() + h.port.to_string().len() + 5)
+            .max()
+            .unwrap_or(20)
+            .max(20);
+        for h in &hits {
+            let endpoint = format!("{}:{}/tcp", h.target, h.port);
+            let line = format!(
+                "{endpoint:<width$}  {:<9} {:<12} {}",
+                h.state,
+                h.source,
+                h.service.as_deref().unwrap_or("")
+            );
+            let _ = writeln!(out, "{}", line.trim_end());
+        }
+    }
+    // Counted on stderr so stdout stays pipe-clean.
+    let _ = writeln!(std::io::stderr(), "{} result(s)", commas(hits.len() as u64));
+    Ok(EXIT_OK)
 }
 
 /// Map a scan termination to a process exit code.
