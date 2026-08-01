@@ -15,6 +15,25 @@ into a semver `1.0` commitment. `1.0.0` is reserved until at least one external 
 parsed a record and told us what the format is missing. Schema feedback is explicitly
 invited before then.
 
+## [0.2.0] - 2026-08-01
+
+### Added
+
+- **Proxy chains.** `type = "chain"` with `hops = [...]` traverses several SOCKS5 servers
+  in order, each reached through the one before. The chain reports its weakest hop's
+  fidelity, `transport test` measures the path end to end, and a failure names the hop it
+  happened at rather than reading as one anonymous proxy error.
+- **Proxy pools.** `type = "pool"` with `members = [...]` spreads probes across several
+  proxies, multiplying both the local ephemeral-port budget and the per-proxy connection
+  cap. Assignment is deterministic — an endpoint always goes via the same member, so a
+  scan stays reproducible — and every result records which member produced it. Not
+  failover: a dead member fails its share rather than having it taken over.
+
+### Changed
+
+- The one-proxy-per-scan limitation is lifted; the note about it under 0.1.0's known
+  limitations no longer applies.
+
 ## [0.1.0] - 2026-08-01
 
 ### Added
@@ -107,16 +126,6 @@ invited before then.
   host's exact open ports; `list` emits `host:port` for `httpx`, `tlsx` and `nuclei`.
   Replaces `--json` on that command with `--format json`.
 
-- **Proxy chains.** `type = "chain"` with `hops = [...]` traverses several SOCKS5 servers
-  in order, each reached through the one before. The chain reports its weakest hop's
-  fidelity, `transport test` measures the path end to end, and a failure names the hop it
-  happened at rather than reading as one anonymous proxy error.
-- **Proxy pools.** `type = "pool"` with `members = [...]` spreads probes across several
-  proxies, multiplying both the local ephemeral-port budget and the per-proxy connection
-  cap. Assignment is deterministic — an endpoint always goes via the same member, so a
-  scan stays reproducible — and every result records which member produced it. Not
-  failover: a dead member fails its share rather than having it taken over.
-
 ### Changed
 
 - **`output cat` is now `output events`, and `output get` is now `output results`.** The
@@ -173,7 +182,7 @@ invited before then.
   fire. Windows is deferred, not planned.
 - SOCKS4 and SOCKS4a are unsupported by design: four reply codes cannot distinguish a
   closed port from a filtered one.
-- One proxy per scan. Multiple proxies and proxy chains are deferred.
+- One proxy per scan. Multiple proxies and proxy chains are deferred. *(Lifted in 0.2.0.)*
 - Through a proxy that does not report refused connections distinctly, `closed` and
   `filtered` are indistinguishable and non-open results are recorded as `error` rather
   than guessed. `transport test` tells you whether yours is such a proxy.

@@ -744,9 +744,11 @@ mod tests {
     fn a_failure_names_the_hop_it_happened_at() {
         let (_g, open) = open_listener();
         let a = Socks5Fixture::start(Behavior::Faithful);
-        let dead = Socks5Fixture::start(Behavior::Faithful);
-        let dead_addr = dead.addr();
-        drop(dead); // nothing is listening at hop two any more
+        // Port 1 is reliably refused and, being privileged, cannot be claimed by another
+        // test mid-run. Freeing a fixture's port instead raced: a parallel test could
+        // bind it, and the failure then landed at hop two's *handshake* rather than hop
+        // one's CONNECT. That passed most of the time, which is the worst kind of test.
+        let dead_addr: SocketAddr = "127.0.0.1:1".parse().expect("valid literal");
 
         let t = Socks5Transport::chained(
             "chain".into(),
