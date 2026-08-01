@@ -108,10 +108,10 @@ allows. Per-phase timings in the record show where the time actually went:
 
 ```console
 # open and error results, which always keep their own row
-scanr output cat scan-*.jsonl.gz | jq -r 'select(.type=="probe_result") | .timing_ms' | head
+scanr output events scan-*.jsonl.gz | jq -r 'select(.type=="probe_result") | .timing_ms' | head
 
 # the collapsed bulk, summarised per outcome class
-scanr output cat scan-*.jsonl.gz | jq -r 'select(.type=="probe_span") | {state, count, timing_ms}'
+scanr output events scan-*.jsonl.gz | jq -r 'select(.type=="probe_span") | {state, count, timing_ms}'
 
 # or scan with --no-spans for a per-probe timing on every result
 ```

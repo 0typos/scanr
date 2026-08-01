@@ -258,7 +258,7 @@ and `slow_writer`, none of which the code could ever emit — which is why the t
 also checks the reverse direction.
 
 ```console
-scanr output cat scan-*.jsonl.gz | jq -r 'select(.type=="scan_warning") | "\(.code)\t\(.message)"'
+scanr output events scan-*.jsonl.gz | jq -r 'select(.type=="scan_warning") | "\(.code)\t\(.message)"'
 ```
 
 Seeing `fidelity_open_only`, `proxy_saturation`, or either `*_pressure` code means some
@@ -286,45 +286,55 @@ Three buckets, summing to `planned`:
 
 ## Reading a record without `jq`
 
-`output summarize` arranges the open ports for you. The default is one line per endpoint;
-`--by` regroups them:
+`output summarize` aggregates the whole record: totals, then counts per host, per
+network, and per service. With no `--by` you get every section, which is the right first
+look at a record you have not seen.
 
 ```console
-$ scanr output summarize scan-*.jsonl.gz --by host
-open ports by host (3 hosts):
-  10.0.0.2         22/ssh  80/http
-  10.0.0.9         80/http
-  10.0.0.10        22/ssh
+$ scanr output summarize scan-*.jsonl.gz
+  scope           3 targets x 7 ports = 21 probes
+  states          4 open, 17 closed, 0 filtered, 0 error
 
-$ scanr output summarize scan-*.jsonl.gz --by port
-open ports by port (2 distinct):
-  22/ssh              2  10.0.0.2  10.0.0.10
-  80/http             2  10.0.0.2  10.0.0.9
+by host (3 hosts):
+  host               open closed filtered  error  open ports
+  10.0.0.2              2      5        0      0  22/ssh 80/http
+  10.0.0.9              1      6        0      0  80/http
+
+by network (1 network):
+  network              hosts  with-open   open filtered
+  10.0.0.0/24              3          3      4        0
+
+by service (2 services):
+  service            open closed filtered  ports
+  http                  2      1        0  80
+  ssh                   2      0        4  22
 ```
 
-`--by host` answers "what is this machine running", `--by port` and `--by service`
-answer "who is running this" — the latter keyed on the service label rather than the
-number, so `http` gathers 80 and 8080 together. `--by port` and `--by service` list the
-commonest first, which is usually the question on a sweep.
+`--by host`, `--by network`, `--by port`, `--by service` or `--by scan` narrows to one
+section. `--json` emits the same aggregates as one object, for anything that wants to
+compare two scans.
 
-Only **open** results are grouped. That is the shape of the record rather than a
-limitation: `open` is never collapsed into a span, so it is the one state guaranteed to
-have a row per probe. Totals for the other states come from the terminal event's
-`counts`, which `summarize` already prints.
+Every state is counted, not just `open` — which is the point. "445 was filtered on 200
+hosts" is often the finding, and it needs the spans expanded to see. Networks are fixed
+`/24` (IPv6 `/64`) buckets rather than your target specs, because specs can overlap or
+nest and every record should bucket the same way if two are to be compared.
+
+This folds into counters as it streams, so summarising a /16 costs hosts plus ports
+rather than probes.
 
 ## Looking up results
 
-`output get` filters the record, and — unlike `jq` over `probe_result` — it expands
+`output results` filters the record, and — unlike `jq` over `probe_result` — it expands
 spans, so a collapsed `closed` is still findable:
 
 ```console
-$ scanr output get scan-*.jsonl.gz --states open
+$ scanr output results scan-*.jsonl.gz --states open
 10.0.0.2:8080/tcp   open      local_stack  http-proxy
 10.0.0.3:8080/tcp   open      local_stack  http-proxy
 2 result(s)
 
-$ scanr output get scan-*.jsonl.gz --hosts 10.0.0.0/24 --ports 22,443 --states closed,filtered
-$ scanr output get scan-*.jsonl.gz --states open --json | jq -r .target
+$ scanr output results scan-*.jsonl.gz --hosts 10.0.0.0/24 --ports 22,443 --states closed,filtered
+$ scanr output results scan-*.jsonl.gz --states open --json | jq -r .target
 ```
 
 | flag | accepts |
@@ -342,7 +352,7 @@ Host filters match **without expanding**, so `--hosts 10.0.0.0/8` costs nothing.
 States are coloured when stdout is a terminal — the same palette `run` uses, so `open`
 looks the same wherever you see it. Redirect or pipe the output and it is plain text;
 `--no-color` and `NO_COLOR` turn it off explicitly. `--json` is never coloured, and
-neither is `output cat`: both are data, and an escape sequence in them would be a bug.
+neither is `output events`: both are data, and an escape sequence in them would be a bug.
 
 Results reconstructed from a span carry `"collapsed": true` in JSON output and have no
 `timing_ms` — the span keeps only aggregate timing, and inventing a per-probe number
@@ -350,7 +360,7 @@ would be worse than omitting it. The count goes to stderr, so stdout stays pipe-
 
 ## Recipes
 
-`scanr output cat` writes the record as plain JSONL whichever format it is in, so these
+`scanr output events` writes the record as plain JSONL whichever format it is in, so these
 work unchanged on a compressed or uncompressed record and on any platform. `zcat -f`
 does the same on GNU systems, but its pass-through of uncompressed input is a GNU
 extension and macOS ships BSD gzip — hence the built-in.
@@ -359,29 +369,29 @@ extension and macOS ships BSD gzip — hence the built-in.
 Open ports, as `host:port`:
 
 ```console
-scanr output cat scan-*.jsonl.gz | jq -r 'select(.type=="probe_result" and .state=="open") | "\(.target):\(.port)"'
+scanr output events scan-*.jsonl.gz | jq -r 'select(.type=="probe_result" and .state=="open") | "\(.target):\(.port)"'
 ```
 
 Only verdicts you can trust as `closed`:
 
 ```console
-scanr output cat scan-*.jsonl.gz | jq -r 'select(.type=="probe_result" and .state=="closed" and .source=="local_stack")
+scanr output events scan-*.jsonl.gz | jq -r 'select(.type=="probe_result" and .state=="closed" and .source=="local_stack")
        | "\(.target):\(.port)"'
 ```
 
 Did it finish, and what settings produced it?
 
 ```console
-scanr output cat scan-*.jsonl.gz | jq -r 'select(.counts)
+scanr output events scan-*.jsonl.gz | jq -r 'select(.counts)
        | "\(.type) \(.termination) \(.counts.completed)/\(.counts.planned)"'
-scanr output cat scan-*.jsonl.gz | jq -r 'select(.type=="scan_config") | .timing, .transport, .permutation'
+scanr output events scan-*.jsonl.gz | jq -r 'select(.type=="scan_config") | .timing, .transport, .permutation'
 ```
 
 Diff two scans for ports that changed:
 
 ```console
 for f in old.jsonl.gz new.jsonl.gz; do
-  scanr output cat "$f" | jq -r 'select(.type=="probe_result") | "\(.target):\(.port) \(.state)"' \
+  scanr output events "$f" | jq -r 'select(.type=="probe_result") | "\(.target):\(.port) \(.state)"' \
     | sort > "$f.st"
 done
 diff old.jsonl.gz.st new.jsonl.gz.st
@@ -390,13 +400,13 @@ diff old.jsonl.gz.st new.jsonl.gz.st
 Which build produced this record:
 
 ```console
-scanr output cat scan-*.jsonl.gz | jq -r 'select(.type=="scan_started") | "\(.tool_version) \(.git_commit) \(.target_triple)"'
+scanr output events scan-*.jsonl.gz | jq -r 'select(.type=="scan_started") | "\(.tool_version) \(.git_commit) \(.target_triple)"'
 ```
 
 Slowest responders:
 
 ```console
-scanr output cat scan-*.jsonl.gz | jq -r 'select(.type=="probe_result" and .state=="open")
+scanr output events scan-*.jsonl.gz | jq -r 'select(.type=="probe_result" and .state=="open")
        | [.timing_ms.total, "\(.target):\(.port)"] | @tsv' | sort -rn | head
 ```
 
@@ -407,7 +417,7 @@ expanded matrix — a /16 × 1000 ports is 65M probes. With the recorded permuta
 that is enough to reproduce the scan exactly:
 
 ```console
-cfg() { scanr output cat scan-*.jsonl.gz | jq -r "select(.type==\"scan_config\")|$1"; }
+cfg() { scanr output events scan-*.jsonl.gz | jq -r "select(.type==\"scan_config\")|$1"; }
 scanr run --targets "$(cfg '.targets.spec[]')" \
           --ports   "$(cfg '.ports.spec')" \
           --seed    "$(cfg '.permutation.seed')"

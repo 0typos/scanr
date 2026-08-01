@@ -23,12 +23,15 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // summarize and remainder are allowed to reject the file, not to panic on it.
-    // Every grouping, since each has its own formatting path over attacker-shaped rows.
+    // Every section, since each has its own formatting path over attacker-shaped rows,
+    // plus `None` for the all-sections render and the JSON encoder.
     for by in [
-        scanr::verify::Grouping::Flat,
-        scanr::verify::Grouping::Host,
-        scanr::verify::Grouping::Port,
-        scanr::verify::Grouping::Service,
+        None,
+        Some(scanr::verify::Grouping::Scan),
+        Some(scanr::verify::Grouping::Host),
+        Some(scanr::verify::Grouping::Network),
+        Some(scanr::verify::Grouping::Port),
+        Some(scanr::verify::Grouping::Service),
     ] {
         // Both with and without colour: the coloured path pads to a column width and
         // then paints, over host and service strings the fuzzer controls.
@@ -36,8 +39,14 @@ fuzz_target!(|data: &[u8]| {
             scanr::output::human::Style::for_stream(false, true),
             scanr::output::human::Style::for_stream(true, false),
         ] {
-            let _ = scanr::verify::summarize(&path, by, &style);
+            let _ = scanr::verify::summarize(&path, by, false, &style);
         }
+        let _ = scanr::verify::summarize(
+            &path,
+            by,
+            true,
+            &scanr::output::human::Style::for_stream(false, true),
+        );
     }
     let _ = scanr::verify::remainder(&path);
 });

@@ -833,195 +833,6 @@ fn find_exposed_secret(v: &Value) -> Option<String> {
     walk(v, "")
 }
 
-pub fn summarize(path: &Path, by: Grouping, style: &Style) -> Result<String, String> {
-    // Retains the header, the config, the terminal event, and one formatted line per
-    // *open* port. Everything else is dropped as it goes by: the closed and filtered
-    // rows are the bulk of a large record and none of them are printed.
-    let mut start: Option<Value> = None;
-    let mut config: Option<Value> = None;
-    let mut terminal: Option<Value> = None;
-    let mut open: Vec<OpenPort> = Vec::new();
-
-    for line in stream(path)? {
-        let line = line?;
-        let Some(e) = line.event else { continue };
-        if line.index == 0 {
-            start = Some(e.clone());
-        }
-        let k = kind(&e);
-        if k == "scan_config" && config.is_none() {
-            config = Some(e.clone());
-        }
-        if TERMINALS.contains(&k) && terminal.is_none() {
-            terminal = Some(e.clone());
-        }
-        if k == "probe_result" && e["state"] == "open" {
-            open.push(OpenPort {
-                target: e["target"].as_str().unwrap_or("?").to_string(),
-                // Kept as the raw value. `as u16` silently rendered a corrupt 65616 as
-                // 80 and a missing port as 0 — the same truncation already fixed in
-                // `remainder`, and worse here, because this is the surface that is
-                // supposed to make a bad record obvious rather than plausible.
-                port: e["port"].as_u64(),
-                service: e["service_label"].as_str().unwrap_or("").to_string(),
-            });
-        }
-    }
-
-    let Some(start) = start else {
-        return Err(format!("{} contains no events", path.display()));
-    };
-
-    let mut s = String::new();
-    let _ = writeln!(s, "{}", path.display());
-    let _ = writeln!(
-        s,
-        "  {:<16}{}",
-        "scan",
-        config
-            .as_ref()
-            .and_then(|c| c["scan_name"].as_str())
-            .unwrap_or("(unknown)")
-    );
-    let _ = writeln!(
-        s,
-        "  {:<16}{}  (scanr {})",
-        "started",
-        start["ts"].as_str().unwrap_or("?"),
-        start["tool_version"].as_str().unwrap_or("?")
-    );
-    if let Some(c) = &config {
-        let _ = writeln!(
-            s,
-            "  {:<16}{} via {} ({})",
-            "transport",
-            c["transport"]["name"].as_str().unwrap_or("?"),
-            c["transport"]["type"].as_str().unwrap_or("?"),
-            c["transport"]["measured_fidelity"].as_str().unwrap_or("?")
-        );
-        let _ = writeln!(
-            s,
-            "  {:<16}{} targets x {} ports = {} probes",
-            "scope",
-            commas(c["targets"]["count"].as_u64().unwrap_or(0)),
-            commas(c["ports"]["count"].as_u64().unwrap_or(0)),
-            commas(c["probes_planned"].as_u64().unwrap_or(0))
-        );
-        let _ = writeln!(
-            s,
-            "  {:<16}{}",
-            "seed",
-            c["permutation"]["seed"].as_str().unwrap_or("?")
-        );
-    }
-
-    match &terminal {
-        None => {
-            let _ = writeln!(s, "  {:<16}INCOMPLETE — no terminal event", "result");
-        }
-        Some(t) => {
-            let c = &t["counts"];
-            let _ = writeln!(
-                s,
-                "  {:<16}{} ({})",
-                "result",
-                kind(t),
-                t["termination"].as_str().unwrap_or("?")
-            );
-            let _ = writeln!(
-                s,
-                "  {:<16}{}",
-                "duration",
-                HumanElapsed(std::time::Duration::from_millis(
-                    t["duration_ms"].as_u64().unwrap_or(0)
-                ))
-            );
-            // Coloured per state, matching `run`'s palette. This is the one line here
-            // where colour carries information: every entry in the open-ports list below
-            // is open by definition, so colouring that would be decoration.
-            let count = |k: &str, st: State| {
-                style.paint_state(
-                    st,
-                    &format!("{} {}", c[k].as_u64().unwrap_or(0), st.as_str()),
-                )
-            };
-            let _ = writeln!(
-                s,
-                "  {:<16}{}, {}, {}, {}",
-                "states",
-                count("open", State::Open),
-                count("closed", State::Closed),
-                count("filtered", State::Filtered),
-                count("error", State::Error)
-            );
-            if c["not_started"].as_u64().unwrap_or(0) > 0 {
-                let _ = writeln!(
-                    s,
-                    "  {:<16}{} probes never started",
-                    "incomplete",
-                    commas(c["not_started"].as_u64().unwrap_or(0))
-                );
-            }
-        }
-    }
-
-    if !open.is_empty() {
-        s.push_str(&render_open(&mut open, by));
-    }
-    Ok(s)
-}
-
-/// One open result, kept structured so it can be grouped rather than only listed.
-struct OpenPort {
-    target: String,
-    /// `None` when the record had no port at all; otherwise exactly what it said, even
-    /// if that is out of range. `output verify` is what judges a record; this reports it.
-    port: Option<u64>,
-    service: String,
-}
-
-impl OpenPort {
-    /// Renders an absent port as `?` rather than as a plausible number.
-    fn port_label(&self) -> String {
-        match self.port {
-            Some(p) => p.to_string(),
-            None => "?".to_string(),
-        }
-    }
-}
-
-/// How `summarize` arranges the open ports it found.
-///
-/// Only open results are grouped, and that is not a limitation so much as the shape of
-/// the record: `open` is never collapsed into a span, so it is the one state guaranteed
-/// to have a row per probe. Counts for the other states come from the terminal event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Grouping {
-    /// One line per endpoint, the original behaviour.
-    #[default]
-    Flat,
-    /// What is each machine running?
-    Host,
-    /// Who is running this port?
-    Port,
-    /// Same, keyed by the service label rather than the number.
-    Service,
-}
-
-impl Grouping {
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "flat" => Some(Self::Flat),
-            "host" => Some(Self::Host),
-            "port" => Some(Self::Port),
-            "service" => Some(Self::Service),
-            _ => None,
-        }
-    }
-
-    pub const ALL: &'static [&'static str] = &["flat", "host", "port", "service"];
-}
-
 /// Ordering key for a host: family, then address bytes, then name.
 type HostKey = (u8, [u8; 16], String);
 
@@ -1054,101 +865,557 @@ fn label(service: &str) -> &str {
     if service.is_empty() { "-" } else { service }
 }
 
-fn render_open(open: &mut [OpenPort], by: Grouping) -> String {
-    let mut s = String::new();
-    match by {
-        Grouping::Flat => {
-            open.sort_by(|a, b| {
-                host_key(&a.target)
-                    .cmp(&host_key(&b.target))
-                    .then(a.port.cmp(&b.port))
-            });
-            let _ = writeln!(s, "\nopen ports:");
-            for o in open.iter() {
-                let line = format!("  {}:{}/tcp  {}", o.target, o.port_label(), o.service);
-                let _ = writeln!(s, "{}", line.trim_end());
-            }
+/// Which section of the summary to show. Absent means all of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Grouping {
+    /// Totals only.
+    Scan,
+    /// What is each machine running?
+    Host,
+    /// Rolled up per /24, for a scan wide enough that hosts are too many to read.
+    Network,
+    /// Who is running this port?
+    Port,
+    /// Same, keyed by the service label, so `http` gathers 80 and 8080.
+    Service,
+}
+
+impl Grouping {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "scan" => Some(Self::Scan),
+            "host" => Some(Self::Host),
+            "network" => Some(Self::Network),
+            "port" => Some(Self::Port),
+            "service" => Some(Self::Service),
+            _ => None,
         }
-        Grouping::Host => {
-            let mut by_host: BTreeMap<HostKey, (&str, Vec<&OpenPort>)> = BTreeMap::new();
-            for o in open.iter() {
-                by_host
-                    .entry(host_key(&o.target))
-                    .or_insert_with(|| (o.target.as_str(), Vec::new()))
-                    .1
-                    .push(o);
+    }
+
+    pub const ALL: &'static [&'static str] = &["scan", "host", "network", "port", "service"];
+}
+
+/// Aggregate a record: totals, then counts by host, network, and service.
+///
+/// Folds into counters rather than collecting results, so summarising a /16 costs hosts
+/// plus ports rather than probes. The earlier version listed open endpoints and offered
+/// `--by` to rearrange that one list; it could not answer "how many hosts had 445
+/// filtered", because it only ever looked at `open` rows.
+pub fn summarize(
+    path: &Path,
+    by: Option<Grouping>,
+    json: bool,
+    style: &Style,
+) -> Result<String, String> {
+    let mut header: Option<Value> = None;
+    let mut config: Option<Value> = None;
+    let mut terminal: Option<Value> = None;
+
+    for line in stream(path)? {
+        let line = line?;
+        let Some(e) = line.event else { continue };
+        if line.index == 0 {
+            header = Some(e.clone());
+        }
+        let k = kind(&e);
+        if k == "scan_config" && config.is_none() {
+            config = Some(e);
+        } else if TERMINALS.contains(&k) && terminal.is_none() {
+            terminal = Some(e);
+        }
+    }
+    if header.is_none() {
+        return Err(format!("{} contains no events", path.display()));
+    }
+
+    let mut hosts: BTreeMap<HostKey, HostAgg> = BTreeMap::new();
+    let mut ports: BTreeMap<u16, PortAgg> = BTreeMap::new();
+    walk_results(path, |r| {
+        let h = hosts.entry(host_key(r.target)).or_insert_with(|| HostAgg {
+            name: r.target.to_string(),
+            ..HostAgg::default()
+        });
+        h.states.add(r.state);
+        if r.state == "open" {
+            h.open_ports
+                .push((r.port, r.service.unwrap_or("").to_string()));
+        }
+
+        let p = ports.entry(r.port).or_default();
+        p.states.add(r.state);
+        if p.service.is_empty()
+            && let Some(s) = r.service
+        {
+            p.service = s.to_string();
+        }
+    })?;
+
+    for h in hosts.values_mut() {
+        h.open_ports.sort_unstable();
+    }
+
+    let summary = Summary {
+        path: path.display().to_string(),
+        header,
+        config,
+        terminal,
+        hosts,
+        ports,
+    };
+    Ok(if json {
+        format!("{}\n", summary.to_json())
+    } else {
+        summary.render(by, style)
+    })
+}
+
+/// Per-host totals, and which ports were open.
+#[derive(Default)]
+struct HostAgg {
+    name: String,
+    states: States,
+    open_ports: Vec<(u16, String)>,
+}
+
+/// Per-port totals across hosts. One probe per (host, port), so `states.open` *is* the
+/// number of hosts with that port open — no separate host counter to keep in step.
+#[derive(Default)]
+struct PortAgg {
+    states: States,
+    service: String,
+}
+
+#[derive(Default, Clone, Copy)]
+struct States {
+    open: u64,
+    closed: u64,
+    filtered: u64,
+    error: u64,
+}
+
+impl States {
+    fn add(&mut self, state: &str) {
+        match state {
+            "open" => self.open += 1,
+            "closed" => self.closed += 1,
+            "filtered" => self.filtered += 1,
+            _ => self.error += 1,
+        }
+    }
+
+    fn merge(&mut self, o: &States) {
+        self.open += o.open;
+        self.closed += o.closed;
+        self.filtered += o.filtered;
+        self.error += o.error;
+    }
+
+    fn to_json(self) -> Value {
+        json!({
+            "open": self.open,
+            "closed": self.closed,
+            "filtered": self.filtered,
+            "error": self.error,
+        })
+    }
+}
+
+/// The `/24` (or IPv6 `/64`) a target belongs to.
+///
+/// Fixed rather than derived from the scan's own target specs: those can overlap, nest,
+/// or be a bare list, so there is no single "the network" a host belongs to. A fixed
+/// mask gives every record the same buckets, which is what makes two of them comparable.
+fn network_of(target: &str) -> String {
+    match target.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(a)) => {
+            let o = a.octets();
+            format!("{}.{}.{}.0/24", o[0], o[1], o[2])
+        }
+        Ok(std::net::IpAddr::V6(a)) => {
+            let s = a.segments();
+            format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+        }
+        Err(_) => "(hostnames)".to_string(),
+    }
+}
+
+struct Summary {
+    path: String,
+    header: Option<Value>,
+    config: Option<Value>,
+    terminal: Option<Value>,
+    hosts: BTreeMap<HostKey, HostAgg>,
+    ports: BTreeMap<u16, PortAgg>,
+}
+
+/// Rolled up by network: how much was looked at, and how much answered.
+struct NetAgg {
+    hosts: u64,
+    hosts_with_open: u64,
+    states: States,
+}
+
+/// Rolled up by service label, so `http` gathers 80, 8080 and 8000.
+struct SvcAgg {
+    ports: Vec<u16>,
+    states: States,
+}
+
+impl Summary {
+    fn networks(&self) -> BTreeMap<String, NetAgg> {
+        let mut out: BTreeMap<String, NetAgg> = BTreeMap::new();
+        for h in self.hosts.values() {
+            let e = out.entry(network_of(&h.name)).or_insert(NetAgg {
+                hosts: 0,
+                hosts_with_open: 0,
+                states: States::default(),
+            });
+            e.hosts += 1;
+            if h.states.open > 0 {
+                e.hosts_with_open += 1;
             }
-            let width = by_host
-                .values()
-                .map(|(t, _)| t.len())
-                .max()
-                .unwrap_or(15)
-                .max(15);
+            e.states.merge(&h.states);
+        }
+        out
+    }
+
+    fn services(&self) -> BTreeMap<String, SvcAgg> {
+        let mut out: BTreeMap<String, SvcAgg> = BTreeMap::new();
+        for (port, p) in &self.ports {
+            let key = if p.service.is_empty() {
+                format!("({port})")
+            } else {
+                p.service.clone()
+            };
+            let e = out.entry(key).or_insert(SvcAgg {
+                ports: Vec::new(),
+                states: States::default(),
+            });
+            e.ports.push(*port);
+            e.states.merge(&p.states);
+        }
+        out
+    }
+
+    /// Only the ports something answered on. A record of a /16 has 65,535 port entries
+    /// and a reader wants the handful that mattered.
+    fn interesting_ports(&self) -> Vec<(u16, &PortAgg)> {
+        let mut v: Vec<(u16, &PortAgg)> = self
+            .ports
+            .iter()
+            .filter(|(_, p)| p.states.open > 0)
+            .map(|(k, p)| (*k, p))
+            .collect();
+        v.sort_by_key(|(port, p)| (std::cmp::Reverse(p.states.open), *port));
+        v
+    }
+
+    fn render(&self, by: Option<Grouping>, style: &Style) -> String {
+        let mut s = String::new();
+        let show = |g: Grouping| by.is_none() || by == Some(g);
+
+        let _ = writeln!(s, "{}", self.path);
+        self.render_scan(&mut s, style);
+        if show(Grouping::Host) {
+            self.render_hosts(&mut s);
+        }
+        if show(Grouping::Network) {
+            self.render_networks(&mut s);
+        }
+        if show(Grouping::Port) {
+            self.render_ports(&mut s);
+        }
+        if show(Grouping::Service) {
+            self.render_services(&mut s);
+        }
+        s
+    }
+
+    fn render_scan(&self, s: &mut String, style: &Style) {
+        let _ = writeln!(
+            s,
+            "  {:<16}{}",
+            "scan",
+            self.config
+                .as_ref()
+                .and_then(|c| c["scan_name"].as_str())
+                .unwrap_or("(unknown)")
+        );
+        if let Some(h) = &self.header {
             let _ = writeln!(
                 s,
-                "\nopen ports by host ({}):",
-                plural(by_host.len(), "host")
+                "  {:<16}{}  (scanr {})",
+                "started",
+                h["ts"].as_str().unwrap_or("?"),
+                h["tool_version"].as_str().unwrap_or("?")
             );
-            for (target, mut ports) in by_host.into_values() {
-                ports.sort_by_key(|o| o.port);
-                let list: Vec<String> = ports
-                    .iter()
-                    .map(|o| format!("{}/{}", o.port_label(), label(&o.service)))
-                    .collect();
-                let _ = writeln!(s, "  {target:<width$}  {}", list.join("  "));
-            }
         }
-        Grouping::Port | Grouping::Service => {
-            let mut groups: BTreeMap<String, Vec<&OpenPort>> = BTreeMap::new();
-            for o in open.iter() {
-                let key = if by == Grouping::Port {
-                    format!("{}/{}", o.port_label(), label(&o.service))
-                } else {
-                    label(&o.service).to_string()
-                };
-                groups.entry(key).or_default().push(o);
+        if let Some(c) = &self.config {
+            let t = &c["transport"];
+            let _ = writeln!(
+                s,
+                "  {:<16}{} via {} ({})",
+                "transport",
+                t["type"].as_str().unwrap_or("?"),
+                t["name"].as_str().unwrap_or("?"),
+                t["measured_fidelity"].as_str().unwrap_or("?")
+            );
+            let _ = writeln!(
+                s,
+                "  {:<16}{} targets x {} ports = {} probes",
+                "scope",
+                commas(c["targets"]["count"].as_u64().unwrap_or(0)),
+                commas(c["ports"]["count"].as_u64().unwrap_or(0)),
+                commas(c["probes_planned"].as_u64().unwrap_or(0))
+            );
+            let _ = writeln!(
+                s,
+                "  {:<16}{}",
+                "seed",
+                c["permutation"]["seed"].as_str().unwrap_or("?")
+            );
+        }
+        match &self.terminal {
+            None => {
+                let _ = writeln!(s, "  {:<16}INCOMPLETE — no terminal event", "result");
             }
-            // Commonest first: on a sweep, "what is everywhere" is the question.
-            let mut rows: Vec<(String, Vec<&OpenPort>)> = groups.into_iter().collect();
-            rows.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
-            let width = rows
-                .iter()
-                .map(|(k, _)| k.len())
-                .max()
-                .unwrap_or(12)
-                .max(12);
-            let noun = if by == Grouping::Port {
-                "port"
-            } else {
-                "service"
-            };
-            let _ = writeln!(s, "\nopen ports by {noun} ({} distinct):", rows.len());
-            for (key, mut hits) in rows {
-                hits.sort_by(|a, b| {
-                    host_key(&a.target)
-                        .cmp(&host_key(&b.target))
-                        .then(a.port.cmp(&b.port))
-                });
-                let hosts: Vec<String> = hits
-                    .iter()
-                    .map(|o| {
-                        if by == Grouping::Port {
-                            o.target.clone()
-                        } else {
-                            format!("{}:{}", o.target, o.port_label())
-                        }
-                    })
-                    .collect();
+            Some(t) => {
+                let c = &t["counts"];
                 let _ = writeln!(
                     s,
-                    "  {key:<width$}  {:>4}  {}",
-                    hits.len(),
-                    hosts.join("  ")
+                    "  {:<16}{} ({})",
+                    "result",
+                    kind(t),
+                    t["termination"].as_str().unwrap_or("?")
                 );
+                let _ = writeln!(
+                    s,
+                    "  {:<16}{}",
+                    "duration",
+                    HumanElapsed(std::time::Duration::from_millis(
+                        t["duration_ms"].as_u64().unwrap_or(0)
+                    ))
+                );
+                let count = |k: &str, st: State| {
+                    style.paint_state(
+                        st,
+                        &format!("{} {}", commas(c[k].as_u64().unwrap_or(0)), st.as_str()),
+                    )
+                };
+                let _ = writeln!(
+                    s,
+                    "  {:<16}{}, {}, {}, {}",
+                    "states",
+                    count("open", State::Open),
+                    count("closed", State::Closed),
+                    count("filtered", State::Filtered),
+                    count("error", State::Error)
+                );
+                if c["not_started"].as_u64().unwrap_or(0) > 0 {
+                    let _ = writeln!(
+                        s,
+                        "  {:<16}{} probes never started",
+                        "incomplete",
+                        commas(c["not_started"].as_u64().unwrap_or(0))
+                    );
+                }
             }
         }
     }
-    s
+
+    fn render_hosts(&self, s: &mut String) {
+        if self.hosts.is_empty() {
+            return;
+        }
+        let w = self
+            .hosts
+            .values()
+            .map(|h| h.name.chars().count())
+            .max()
+            .unwrap_or(15)
+            .max(15);
+        let _ = writeln!(s, "\nby host ({}):", plural(self.hosts.len(), "host"));
+        let _ = writeln!(
+            s,
+            "  {:<w$}  {:>6} {:>6} {:>8} {:>6}  open ports",
+            "host",
+            "open",
+            "closed",
+            "filtered",
+            "error",
+            w = w
+        );
+        for h in self.hosts.values() {
+            let list: Vec<String> = h
+                .open_ports
+                .iter()
+                .map(|(p, svc)| {
+                    if svc.is_empty() {
+                        p.to_string()
+                    } else {
+                        format!("{p}/{svc}")
+                    }
+                })
+                .collect();
+            let line = format!(
+                "  {:<w$}  {:>6} {:>6} {:>8} {:>6}  {}",
+                h.name,
+                h.states.open,
+                h.states.closed,
+                h.states.filtered,
+                h.states.error,
+                list.join(" "),
+                w = w
+            );
+            let _ = writeln!(s, "{}", line.trim_end());
+        }
+    }
+
+    fn render_networks(&self, s: &mut String) {
+        let nets = self.networks();
+        if nets.is_empty() {
+            return;
+        }
+        let w = nets
+            .keys()
+            .map(|k| k.chars().count())
+            .max()
+            .unwrap_or(18)
+            .max(18);
+        let _ = writeln!(s, "\nby network ({}):", plural(nets.len(), "network"));
+        let _ = writeln!(
+            s,
+            "  {:<w$}  {:>6} {:>10} {:>6} {:>8}",
+            "network",
+            "hosts",
+            "with-open",
+            "open",
+            "filtered",
+            w = w
+        );
+        for (name, n) in &nets {
+            let _ = writeln!(
+                s,
+                "  {:<w$}  {:>6} {:>10} {:>6} {:>8}",
+                name,
+                n.hosts,
+                n.hosts_with_open,
+                n.states.open,
+                n.states.filtered,
+                w = w
+            );
+        }
+    }
+
+    fn render_ports(&self, s: &mut String) {
+        let ports = self.interesting_ports();
+        if ports.is_empty() {
+            return;
+        }
+        let _ = writeln!(s, "\nby port ({} with something open):", ports.len());
+        let _ = writeln!(
+            s,
+            "  {:<8} {:<16} {:>6} {:>6} {:>8}",
+            "port", "service", "open", "closed", "filtered"
+        );
+        for (port, p) in ports {
+            let _ = writeln!(
+                s,
+                "  {:<8} {:<16} {:>6} {:>6} {:>8}",
+                port,
+                label(&p.service),
+                p.states.open,
+                p.states.closed,
+                p.states.filtered
+            );
+        }
+    }
+
+    fn render_services(&self, s: &mut String) {
+        let svcs: BTreeMap<String, SvcAgg> = self
+            .services()
+            .into_iter()
+            .filter(|(_, v)| v.states.open > 0)
+            .collect();
+        if svcs.is_empty() {
+            return;
+        }
+        let _ = writeln!(s, "\nby service ({}):", plural(svcs.len(), "service"));
+        let _ = writeln!(
+            s,
+            "  {:<16} {:>6} {:>6} {:>8}  ports",
+            "service", "open", "closed", "filtered"
+        );
+        for (name, v) in &svcs {
+            let ports: Vec<String> = v.ports.iter().map(u16::to_string).collect();
+            let _ = writeln!(
+                s,
+                "  {:<16} {:>6} {:>6} {:>8}  {}",
+                name,
+                v.states.open,
+                v.states.closed,
+                v.states.filtered,
+                ports.join(",")
+            );
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        let hosts: Vec<Value> = self
+            .hosts
+            .values()
+            .map(|h| {
+                json!({
+                    "host": h.name,
+                    "states": h.states.to_json(),
+                    "open_ports": h.open_ports.iter().map(|(p, s)| json!({
+                        "port": p,
+                        "service_label": if s.is_empty() { Value::Null } else { json!(s) },
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        let networks: Vec<Value> = self
+            .networks()
+            .into_iter()
+            .map(|(name, n)| {
+                json!({
+                    "network": name,
+                    "hosts": n.hosts,
+                    "hosts_with_open": n.hosts_with_open,
+                    "states": n.states.to_json(),
+                })
+            })
+            .collect();
+        let ports: Vec<Value> = self
+            .ports
+            .iter()
+            .map(|(port, p)| {
+                json!({
+                    "port": port,
+                    "service_label": if p.service.is_empty() { Value::Null } else { json!(p.service) },
+                    "states": p.states.to_json(),
+                })
+            })
+            .collect();
+        let services: Vec<Value> = self
+            .services()
+            .into_iter()
+            .map(|(name, v)| {
+                json!({ "service": name, "ports": v.ports, "states": v.states.to_json() })
+            })
+            .collect();
+
+        json!({
+            "file": self.path,
+            "scan": self.config.clone().unwrap_or(Value::Null),
+            "terminal": self.terminal.clone().unwrap_or(Value::Null),
+            "hosts": hosts,
+            "networks": networks,
+            "ports": ports,
+            "services": services,
+        })
+    }
 }
 
 /// A filter over the results in a record.
@@ -1204,18 +1471,30 @@ impl Hit {
     }
 }
 
-/// Query the results in a record.
+/// One probe result, whether it had a row of its own or came out of a span.
+pub struct ResultRow<'a> {
+    pub target: &'a str,
+    pub port: u16,
+    pub state: &'a str,
+    pub source: &'a str,
+    pub reason: Option<&'a str>,
+    pub service: Option<&'a str>,
+    pub collapsed: bool,
+    pub total_ms: Option<f64>,
+}
+
+/// Walk every probe result in a record — rows and span-expanded alike.
 ///
-/// Reads rows *and* expands spans, which is the whole point: with collapsing on by
-/// default a `closed` result usually has no row of its own, so `jq` over `probe_result`
-/// cannot answer "what was 10.0.0.5:443?" and this can.
+/// The shared spine of `results` and `summarize`, and the reason either can be trusted:
+/// with collapsing on by default a `closed` result usually has no row of its own, so
+/// `jq` over `probe_result` sees only a fraction of the scan and this sees all of it.
 ///
-/// Streams. Memory is the matches plus, for a matrix scan containing spans, the expanded
-/// target list needed to turn a span index back into an endpoint.
-pub fn get(path: &Path, q: &Query) -> Result<Vec<Hit>, String> {
+/// Callback-driven rather than returning a `Vec` so a caller that only needs counters
+/// never materialises the results. That is what lets `summarize` fold a /16 into hosts
+/// plus ports instead of holding 65 million rows.
+fn walk_results(path: &Path, mut f: impl FnMut(ResultRow<'_>)) -> Result<(), String> {
     let mut config: Option<Value> = None;
     let mut expected: Option<Expected> = None;
-    let mut hits = Vec::new();
 
     for line in stream(path)? {
         let Some(e) = line?.event else { continue };
@@ -1229,18 +1508,16 @@ pub fn get(path: &Path, q: &Query) -> Result<Vec<Hit>, String> {
                 ) else {
                     continue;
                 };
-                if q.wants(t, p, st) {
-                    hits.push(Hit {
-                        target: t.to_string(),
-                        port: p,
-                        state: st.to_string(),
-                        source: e["source"].as_str().unwrap_or("").to_string(),
-                        reason: e["reason"].as_str().map(str::to_string),
-                        service: e["service_label"].as_str().map(str::to_string),
-                        collapsed: false,
-                        total_ms: e["timing_ms"]["total"].as_f64(),
-                    });
-                }
+                f(ResultRow {
+                    target: t,
+                    port: p,
+                    state: st,
+                    source: e["source"].as_str().unwrap_or(""),
+                    reason: e["reason"].as_str(),
+                    service: e["service_label"].as_str(),
+                    collapsed: false,
+                    total_ms: e["timing_ms"]["total"].as_f64(),
+                });
             }
             "probe_span" => {
                 let Some(state) = e["state"].as_str() else {
@@ -1254,32 +1531,57 @@ pub fn get(path: &Path, q: &Query) -> Result<Vec<Hit>, String> {
                     expected = Some(expected_endpoints(cfg, path)?);
                 }
                 let exp = expected.as_ref().expect("just built");
-                let source = e["source"].as_str().unwrap_or("").to_string();
-                let reason = e["reason"].as_str().map(str::to_string);
+                let source = e["source"].as_str().unwrap_or("");
+                let reason = e["reason"].as_str();
                 for r in e["probe_indices"].as_array().into_iter().flatten() {
                     let (Some(a), Some(b)) = (r[0].as_u64(), r[1].as_u64()) else {
                         continue;
                     };
                     for i in a..=b {
                         let Some((t, p)) = exp.at(i) else { continue };
-                        if q.wants(&t, p, state) {
-                            hits.push(Hit {
-                                target: t,
-                                port: p,
-                                state: state.to_string(),
-                                source: source.clone(),
-                                reason: reason.clone(),
-                                service: crate::services::service_label(p).map(str::to_string),
-                                collapsed: true,
-                                total_ms: None,
-                            });
-                        }
+                        f(ResultRow {
+                            target: &t,
+                            port: p,
+                            state,
+                            source,
+                            reason,
+                            service: crate::services::service_label(p),
+                            collapsed: true,
+                            total_ms: None,
+                        });
                     }
                 }
             }
             _ => {}
         }
     }
+    Ok(())
+}
+
+/// Query the results in a record.
+///
+/// Reads rows *and* expands spans, which is the whole point: with collapsing on by
+/// default a `closed` result usually has no row of its own, so `jq` over `probe_result`
+/// cannot answer "what was 10.0.0.5:443?" and this can.
+///
+/// Streams. Memory is the matches plus, for a matrix scan containing spans, the expanded
+/// target list needed to turn a span index back into an endpoint.
+pub fn get(path: &Path, q: &Query) -> Result<Vec<Hit>, String> {
+    let mut hits = Vec::new();
+    walk_results(path, |r| {
+        if q.wants(r.target, r.port, r.state) {
+            hits.push(Hit {
+                target: r.target.to_string(),
+                port: r.port,
+                state: r.state.to_string(),
+                source: r.source.to_string(),
+                reason: r.reason.map(str::to_string),
+                service: r.service.map(str::to_string),
+                collapsed: r.collapsed,
+                total_ms: r.total_ms,
+            });
+        }
+    })?;
 
     hits.sort_by(|a, b| {
         host_key(&a.target)
@@ -1287,6 +1589,27 @@ pub fn get(path: &Path, q: &Query) -> Result<Vec<Hit>, String> {
             .then(a.port.cmp(&b.port))
     });
     Ok(hits)
+}
+
+/// The line `remainder` prints to stderr.
+///
+/// A complete scan used to be told to "re-run exactly those with:" and handed a pipeline
+/// that would have probed nothing — a suggestion is only useful when there is something
+/// to act on.
+fn remainder_note(outstanding: usize, planned: u64, path: &Path) -> String {
+    if outstanding == 0 {
+        return format!(
+            "all {} endpoints were probed; nothing to re-run",
+            commas(planned)
+        );
+    }
+    format!(
+        "{} of {} endpoints were not probed; re-run exactly those with:\n  \
+         scanr output remainder {} | scanr run --pairs -",
+        commas(outstanding as u64),
+        commas(planned),
+        path.display()
+    )
 }
 
 /// Endpoints that were not probed, suitable for `scanr run --pairs -`.
@@ -1391,13 +1714,7 @@ fn remainder_from_hint(path: &Path) -> Result<Option<Remainder>, String> {
         endpoints.push(format_pair(&t, p));
     }
 
-    let note = format!(
-        "{} of {} endpoints were not probed; re-run exactly those with:\n  \
-         scanr output remainder {} | scanr run --pairs -",
-        commas(endpoints.len() as u64),
-        commas(planned),
-        path.display()
-    );
+    let note = remainder_note(endpoints.len(), planned, path);
     Ok(Some(Remainder {
         endpoints,
         scan_id: config["scan_id"]
@@ -1540,13 +1857,7 @@ fn remainder_by_scanning(path: &Path) -> Result<Remainder, String> {
 
     let endpoints = expected.outstanding(&probed);
 
-    let note = format!(
-        "{} of {} endpoints were not probed; re-run exactly those with:\n  \
-         scanr output remainder {} | scanr run --pairs -",
-        commas(endpoints.len() as u64),
-        commas(planned as u64),
-        path.display()
-    );
+    let note = remainder_note(endpoints.len(), planned as u64, path);
     Ok(Remainder {
         endpoints,
         // Carried separately rather than prepended to `endpoints`, so the list stays a
@@ -1723,6 +2034,11 @@ impl Remainder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Plain, uncoloured output: these assert on text, not on escape sequences.
+    fn st() -> Style {
+        Style::for_stream(false, true)
+    }
     use serde_json::json;
 
     fn write(dir: &Path, name: &str, events: &[Value]) -> std::path::PathBuf {
@@ -2057,7 +2373,17 @@ mod tests {
         assert!(r.endpoints.is_empty(), "{:?}", r.endpoints);
         assert!(r.scan_id.is_some(), "the origin is still known");
         assert_eq!(r.render(), "", "nothing outstanding means no directive");
-        assert!(r.note.starts_with("0 of 4 endpoints"), "{}", r.note);
+        // A complete scan is told so, not handed a pipeline that would probe nothing.
+        assert!(
+            r.note.starts_with("all 4 endpoints were probed"),
+            "{}",
+            r.note
+        );
+        assert!(
+            !r.note.contains("--pairs"),
+            "no directive to run: {}",
+            r.note
+        );
     }
 
     /// A file we cannot fully read is refused outright, by all three readers.
@@ -2080,7 +2406,7 @@ mod tests {
         }
         for err in [
             verify(&p).err(),
-            summarize(&p, Grouping::Flat, &Style::for_stream(false, true)).err(),
+            summarize(&p, None, false, &Style::for_stream(false, true)).err(),
             remainder(&p).err().map(|e| e.to_string()),
         ] {
             let err = err.expect("an unreadable file must be an error, not a partial answer");
@@ -2384,16 +2710,20 @@ mod tests {
     }
 
     #[test]
-    fn summarize_lists_open_ports() {
+    fn summarize_reports_scan_totals_and_the_open_port() {
         let d = tempfile::tempdir().unwrap();
         let p = write(d.path(), "s.jsonl", &good_events());
-        let out = summarize(&p, Grouping::Flat, &Style::for_stream(false, true)).unwrap();
-        assert!(out.contains("open ports:"), "{out}");
-        assert!(out.contains("10.0.0.0:80/tcp  http"), "{out}");
+        let out = summarize(&p, None, false, &st()).unwrap();
         assert!(
             out.contains("1 open, 1 closed, 1 filtered, 1 error"),
             "{out}"
         );
+        // The open port is reachable from the per-host row rather than a separate list.
+        let line = out
+            .lines()
+            .find(|l| l.contains("10.0.0.0"))
+            .unwrap_or_else(|| panic!("{out}"));
+        assert!(line.contains("80/http"), "{line}");
     }
 
     fn multi_host_record() -> Vec<Value> {
@@ -2427,125 +2757,139 @@ mod tests {
 
     /// Sorting the formatted strings put `10.0.0.10` before `10.0.0.2`, which reads as a
     /// bug in the scan rather than in the sort.
+    /// Sorting the formatted strings put `10.0.0.10` before `10.0.0.2`, which reads as a
+    /// bug in the scan rather than in the sort.
     #[test]
     fn hosts_sort_numerically_not_lexicographically() {
         let d = tempfile::tempdir().unwrap();
         let p = write(d.path(), "g.jsonl", &multi_host_record());
-        for by in [Grouping::Flat, Grouping::Host] {
-            let out = summarize(&p, by, &Style::for_stream(false, true)).unwrap();
-            let order: Vec<usize> = ["10.0.0.2", "10.0.0.9", "10.0.0.10"]
-                .iter()
-                .map(|h| {
-                    out.find(h)
-                        .unwrap_or_else(|| panic!("{h} missing from {out}"))
-                })
-                .collect();
-            assert!(
-                order[0] < order[1] && order[1] < order[2],
-                "{by:?} listed hosts out of numeric order:\n{out}"
-            );
-        }
+        let out = summarize(&p, Some(Grouping::Host), false, &st()).unwrap();
+        let order: Vec<usize> = ["10.0.0.2", "10.0.0.9", "10.0.0.10"]
+            .iter()
+            .map(|h| {
+                out.find(h)
+                    .unwrap_or_else(|| panic!("{h} missing from {out}"))
+            })
+            .collect();
+        assert!(
+            order[0] < order[1] && order[1] < order[2],
+            "hosts out of numeric order:\n{out}"
+        );
     }
 
+    /// The point of the rewrite: a per-host row carries counts for *every* state, not
+    /// just a list of the open ones. The old `--by host` could not have answered this.
     #[test]
-    fn grouping_by_host_puts_each_host_on_one_line() {
+    fn by_host_counts_every_state_not_only_open() {
         let d = tempfile::tempdir().unwrap();
         let p = write(d.path(), "g.jsonl", &multi_host_record());
-        let out = summarize(&p, Grouping::Host, &Style::for_stream(false, true)).unwrap();
-        assert!(out.contains("open ports by host (3 hosts)"), "{out}");
-        // 10.0.0.2 has both ports, on one line, in port order.
+        let out = summarize(&p, Some(Grouping::Host), false, &st()).unwrap();
+        assert!(out.contains("by host (3 hosts)"), "{out}");
+
         let line = out
             .lines()
             .find(|l| l.contains("10.0.0.2"))
             .unwrap_or_else(|| panic!("{out}"));
+        // Two open, and the closed probe on the same host counted beside them.
         assert!(
             line.contains("22/ssh") && line.contains("80/http"),
             "{line}"
         );
         assert!(line.find("22/ssh") < line.find("80/http"), "{line}");
+        let nums: Vec<&str> = line.split_whitespace().skip(1).take(4).collect();
+        assert_eq!(nums[0], "2", "open count on {line}");
     }
 
     #[test]
-    fn grouping_by_port_ranks_the_commonest_first() {
+    fn by_network_rolls_hosts_up_into_prefixes() {
         let d = tempfile::tempdir().unwrap();
         let p = write(d.path(), "g.jsonl", &multi_host_record());
-        let out = summarize(&p, Grouping::Port, &Style::for_stream(false, true)).unwrap();
-        assert!(out.contains("open ports by port (2 distinct)"), "{out}");
-        // 80/http appears on two hosts, 22/ssh on two as well — ties break by key, but
-        // both must list their hosts.
-        let http = out.lines().find(|l| l.contains("80/http")).unwrap();
-        assert!(
-            http.contains("10.0.0.2") && http.contains("10.0.0.9"),
-            "{http}"
-        );
+        let out = summarize(&p, Some(Grouping::Network), false, &st()).unwrap();
+        assert!(out.contains("by network"), "{out}");
+        let line = out
+            .lines()
+            .find(|l| l.contains("10.0.0.0/24"))
+            .unwrap_or_else(|| panic!("{out}"));
+        // Three hosts in the prefix, all three with something open.
+        let nums: Vec<&str> = line.split_whitespace().skip(1).take(3).collect();
+        assert_eq!(nums[0], "3", "host count on {line}");
+        assert_eq!(nums[1], "3", "with-open on {line}");
     }
 
     #[test]
-    fn grouping_by_service_keys_on_the_label() {
+    fn by_port_counts_hosts_per_port() {
         let d = tempfile::tempdir().unwrap();
         let p = write(d.path(), "g.jsonl", &multi_host_record());
-        let out = summarize(&p, Grouping::Service, &Style::for_stream(false, true)).unwrap();
-        assert!(out.contains("open ports by service"), "{out}");
+        let out = summarize(&p, Some(Grouping::Port), false, &st()).unwrap();
+        assert!(out.contains("by port"), "{out}");
+        let http = out
+            .lines()
+            .find(|l| l.trim_start().starts_with("80 "))
+            .unwrap_or_else(|| panic!("{out}"));
+        assert!(http.contains("http"), "{http}");
+    }
+
+    #[test]
+    fn by_service_gathers_ports_under_one_label() {
+        let d = tempfile::tempdir().unwrap();
+        let p = write(d.path(), "g.jsonl", &multi_host_record());
+        let out = summarize(&p, Some(Grouping::Service), false, &st()).unwrap();
+        assert!(out.contains("by service"), "{out}");
         let ssh = out
             .lines()
             .find(|l| l.trim_start().starts_with("ssh"))
-            .unwrap();
-        // Service grouping shows host:port, since the port is no longer in the key.
-        assert!(
-            ssh.contains("10.0.0.2:22") && ssh.contains("10.0.0.10:22"),
-            "{ssh}"
-        );
+            .unwrap_or_else(|| panic!("{out}"));
+        assert!(ssh.contains("22"), "{ssh}");
     }
 
-    /// 65616 is 0x10050; `as u16` dropped the high bit and printed 80. A summary that
-    /// turns a corrupt record into a plausible one is worse than useless, because the
-    /// reader has no way to tell.
+    /// With no `--by`, every section is present — the first look at a record should not
+    /// require knowing which question to ask.
     #[test]
-    fn a_port_beyond_range_is_reported_not_truncated() {
+    fn no_grouping_shows_all_the_sections() {
         let d = tempfile::tempdir().unwrap();
-        let mut ev = good_events();
-        for e in ev.iter_mut() {
-            if e["type"] == "probe_result" && e["state"] == "open" {
-                e["port"] = json!(65616);
-            }
+        let p = write(d.path(), "g.jsonl", &multi_host_record());
+        let out = summarize(&p, None, false, &st()).unwrap();
+        for section in ["by host", "by network", "by port", "by service"] {
+            assert!(out.contains(section), "{section} missing from:\n{out}");
         }
-        let p = write(d.path(), "s.jsonl", &ev);
-        let out = summarize(&p, Grouping::Flat, &Style::for_stream(false, true)).unwrap();
-        assert!(out.contains("65616"), "the record's own value: {out}");
-        assert!(
-            !out.contains(":80/tcp"),
-            "80 is what truncation invents from 65616: {out}"
-        );
+        // ...and `--by` narrows to exactly one of them.
+        let only = summarize(&p, Some(Grouping::Network), false, &st()).unwrap();
+        assert!(only.contains("by network"), "{only}");
+        assert!(!only.contains("by host"), "{only}");
     }
 
-    /// The other half of the same cast: `unwrap_or(0)` turned a missing port into port 0.
     #[test]
-    fn a_missing_port_is_marked_unknown_rather_than_zero() {
+    fn json_carries_the_same_aggregates() {
         let d = tempfile::tempdir().unwrap();
-        let mut ev = good_events();
-        for e in ev.iter_mut() {
-            if e["type"] == "probe_result" && e["state"] == "open" {
-                e.as_object_mut().expect("object").remove("port");
-            }
-        }
-        let p = write(d.path(), "s.jsonl", &ev);
-        let out = summarize(&p, Grouping::Flat, &Style::for_stream(false, true)).unwrap();
-        assert!(out.contains(":?/tcp"), "{out}");
-        assert!(
-            !out.contains(":0/tcp"),
-            "0 is a port, and this record has none: {out}"
-        );
+        let p = write(d.path(), "g.jsonl", &multi_host_record());
+        let out = summarize(&p, None, true, &st()).unwrap();
+        let v: Value = serde_json::from_str(out.trim()).expect("summarize --json must parse");
+        assert_eq!(v["hosts"].as_array().unwrap().len(), 3);
+        assert_eq!(v["networks"][0]["network"], "10.0.0.0/24");
+        assert_eq!(v["networks"][0]["hosts"], 3);
+        let ssh = v["services"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["service"] == "ssh")
+            .expect("an ssh service entry");
+        assert_eq!(ssh["ports"][0], 22);
     }
 
     #[test]
     fn an_unknown_grouping_is_rejected() {
-        assert!(Grouping::parse("host").is_some());
         assert!(Grouping::parse("hosts").is_none());
-        assert_eq!(Grouping::default(), Grouping::Flat);
+        // Every name the CLI advertises must parse, or `--by` rejects its own help text.
+        for name in Grouping::ALL {
+            assert!(
+                Grouping::parse(name).is_some(),
+                "`{name}` is advertised but unparseable"
+            );
+        }
     }
 
     /// A record whose `closed` results live only in a span — the default shape. The
-    /// point of `get` is that they are still findable.
+    /// point of `results` is that they are still findable.
     fn spanned_record() -> Vec<Value> {
         vec![
             json!({"type":"scan_started","seq":0,"ts":"2026-07-31T12:00:00.000Z","scan_id":"q1","schema_version":1}),
@@ -2786,7 +3130,7 @@ mod tests {
         std::fs::write(&p, "").unwrap();
         let r = verify(&p).unwrap();
         assert!(r.problems.iter().any(|x| x.contains("no events")));
-        assert!(summarize(&p, Grouping::Flat, &Style::for_stream(false, true)).is_err());
+        assert!(summarize(&p, None, false, &Style::for_stream(false, true)).is_err());
     }
 
     #[test]
