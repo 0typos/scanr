@@ -1,5 +1,3 @@
-# NOTE: written without a remote to run it against, so this file is UNVERIFIED.
-# Expect to iterate on it during the first push.
 name: CI
 
 on:
@@ -209,6 +207,11 @@ jobs:
       - run: cargo install cargo-fuzz --locked
       # Replay the committed seeds only. This is a regression check, not a fuzzing run:
       # it must stay fast, and it pins the two crashes fuzzing already found.
+      #
+      # It is also the only thing that compiles `fuzz/` at all. That crate is outside the
+      # workspace, so `cargo test` and `cargo clippy --all-targets` both skip it, and a
+      # signature change in the library breaks it without any local command saying so.
+      # That has happened twice.
       - name: Replay seeds
         run: |
           for target in socks5_reply socks5_handshake config specs record; do

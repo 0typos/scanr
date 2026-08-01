@@ -1,5 +1,9 @@
-# NOTE: written without a remote to run it against, so this file is UNVERIFIED.
-# Expect to iterate on it during the first tagged release.
+# Partly verified. The `build` matrix has run green via `workflow_dispatch`, so
+# compiling, the dirty-tree check, packaging and artifact upload are all proven.
+#
+# Two things a dry run cannot reach, both gated on the ref being a tag: the `publish`
+# job, and the tag-versus-`--version` comparison inside the build job. Neither has
+# ever executed. Expect to iterate on them during the first real `v*` tag.
 #
 # Distribution is prebuilt static binaries attached to a GitHub release; the crate is
 # marked `publish = false` and is not pushed to crates.io.
