@@ -5,9 +5,29 @@ see [`design/05-jsonl-spec.md`](design/05-jsonl-spec.md).
 
 ## Stability
 
-`schema_version` is `1`, and within it the format is **additive-stable**: new optional
-fields may appear, existing fields will not change type or meaning. Consumers must ignore
-unknown fields.
+`schema_version` is `1`, and within it the format is **additive-stable**. Concretely,
+what will not change without a version bump:
+
+- an existing field will not change type or meaning
+- an existing field will not be removed
+- an event type that exists will not be renamed
+
+And what may change within version 1:
+
+- **new optional fields** may appear on any event
+- **new event types** may appear
+
+So a consumer must dispatch on `type` and ignore both unknown fields and unknown event
+types. It must **not** assume any one event type accounts for every probe — `probe_span`
+already breaks that assumption, and it is on by default.
+
+**The terminal event's `counts` are the authority on totals**, not the number of lines of
+any given type. `scanr output verify` reconciles the two and fails if they disagree, so
+if you need "how many probes were there", read `counts`.
+
+This is a wider promise than the one this document made before spans existed, which
+covered only new *fields*. That wording would have let a consumer count `probe_result`
+lines and believe it had them all.
 
 `scanr` itself is `0.x` — see the note in `CHANGELOG.md`. Schema feedback is explicitly
 wanted before `1.0` hardens this into a semver commitment.

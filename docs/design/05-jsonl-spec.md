@@ -331,6 +331,19 @@ record reports one line per defect and not one per probe.
 
 ## Stability
 
-`schema_version` 1 is additive-stable: new optional fields may appear; existing fields
-will not change type or meaning. Consumers must ignore unknown fields. Removing or
-retyping a field requires a major bump.
+`schema_version` 1 is additive-stable in both directions that matter: new optional
+fields may appear on existing events, **and new event types may appear**. Existing fields
+will not change type or meaning, existing fields will not be removed, and an existing
+event type will not be renamed. Any of those requires a version bump.
+
+Consumers must therefore ignore unknown fields *and* unknown event types, and must not
+treat any single event type as covering every probe — `probe_span` does not, and it is
+the default.
+
+The totals live in the terminal event's `counts`, which `output verify` reconciles
+against the rows and spans actually present. That reconciliation is what makes `counts`
+safe to trust and line-counting unsafe.
+
+Adding `probe_span` under version 1 is deliberate and is the reason this clause is
+explicit. The narrower promise — new *fields* only — was written before spans existed and
+would have licensed a consumer to count `probe_result` lines and believe the total.

@@ -6,10 +6,12 @@ All notable changes to `scanr` are recorded here. The format follows
 
 ## About the version number
 
-`scanr` is released at `0.x` deliberately. The JSONL scan record is
-additive-stable within `schema_version 1` — new optional fields may appear, existing
-fields will not change type or meaning — but that promise is not yet hardened into a
-semver `1.0` commitment. `1.0.0` is reserved until at least one external consumer has
+`scanr` is released at `0.x` deliberately. The JSONL scan record is additive-stable
+within `schema_version 1` — new optional fields **and new event types** may appear, while
+existing fields keep their type and meaning and are not removed. Consumers dispatch on
+`type`, ignore what they do not recognise, and read totals from the terminal event's
+`counts` rather than by counting lines of any one type. That promise is not yet hardened
+into a semver `1.0` commitment. `1.0.0` is reserved until at least one external consumer has
 parsed a record and told us what the format is missing. Schema feedback is explicitly
 invited before then.
 
