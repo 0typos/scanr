@@ -94,8 +94,23 @@ A few that are not self-explanatory:
 - `--resumed-from` records which scan is being continued. You rarely type it: `remainder`
   emits it as a `# resumed-from:` comment and `run` picks it up from the pipe.
 
-`transport test` also takes `--known-open`, `--known-closed` and `--calibrate`. Those
-describe what to measure rather than how to scan, so they are not scan overrides.
+### Flags on the other commands
+
+The block above is the scan-override allowlist — the settings that change *how a scan
+runs*, and the reason a run is reproducible from a file. Everything below describes what a
+command should print or measure, so none of it belongs in that allowlist.
+
+<!-- OTHER FLAGS: checked against the clap definition by tests/cli_spec.rs -->
+| command | flags |
+|---|---|
+| `config init` | `--force` overwrite an existing `scanr.toml` |
+| `transport test` | `--known-open`, `--known-closed` name endpoints with a known state to measure against; `--calibrate` finds the proxy's connection cap |
+| `output summarize` | `--by <section>` narrows to one of `totals`, `host`, `network`, `port`, `service`; `--json` emits the aggregates as one object |
+| `output results` | `--hosts`, `--ports`, `--states` filter; `--format` picks the shape (see below) |
+
+`plan`, `config show`, `config validate`, `config path`, `transport list`,
+`transport show`, `output verify`, `output remainder`, `output events` and `completion`
+take no flags of their own beyond the globals.
 
 ## Handing results to another tool
 

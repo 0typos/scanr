@@ -431,7 +431,7 @@ $ scanr output results scan-*.jsonl.gz --states open --format json | jq -r .targ
 | `--hosts` | IPs, CIDR blocks, ranges, hostnames — the same forms as `--targets`, repeatable |
 | `--ports` | `80`, `1-1024`, lists — the same forms as `--ports` |
 | `--states` | `open`, `closed`, `filtered`, `error`, comma-separated |
-| `--json` | JSON Lines instead of the table |
+| `--format` | `table` (default), `json`, `nmap`, `list` — see [Handing results to another tool](cli.md#handing-results-to-another-tool) |
 
 Omit a flag and it matches everything. An unknown state is an error rather than a query
 that silently matches nothing.
@@ -440,8 +440,9 @@ Host filters match **without expanding**, so `--hosts 10.0.0.0/8` costs nothing.
 
 States are coloured when stdout is a terminal — the same palette `run` uses, so `open`
 looks the same wherever you see it. Redirect or pipe the output and it is plain text;
-`--no-color` and `NO_COLOR` turn it off explicitly. `--json` is never coloured, and
-neither is `output events`: both are data, and an escape sequence in them would be a bug.
+`--no-color` and `NO_COLOR` turn it off explicitly. Only `--format table` is ever
+coloured — `json`, `nmap` and `list` are not, and neither is `output events`: those are
+data, and an escape sequence in them would be a bug.
 
 Results reconstructed from a span carry `"collapsed": true` in JSON output and have no
 `timing_ms` — the span keeps only aggregate timing, and inventing a per-probe number
