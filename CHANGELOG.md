@@ -15,19 +15,9 @@ into a semver `1.0` commitment. `1.0.0` is reserved until at least one external 
 parsed a record and told us what the format is missing. Schema feedback is explicitly
 invited before then.
 
-## [0.2.0] - 2026-08-01
+## [Unreleased]
 
-### Added
-
-- **Proxy chains.** `type = "chain"` with `hops = [...]` traverses several SOCKS5 servers
-  in order, each reached through the one before. The chain reports its weakest hop's
-  fidelity, `transport test` measures the path end to end, and a failure names the hop it
-  happened at rather than reading as one anonymous proxy error.
-- **Proxy pools.** `type = "pool"` with `members = [...]` spreads probes across several
-  proxies, multiplying both the local ephemeral-port budget and the per-proxy connection
-  cap. Assignment is deterministic — an endpoint always goes via the same member, so a
-  scan stays reproducible — and every result records which member produced it. Not
-  failover: a dead member fails its share rather than having it taken over.
+## [0.2.1] - 2026-08-01
 
 ### Fixed
 
@@ -50,6 +40,20 @@ invited before then.
 - `Hop`'s derived `Debug` printed a password in the clear.
 - Hop-to-hop CONNECT ran under the handshake budget although it waits on a real TCP
   connect, and each hop was resolved twice.
+
+## [0.2.0] - 2026-08-01
+
+### Added
+
+- **Proxy chains.** `type = "chain"` with `hops = [...]` traverses several SOCKS5 servers
+  in order, each reached through the one before. The chain reports its weakest hop's
+  fidelity, `transport test` measures the path end to end, and a failure names the hop it
+  happened at rather than reading as one anonymous proxy error.
+- **Proxy pools.** `type = "pool"` with `members = [...]` spreads probes across several
+  proxies, multiplying both the local ephemeral-port budget and the per-proxy connection
+  cap. Assignment is deterministic — an endpoint always goes via the same member, so a
+  scan stays reproducible — and every result records which member produced it. Not
+  failover: a dead member fails its share rather than having it taken over.
 
 ### Changed
 
