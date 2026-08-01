@@ -23,6 +23,14 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // summarize and remainder are allowed to reject the file, not to panic on it.
-    let _ = scanr::verify::summarize(&path);
+    // Every grouping, since each has its own formatting path over attacker-shaped rows.
+    for by in [
+        scanr::verify::Grouping::Flat,
+        scanr::verify::Grouping::Host,
+        scanr::verify::Grouping::Port,
+        scanr::verify::Grouping::Service,
+    ] {
+        let _ = scanr::verify::summarize(&path, by);
+    }
     let _ = scanr::verify::remainder(&path);
 });
