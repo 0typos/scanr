@@ -92,6 +92,21 @@ invited before then.
   which are data.
 - Shell completions for bash, zsh, fish, elvish, and PowerShell.
 
+### Changed
+
+- **`output cat` is now `output events`, and `output get` is now `output results`.** The
+  old names said the opposite of the truth: with spans on by default, `cat` emitted the
+  file verbatim and so showed only a fraction of the probes, while `get` — which expands
+  spans — was the one that showed all of them. On a 21-probe record, `cat | jq
+  'select(.type=="probe_result")'` returned 4 and `get` returned 21.
+- **`output summarize` aggregates instead of listing.** It now reports counts per host,
+  per network and per service, for *every* state rather than only `open`, and prints all
+  sections by default with `--by` to narrow. `--json` emits the same aggregates. The old
+  `--by` only rearranged one list of open ports and could not answer "how many hosts had
+  445 filtered".
+- `output remainder` on a complete scan says so, instead of suggesting a re-run pipeline
+  that would have probed nothing.
+
 ### Fixed
 
 - The documented built-in profiles now match the code. The table said "Four built-ins"

@@ -593,7 +593,7 @@ fn output_remainder_round_trips_into_a_rescan() {
     assert_eq!(code(&rem), 0, "{}", stderr(&rem));
     assert!(stdout(&rem).trim().is_empty(), "{}", stdout(&rem));
     assert!(
-        stderr(&rem).contains("0 of 4 endpoints"),
+        stderr(&rem).contains("all 4 endpoints were probed"),
         "{}",
         stderr(&rem)
     );
@@ -807,10 +807,14 @@ fn the_default_record_is_compressed_and_collapsed_and_still_verifies() {
 
     let rem = scanr(d.path(), &["output", "remainder", p]);
     assert_eq!(code(&rem), 0, "{}", stderr(&rem));
+    let note = stderr(&rem);
     assert!(
-        stderr(&rem).contains("0 of 202 endpoints"),
-        "a complete scan has nothing outstanding: {}",
-        stderr(&rem)
+        note.contains("all 202 endpoints were probed"),
+        "a complete scan has nothing outstanding: {note}"
+    );
+    assert!(
+        !note.contains("--pairs"),
+        "and is not told to re-run: {note}"
     );
 }
 
@@ -900,7 +904,7 @@ fn output_cat_emits_plain_jsonl_for_either_format() {
 
     for dir in ["gz", "plain"] {
         let f = scanr::testsupport::find_record(&d.path().join(dir)).expect("a record");
-        let out = scanr(d.path(), &["output", "cat", f.to_str().unwrap()]);
+        let out = scanr(d.path(), &["output", "events", f.to_str().unwrap()]);
         assert_eq!(code(&out), 0, "{}", stderr(&out));
 
         // Byte-for-byte what the file holds once decompressed.
@@ -1585,7 +1589,7 @@ fn the_plan_marks_etc_services_as_declined() {
 }
 
 #[test]
-fn output_get_labels_span_rows_from_the_configured_table() {
+fn output_results_labels_span_rows_from_the_configured_table() {
     // Rows that were collapsed into a `probe_span` have no `service_label` in the record,
     // so `get` synthesises one. That is the only reason a read-only command needs a label
     // table at all, and moving the install out of the shared `output` entry point once
@@ -1623,7 +1627,7 @@ fn output_get_labels_span_rows_from_the_configured_table() {
         d.path(),
         &[
             "output",
-            "get",
+            "results",
             "--states",
             "closed",
             record.to_str().unwrap(),

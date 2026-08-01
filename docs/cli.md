@@ -22,8 +22,8 @@ transport test
 output summarize
 output verify
 output remainder
-output cat
-output get
+output events
+output results
 completion
 ```
 
@@ -43,11 +43,11 @@ scanr
 │   ├── show <name>
 │   └── test <name>            measure proxy reachability and result fidelity
 ├── output
-│   ├── summarize <file>       counts, duration, open ports
+│   ├── summarize <file>       totals, and counts by host, network, service
 │   ├── verify <file>          integrity and completeness checks
 │   ├── remainder <file>       endpoints that were never probed
-│   ├── cat <file>             the record as plain JSONL, decompressing it
-│   └── get <file>             look up results, filtering by host/port/state
+│   ├── events <file>          the raw JSONL event stream, verbatim
+│   └── results <file>         every probe result, filterable
 └── completion <shell>
 ```
 

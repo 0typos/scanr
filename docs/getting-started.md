@@ -175,10 +175,14 @@ $ scanr output summarize scanr-results/scan-*.jsonl.gz
   duration        0.01s
   states          2 open, 1 closed, 0 filtered, 0 error
 
-open ports:
-  127.0.0.1:8080/tcp  http-proxy
-  127.0.0.1:8443/tcp  https-alt
+by host (1 host):
+  host               open closed filtered  error  open ports
+  127.0.0.1             2      1        0      0  8080/http-proxy 8443/https-alt
 ```
+
+`summarize` also breaks the record down by network, port and service; `--by <section>`
+narrows it and `--json` makes it machine-readable. To look at individual results, use
+`scanr output results`, which can filter by host, port and state.
 
 A file still named `.partial` means the process died before finalizing. The results in it
 are valid; `verify` will tell you it was truncated. With the default settings that is

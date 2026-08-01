@@ -155,21 +155,28 @@ enum TransportCmd {
 
 #[derive(Subcommand)]
 enum OutputCmd {
-    /// Summarize a scan record
+    /// Summarize a scan record: totals, and counts by host, network, and service
     Summarize {
         file: PathBuf,
-        /// Arrange the open ports: flat, by host, by port, or by service
-        #[arg(long, value_name = "FIELD", default_value = "flat", value_parser = grouping_arg)]
-        by: Grouping,
+        /// Show only one section: scan, host, network, port, or service
+        #[arg(long, value_name = "FIELD", value_parser = grouping_arg)]
+        by: Option<Grouping>,
+        /// Emit JSON instead of a table
+        #[arg(long)]
+        json: bool,
     },
     /// Check a scan record for integrity and completeness
     Verify { file: PathBuf },
     /// Print targets that were not fully probed, for feeding back into --targets
     Remainder { file: PathBuf },
-    /// Write the record as plain JSONL, decompressing it if needed
-    Cat { file: PathBuf },
-    /// Look up results in a record, filtering by host, port, or state
-    Get {
+    /// Write the raw JSONL event stream, decompressing it if needed
+    ///
+    /// This is the file verbatim. With spans on, most probes are represented by a
+    /// `probe_span` rather than a `probe_result`, so filtering these events for
+    /// `probe_result` does not give you every result — `scanr output results` does.
+    Events { file: PathBuf },
+    /// Every probe result, with spans expanded; filter by host, port, or state
+    Results {
         file: PathBuf,
         /// Only these hosts: IPs, CIDR blocks, or ranges (repeatable, comma-separated)
         #[arg(long, value_name = "SPEC", action = clap::ArgAction::Append)]
@@ -1007,9 +1014,10 @@ fn install_services_best_effort(cli: &Cli) {
 
 fn cmd_output(cli: &Cli, cmd: &OutputCmd) -> Result<u8, ConfigError> {
     match cmd {
-        OutputCmd::Summarize { file, by } => {
+        OutputCmd::Summarize { file, by, json } => {
             let style = output_style(cli);
-            let report = crate::verify::summarize(file, *by, &style).map_err(ConfigError::new)?;
+            let report =
+                crate::verify::summarize(file, *by, *json, &style).map_err(ConfigError::new)?;
             let _ = write!(std::io::stdout(), "{}", report);
             Ok(EXIT_OK)
         }
@@ -1022,7 +1030,7 @@ fn cmd_output(cli: &Cli, cmd: &OutputCmd) -> Result<u8, ConfigError> {
                 EXIT_USAGE
             })
         }
-        OutputCmd::Get {
+        OutputCmd::Results {
             file,
             hosts,
             ports,
@@ -1036,7 +1044,7 @@ fn cmd_output(cli: &Cli, cmd: &OutputCmd) -> Result<u8, ConfigError> {
             states.as_deref(),
             *json,
         ),
-        OutputCmd::Cat { file } => {
+        OutputCmd::Events { file } => {
             let mut out = std::io::stdout().lock();
             crate::verify::cat(file, &mut out).map_err(ConfigError::new)?;
             Ok(EXIT_OK)

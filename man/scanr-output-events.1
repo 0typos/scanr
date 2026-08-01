@@ -1,0 +1,18 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH scanr-output-events 1  "scanr-output-events " 
+.SH NAME
+scanr\-output\-events \- Write the raw JSONL event stream, decompressing it if needed
+.SH SYNOPSIS
+\fBscanr\-output\-events\fR [\fB\-h\fR|\fB\-\-help\fR] <\fIFILE\fR> 
+.SH DESCRIPTION
+Write the raw JSONL event stream, decompressing it if needed
+.PP
+This is the file verbatim. With spans on, most probes are represented by a `probe_span` rather than a `probe_result`, so filtering these events for `probe_result` does not give you every result — `scanr output results` does.
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+<\fIFILE\fR>
+
