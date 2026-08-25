@@ -53,14 +53,17 @@ sysctl -w net.ipv4.tcp_tw_reuse=1                       # also non-loopback
 
 ## Concurrency
 
-Worker thread count; no queue, so a hard ceiling. Not monotonic (local listener):
+Worker thread count; no queue, so a hard ceiling. Flat from 64 to 512 on the direct
+path since results were batched to the collector (D37); before that the single channel's
+contention made 512 40% slower than 64. Loopback `/24 × 1,000`, 256,000 probes:
 
-| threads | probes/s | RSS |
-|---|---|---|
-| 512 | 68,949 | ~13 MB |
-| 2,048 | 62,805 | ~43 MB |
+| threads | probes/s |
+|---|---|
+| 64 | 692,000 |
+| 512 | 640,000 |
 
-Threads are cheap (64 KiB stacks; 40.6 MB resident at 5,000, 81 MB at 10,000, ~227 ms
+The right value is in-flight ≈ rate × RTT: 64 covers loopback, ~250 a 1 ms LAN, 512 a
+WAN. Threads are cheap (64 KiB stacks; 40.6 MB resident at 5,000, 81 MB at 10,000, ~227 ms
 one-off spawn at 10,000): contention and the destination limit first. Above ~10,000 the
 design runs out — [`design/decisions.md`](design/decisions.md), D1. For a proxy:
 `scanr transport test lab --calibrate`.
@@ -203,18 +206,18 @@ target list). `output` streams; peak resident on the 374 MB record:
 
 ## Versus nmap
 
-`/24` × nmap's top 100 ports, 25,600 probes, both unprivileged TCP connect. nmap 7.92,
-`-sT -T5 --min-rate 10000 --max-retries 0 -Pn -n`.
+Both unprivileged TCP connect. nmap 7.92, `-sT -T5 --min-rate 10000 --max-retries 0
+-Pn -n`. Measured 2026-08-25 on a 64-core machine, medians of three.
 
-Responsive (`127.0.0.0/24`, every port refused):
+Responsive (`127.0.0.0/24`, every port refused except the real listeners):
 
-| | wall | probes/s |
-|---|---|---|
-| scanr, default `direct` profile | 0.17 s | 150,000 |
-| nmap `-T5` | 0.52 s | 49,000 |
+| | probes | scanr, default `direct` profile | nmap `-T5` |
+|---|---|---|---|
+| `/24` × 1,000 ports | 256,000 | 0.40 s (640,000/s) | 4.82 s (53,000/s) |
+| `/24` × 10,000 ports | 2,560,000 | 4.3 s (600,000/s) | 48.4 s (53,000/s) |
 
-Identical 259 open ports. Six scanr runs 2 s apart: 0.17–0.18 s; back to back, one hit
-1.19 s (teardown pressure from the previous run).
+Identical open sets (259 and 515). Peak RSS 18 MB against 105 MB. Before D37 scanr
+measured 150,000/s on this workload, 3× nmap; the collector channel was the ceiling.
 
 Unresponsive (`192.0.2.0/24`, every probe times out):
 
@@ -226,8 +229,9 @@ Unresponsive (`192.0.2.0/24`, every probe times out):
 | scanr `--connect-timeout 150ms --concurrency 4096`, single attempt | 1.18 s |
 
 nmap wins line one because `--max-retries 0` is one attempt and `direct-fast` makes two
-([Timeouts](#timeouts)); on equal terms scanr is 3.2× faster, the same ratio as the
-responsive case. Neither reported anything open.
+([Timeouts](#timeouts)); on equal terms scanr is 3.2× faster (measured before D37; the
+unresponsive case is timeout-bound, so batching changes it little). Neither reported
+anything open.
 
 nmap adapts its timeout from observed RTT; scanr does not (below): on an unfamiliar
 network set `--connect-timeout` by hand and let `scanr plan` show the consequence.

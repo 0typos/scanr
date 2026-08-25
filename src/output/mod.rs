@@ -3,8 +3,9 @@ pub mod jsonl;
 pub mod span;
 
 use std::net::IpAddr;
+use std::sync::Arc;
 
-use crate::probe::{ProbeOutcome, State};
+use crate::probe::{AttemptStates, ProbeOutcome};
 
 pub use human::{Progress, ResultPrinter, Style};
 pub use jsonl::{Counts, JsonlWriter, SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS, new_scan_id};
@@ -28,14 +29,15 @@ fn hex(bytes: &[u8]) -> String {
 #[derive(Debug, Clone)]
 pub struct ProbeRecord {
     pub probe_index: u64,
-    pub target: String,
+    /// Shared across every probe of the target: formatted once by the plan.
+    pub target: Arc<str>,
     /// `None` for hostname targets under transport-side DNS: the SOCKS5 reply carries
     /// the proxy's bound address, not the destination's (D15).
     pub resolved_address: Option<IpAddr>,
     pub port: u16,
     pub outcome: ProbeOutcome,
     pub attempts: u32,
-    pub attempt_states: Vec<State>,
+    pub attempt_states: AttemptStates,
 }
 
 impl ProbeRecord {
@@ -61,7 +63,7 @@ impl ProbeRecord {
 
         let mut v = serde_json::json!({
             "probe_index": self.probe_index,
-            "target": self.target,
+            "target": &*self.target,
             "resolved_address": self.resolved_address.map(|a| a.to_string()),
             "port": self.port,
             "protocol": "tcp",
@@ -70,7 +72,7 @@ impl ProbeRecord {
             "reason": self.outcome.reason,
             "service_label": crate::services::service_label(self.port),
             "attempts": self.attempts,
-            "attempt_states": self.attempt_states.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            "attempt_states": self.attempt_states.as_slice().iter().map(|s| s.as_str()).collect::<Vec<_>>(),
             "timing_ms": timing,
         });
 
@@ -105,7 +107,7 @@ impl ProbeRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::probe::{Phases, Source};
+    use crate::probe::{Phases, Source, State};
     use std::time::Duration;
 
     fn record() -> ProbeRecord {
@@ -130,7 +132,7 @@ mod tests {
                 tls: None,
             },
             attempts: 2,
-            attempt_states: vec![State::Filtered, State::Open],
+            attempt_states: vec![State::Filtered, State::Open].into(),
         }
     }
 

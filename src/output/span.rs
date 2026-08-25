@@ -52,7 +52,7 @@ const MAX_GROUPS: usize = 64;
 type GroupKey = (
     State,
     Source,
-    Option<String>,
+    Option<std::borrow::Cow<'static, str>>,
     u32,
     Option<std::sync::Arc<str>>,
 );
@@ -154,7 +154,7 @@ impl Spans {
             && record
                 .attempt_states
                 .iter()
-                .all(|s| *s == record.outcome.state)
+                .all(|s| s == record.outcome.state)
     }
 
     /// Absorb a record, returning whether it was taken. A refused record must still be
@@ -266,7 +266,7 @@ mod tests {
     fn record(index: u64, port: u16, state: State, ms: u64) -> ProbeRecord {
         ProbeRecord {
             probe_index: index,
-            target: format!("10.0.0.{}", index / 4),
+            target: format!("10.0.0.{}", index / 4).into(),
             resolved_address: None,
             port,
             outcome: ProbeOutcome {
@@ -285,7 +285,7 @@ mod tests {
                 tls: None,
             },
             attempts: 1,
-            attempt_states: vec![state],
+            attempt_states: vec![state].into(),
         }
     }
 
@@ -306,7 +306,7 @@ mod tests {
     fn a_retry_that_agreed_is_still_bulk() {
         let mut r = record(0, 80, State::Filtered, 300);
         r.attempts = 2;
-        r.attempt_states = vec![State::Filtered, State::Filtered];
+        r.attempt_states = vec![State::Filtered, State::Filtered].into();
         assert!(
             Spans::is_bulk(&r),
             "a timeout that timed out again says nothing new"
@@ -317,7 +317,7 @@ mod tests {
     fn a_retry_that_disagreed_keeps_its_row() {
         let mut r = record(0, 80, State::Filtered, 300);
         r.attempts = 2;
-        r.attempt_states = vec![State::Open, State::Filtered];
+        r.attempt_states = vec![State::Open, State::Filtered].into();
         assert!(
             !Spans::is_bulk(&r),
             "a flapping host is not interchangeable"
@@ -340,7 +340,7 @@ mod tests {
         s.absorb(0, &record(0, 80, State::Filtered, 300));
         let mut r = record(1, 80, State::Filtered, 300);
         r.attempts = 2;
-        r.attempt_states = vec![State::Filtered, State::Filtered];
+        r.attempt_states = vec![State::Filtered, State::Filtered].into();
         s.absorb(r.probe_index, &r);
         let events = s.drain_events();
         assert_eq!(
@@ -417,7 +417,7 @@ mod tests {
         let mut s = Spans::new(1000);
         for i in 0..(MAX_GROUPS as u64 + 10) {
             let mut r = record(i, 80, State::Filtered, 300);
-            r.outcome.reason = Some(format!("reason {i}"));
+            r.outcome.reason = Some(format!("reason {i}").into());
             let taken = s.absorb(r.probe_index, &r);
             if i >= MAX_GROUPS as u64 {
                 assert!(!taken, "group {i} should not have been absorbed");
@@ -484,7 +484,7 @@ mod tests {
         for i in 0..64u64 {
             // A distinct reason per probe, so each opens its own group.
             let mut r = record(i * 1_000_000, 80, State::Filtered, 300);
-            r.outcome.reason = Some(format!("reason {i}"));
+            r.outcome.reason = Some(format!("reason {i}").into());
             assert!(s.absorb(r.probe_index, &r));
         }
         assert_eq!(s.groups.len(), 64, "the class ceiling, all allocated");
