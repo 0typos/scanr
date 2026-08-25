@@ -21,11 +21,12 @@ evasion, timing obfuscation or source spoofing; randomized order spreads load. A
 A hostile proxy can lie: every non-open verdict through it is its assertion, recorded
 with `source: proxy_reply` but unverifiable.
 
-## SOCKS5 authentication does not encrypt
+## Proxy authentication does not encrypt
 
-RFC 1929 authenticates you *to* the proxy; credentials and session cross the wire in
-cleartext ([transports](transports.md#authentication)). Untrusted path: tunnel it with
-`ssh -D`, at the cost of `open_only` fidelity.
+RFC 1929 (`socks5`) and Basic (`http`, base64) authenticate you *to* the proxy;
+credentials and session cross the wire in cleartext
+([transports](transports.md#authentication)). Untrusted path: tunnel it with `ssh -D`,
+at the cost of `open_only` fidelity.
 
 ## Every hop in a chain sees the credentials of every hop after it
 
@@ -40,8 +41,8 @@ it, and so on. For `hops = ["a", "b", "c"]`:
 | the destination and every probe result | every hop |
 
 Hop 1 terminates its own encryption and reads the onward bytes in cleartext; `ssh -D` to
-it protects against an observer *on that link*, never hop 1. This is nested SOCKS5, not
-`scanr`.
+it protects against an observer *on that link*, never hop 1. This is nested CONNECT
+tunnelling, not `scanr`, and holds for `socks5` and `http` hops alike.
 
 - One password per hop: a leaking hop compromises only the hops after it.
 - Least trusted hop last, where it sees the fewest secrets.
@@ -84,13 +85,15 @@ the effective mode and warns.
 ## Untrusted input
 
 Bytes from an uncontrolled proxy are parsed, including a peer-supplied length in the
-`ATYP_DOMAIN` bound address of a CONNECT reply. Five fuzz targets under
-`fuzz/fuzz_targets/`, seeds committed and replayed in CI:
+`ATYP_DOMAIN` bound address of a CONNECT reply and the length of an HTTP CONNECT
+response. Six fuzz targets under `fuzz/fuzz_targets/`, seeds committed and replayed in
+CI:
 
 | target | covers |
 |---|---|
 | `socks5_handshake` | greeting, method selection, RFC 1929 auth; the proxy picks the method and status byte |
 | `socks5_reply` | CONNECT reply parser, including the address length |
+| `http_connect_reply` | HTTP CONNECT response parser: status line, header block bound, printable filtering |
 | `config` | loading, validation, the caret renderer's byte-offset slicing |
 | `specs` | target, port and duration parsing |
 | `record` | truncated or corrupted records |

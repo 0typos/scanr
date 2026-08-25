@@ -1846,3 +1846,178 @@ fn the_nmap_handoff_runs_end_to_end() {
     // No stray warning when the caller did filter to open.
     assert!(!stderr(&nmap).contains("not open"), "{}", stderr(&nmap));
 }
+
+#[test]
+fn a_scan_through_an_http_proxy_records_it_as_open_only_by_construction() {
+    use scanr::testsupport::http::{Behavior, HttpFixture};
+
+    let d = tempfile::tempdir().unwrap();
+    let (_l, open) = open_port();
+    let closed = closed_port();
+    let fx = HttpFixture::start(Behavior::Faithful);
+    std::fs::write(
+        d.path().join("scanr.toml"),
+        format!(
+            "version = 1\n[transports.corp]\ntype = \"http\"\naddress = \"{}\"\n",
+            fx.addr()
+        ),
+    )
+    .unwrap();
+
+    let plan = scanr(
+        d.path(),
+        &[
+            "plan",
+            "--transport",
+            "corp",
+            "--targets",
+            "127.0.0.1",
+            "--ports",
+            "80",
+        ],
+    );
+    assert_eq!(code(&plan), 0, "{}", stderr(&plan));
+    let plan_out = stdout(&plan);
+    assert!(plan_out.contains("corp (http)"), "{plan_out}");
+    assert!(plan_out.contains("inherent to HTTP CONNECT"), "{plan_out}");
+    assert!(
+        plan_out.contains("HTTP CONNECT proxy"),
+        "the warning names the limitation: {plan_out}"
+    );
+
+    let ports = format!("{},{}", open.port(), closed.port());
+    let out = scanr(
+        d.path(),
+        &[
+            "run",
+            "--no-spans",
+            "--transport",
+            "corp",
+            "--targets",
+            "127.0.0.1",
+            "--ports",
+            &ports,
+            "--output-dir",
+            "out",
+            "--all",
+            "-q",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+
+    let events = read_events(d.path());
+    let config = events.iter().find(|e| e["type"] == "scan_config").unwrap();
+    assert_eq!(config["transport"]["type"], "http");
+    assert_eq!(config["transport"]["measured_fidelity"], "open_only");
+    assert_eq!(config["transport"]["fidelity_source"], "inherent");
+
+    let result = |p: u16| {
+        events
+            .iter()
+            .find(|e| e["type"] == "probe_result" && e["port"] == p)
+            .unwrap_or_else(|| panic!("no result for port {p}"))
+            .clone()
+    };
+    assert_eq!(result(open.port())["state"], "open");
+    let refused = result(closed.port());
+    assert_eq!(
+        refused["state"], "error",
+        "never a closed HTTP did not say: {refused}"
+    );
+    assert_eq!(refused["source"], "proxy_reply");
+    assert!(
+        refused["reason"].as_str().unwrap().contains("503"),
+        "{refused}"
+    );
+
+    let rec = scanr::testsupport::find_record(&d.path().join("out")).expect("a finalised record");
+    let v = scanr(d.path(), &["output", "verify", rec.to_str().unwrap()]);
+    assert_eq!(code(&v), 0, "{}", stderr(&v));
+}
+
+#[test]
+fn an_http_transport_declaring_full_fidelity_is_refused() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(
+        d.path().join("scanr.toml"),
+        "version = 1\n[transports.corp]\ntype = \"http\"\naddress = \"127.0.0.1:3128\"\nfidelity = \"full\"\n",
+    )
+    .unwrap();
+    let out = scanr(d.path(), &["config", "validate"]);
+    assert_ne!(code(&out), 0);
+    let err = stderr(&out);
+    assert!(err.contains("cannot provide"), "{err}");
+    assert!(err.contains("leave `fidelity` unset"), "{err}");
+}
+
+#[test]
+fn a_mixed_chain_records_each_hop_with_its_protocol() {
+    use scanr::testsupport::http::{Behavior as H, HttpFixture};
+    use scanr::testsupport::socks5::{Behavior as S, Socks5Fixture};
+
+    let d = tempfile::tempdir().unwrap();
+    let (_l, open) = open_port();
+    let h = HttpFixture::start(H::Faithful);
+    let s = Socks5Fixture::start(S::Faithful);
+    std::fs::write(
+        d.path().join("scanr.toml"),
+        format!(
+            "version = 1\n\
+             [transports.corp]\ntype = \"http\"\naddress = \"{}\"\n\
+             [transports.exit]\ntype = \"socks5\"\naddress = \"{}\"\nfidelity = \"full\"\n\
+             [transports.path]\ntype = \"chain\"\nhops = [\"corp\", \"exit\"]\n",
+            h.addr(),
+            s.addr()
+        ),
+    )
+    .unwrap();
+
+    let plan = scanr(
+        d.path(),
+        &[
+            "plan",
+            "--transport",
+            "path",
+            "--targets",
+            "127.0.0.1",
+            "--ports",
+            "80",
+        ],
+    );
+    assert_eq!(code(&plan), 0, "{}", stderr(&plan));
+    let plan_out = stdout(&plan);
+    assert!(plan_out.contains("http "), "hop 1's protocol: {plan_out}");
+    assert!(plan_out.contains("socks5 "), "hop 2's protocol: {plan_out}");
+
+    let port = open.port().to_string();
+    let out = scanr(
+        d.path(),
+        &[
+            "run",
+            "--no-spans",
+            "--transport",
+            "path",
+            "--targets",
+            "127.0.0.1",
+            "--ports",
+            &port,
+            "--output-dir",
+            "out",
+            "-q",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let events = read_events(d.path());
+    let config = events.iter().find(|e| e["type"] == "scan_config").unwrap();
+    assert_eq!(config["transport"]["type"], "chain");
+    let hops = config["transport"]["hops"].as_array().unwrap();
+    assert_eq!(hops[0]["type"], "http");
+    assert_eq!(hops[1]["type"], "socks5");
+    // The exit is a faithful SOCKS5 proxy, so the chain keeps full fidelity.
+    assert_eq!(config["transport"]["measured_fidelity"], "full");
+    assert!(
+        events
+            .iter()
+            .any(|e| e["type"] == "probe_result" && e["state"] == "open")
+    );
+}

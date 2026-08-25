@@ -25,7 +25,8 @@ src/
   transport/
     mod.rs          Transport trait, Destination, build(), read_banner, linger close (D9)
     direct.rs       TcpStream::connect_timeout
-    socks5.rs       RFC 1928/1929; a chain is the general case, one hop the degenerate one (D33)
+    socks5.rs       the proxy path walker: RFC 1928/1929 hops, chains as the general case (D33)
+    http.rs         HTTP CONNECT hop: request, bounded response parser, Basic auth (D34)
     pool.rs         deterministic member assignment by FNV-1a (D33)
   fidelity.rs       `transport test`: fidelity measurement and --calibrate (D8, D25)
   sched.rs          worker pool, token-bucket rate limiter
@@ -40,9 +41,9 @@ src/
   diag.rs           host facts (sysctl, rlimit), pressure classification, WARNING_CODES
   units.rs          duration parsing and rendering
   timefmt.rs        RFC 3339 from epoch
-  testsupport/      in-process TCP and SOCKS5 fixtures; feature `testsupport`
+  testsupport/      in-process TCP, SOCKS5 and HTTP CONNECT fixtures; feature `testsupport`
 tests/              integration, cli_spec, spec_conformance, man_pages, differential (nmap; CI only)
-fuzz/               five libFuzzer targets and committed seeds, replayed in CI
+fuzz/               six libFuzzer targets and committed seeds, replayed in CI
 ```
 
 ## Data flow
@@ -71,8 +72,9 @@ pub trait Transport: Send + Sync {
 
 `Destination` is a `SocketAddr` or a `(hostname, port)`; the latter only when
 `supports_remote_dns()`. `Fidelity` is `Full` / `OpenOnly` / `Unknown`; `direct` is
-`Full`, SOCKS5 is whatever `transport test` measured and the config declares, a chain is
-its weakest hop, a pool reports per member via `via`.
+`Full`, SOCKS5 is whatever `transport test` measured and the config declares, HTTP is
+`OpenOnly` by construction, a chain is its exit hop's, a pool is its weakest member's
+and reports per member via `via`.
 
 ## Scheduler
 
@@ -115,7 +117,7 @@ the sysctl remediation, `ECONNREFUSED` to the proxy → "proxy not listening", r
 | `thiserror` | error definitions | boilerplate |
 | `libc` | sysctl, rlimit, signal, getrandom | no std equivalent |
 
-Written directly: SOCKS5, the permutation, CIDR/range/port/duration parsing, the token
+Written directly: SOCKS5, HTTP CONNECT (with base64), the permutation, CIDR/range/port/duration parsing, the token
 bucket, caret rendering, RFC 3339. Rejected: `miette`, `tokio`, `mio`, any SOCKS crate,
 `tracing`/`log`, `uuid`/`ulid`, `chrono`/`time`.
 

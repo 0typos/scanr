@@ -18,8 +18,8 @@ use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
-use super::{Destination, Transport, close_without_time_wait};
-use crate::plan::types::{Fidelity, Timing};
+use super::{Destination, Reply, Transport, close_without_time_wait, http, read_exact};
+use crate::plan::types::{Fidelity, HopKind, Timing};
 use crate::probe::{Phases, ProbeOutcome, Source, State};
 
 pub const VERSION: u8 = 0x05;
@@ -59,22 +59,50 @@ pub fn reply_name(code: u8) -> &'static str {
     }
 }
 
-/// One SOCKS5 server on the path to the destination.
+/// One proxy on the path to the destination.
 #[derive(Clone)]
 pub struct Hop {
+    pub kind: HopKind,
     pub address: SocketAddr,
     pub username: Option<String>,
     pub password: Option<String>,
+}
+
+impl Hop {
+    pub fn new(
+        kind: HopKind,
+        address: SocketAddr,
+        username: Option<String>,
+        password: Option<String>,
+    ) -> Self {
+        Self {
+            kind,
+            address,
+            username,
+            password,
+        }
+    }
+
+    /// An unauthenticated SOCKS5 hop.
+    pub fn socks5(address: SocketAddr) -> Self {
+        Self::new(HopKind::Socks5, address, None, None)
+    }
+
+    /// An unauthenticated HTTP CONNECT hop.
+    pub fn http(address: SocketAddr) -> Self {
+        Self::new(HopKind::Http, address, None, None)
+    }
 }
 
 /// Hand-written so a credential cannot reach a log, a panic message or a fuzz dump.
 ///
 /// `ResolvedHop` holds a `Secret`, whose own `Debug` redacts (D14). `build` unwraps that
 /// into a bare `String` here, and a derived `Debug` handed it straight back out —
-/// `Socks5Transport` had no `Debug` at all before this, so no `{:?}` could reach one.
+/// `ProxyTransport` had no `Debug` at all before this, so no `{:?}` could reach one.
 impl std::fmt::Debug for Hop {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Hop")
+            .field("kind", &self.kind)
             .field("address", &self.address)
             .field("username", &self.username)
             .field("password", &self.password.as_ref().map(|_| "[redacted]"))
@@ -82,25 +110,33 @@ impl std::fmt::Debug for Hop {
     }
 }
 
-/// A SOCKS5 path: one server, or a chain of them.
+/// A proxy path: one server, or a chain of them, each SOCKS5 or HTTP CONNECT.
 ///
 /// A chain is the general case and a single proxy is the one-hop degenerate case, so
 /// there is one code path rather than two. Each hop is reached *through* the tunnel the
-/// previous one opened: greet hop N, ask it to CONNECT to hop N+1, then speak SOCKS5 to
-/// hop N+1 over that tunnel. The last CONNECT names the destination.
-pub struct Socks5Transport {
+/// previous one opened: greet hop N, ask it to CONNECT to hop N+1, then speak to hop N+1
+/// over that tunnel. The last CONNECT names the destination. Either protocol's CONNECT
+/// yields a raw tunnel, so hops may mix (D34).
+pub struct ProxyTransport {
     name: String,
     hops: Vec<Hop>,
     fidelity: Fidelity,
 }
 
-/// Outcome plus the raw reply byte, which `transport test` needs to judge fidelity.
+/// Outcome plus the raw reply, which `transport test` needs to judge fidelity.
 pub struct DetailedOutcome {
     pub outcome: ProbeOutcome,
-    pub reply_code: Option<u8>,
+    pub reply: Option<Reply>,
 }
 
-impl Socks5Transport {
+/// What the last hop said to the CONNECT that named the destination.
+enum Answer {
+    Socks5(u8),
+    Http(http::Response),
+}
+
+impl ProxyTransport {
+    /// A single SOCKS5 proxy.
     pub fn new(
         name: String,
         address: SocketAddr,
@@ -110,18 +146,29 @@ impl Socks5Transport {
     ) -> Self {
         Self::chained(
             name,
-            vec![Hop {
-                address,
-                username,
-                password,
-            }],
+            vec![Hop::new(HopKind::Socks5, address, username, password)],
+            fidelity,
+        )
+    }
+
+    /// A single HTTP CONNECT proxy.
+    pub fn http(
+        name: String,
+        address: SocketAddr,
+        username: Option<String>,
+        password: Option<String>,
+        fidelity: Fidelity,
+    ) -> Self {
+        Self::chained(
+            name,
+            vec![Hop::new(HopKind::Http, address, username, password)],
             fidelity,
         )
     }
 
     /// A path of one or more hops. Panics on an empty list, which the resolver refuses.
     pub fn chained(name: String, hops: Vec<Hop>, fidelity: Fidelity) -> Self {
-        assert!(!hops.is_empty(), "a SOCKS5 path needs at least one hop");
+        assert!(!hops.is_empty(), "a proxy path needs at least one hop");
         Self {
             name,
             hops,
@@ -156,10 +203,7 @@ impl Socks5Transport {
                     connect: None,
                     total: started.elapsed(),
                 };
-                return DetailedOutcome {
-                    outcome: proxy_unreachable(&e, first, phases),
-                    reply_code: None,
-                };
+                return detailed(proxy_unreachable(&e, first, phases), None);
             }
         };
         let proxy_connect = started.elapsed();
@@ -189,10 +233,13 @@ impl Socks5Transport {
                 return detailed(o, None);
             }
             // Each phase gets its own wall-clock deadline, so a peer cannot extend the
-            // budget by trickling.
-            let hs_deadline = Some(Instant::now() + timing.handshake_timeout);
-            if let Err(o) = self.negotiate(&mut s, hop, &mut phases, started, hs_deadline) {
-                return detailed(self.blame_hop(o, i), None);
+            // budget by trickling. HTTP has no greeting to negotiate: its credentials
+            // travel on the CONNECT itself.
+            if hop.kind == HopKind::Socks5 {
+                let hs_deadline = Some(Instant::now() + timing.handshake_timeout);
+                if let Err(o) = self.negotiate(&mut s, hop, &mut phases, started, hs_deadline) {
+                    return detailed(self.blame_hop(o, i), None);
+                }
             }
             if i == last {
                 break;
@@ -218,34 +265,40 @@ impl Socks5Transport {
             return detailed(o, None);
         }
         let connect_start = Instant::now();
-        let request = build_connect_request(dest);
-        if let Err(e) = s.write_all(&request) {
+        let exit = &self.hops[last];
+        if let Err(e) = s.write_all(&connect_request(exit, dest)) {
             phases.total = started.elapsed();
             return detailed(io_failure(&e, "sending CONNECT request", phases), None);
         }
 
-        let reply = read_reply(&mut s, Some(connect_start + timing.connect_timeout));
+        let deadline = Some(connect_start + timing.connect_timeout);
+        let answer = match exit.kind {
+            HopKind::Socks5 => read_reply(&mut s, deadline).map(Answer::Socks5),
+            HopKind::Http => http::read_response(&mut s, deadline).map(Answer::Http),
+        };
         let connect_elapsed = connect_start.elapsed();
         phases.connect = Some(connect_elapsed);
         phases.total = started.elapsed();
 
-        match reply {
-            Ok(code) => {
-                let outcome = classify_reply(code, phases);
-                // Through a proxy the tunnel *is* the connection to the destination, so
-                // reading a greeting off it works exactly as it does directly. Banner
-                // grabbing is one of the few capabilities a proxy does not cost us.
-                let banner = timing
-                    .banner
-                    .as_ref()
-                    .filter(|_| outcome.state == State::Open)
-                    .and_then(|o| super::read_banner(&s, o, connect_elapsed));
-                DetailedOutcome {
-                    outcome: outcome.with_banner(banner),
-                    reply_code: Some(code),
-                }
-            }
-            Err(e) => detailed(io_failure(&e, "reading CONNECT reply", phases), None),
+        let (outcome, reply) = match answer {
+            Ok(Answer::Socks5(code)) => (classify_reply(code, phases), Reply::Socks5(code)),
+            Ok(Answer::Http(r)) => (
+                http::classify(&r, exit.username.is_some(), phases),
+                Reply::Http(r.status),
+            ),
+            Err(e) => return detailed(io_failure(&e, "reading CONNECT reply", phases), None),
+        };
+        // Through a proxy the tunnel *is* the connection to the destination, so reading
+        // a greeting off it works exactly as it does directly. Banner grabbing is one of
+        // the few capabilities a proxy does not cost us.
+        let banner = timing
+            .banner
+            .as_ref()
+            .filter(|_| outcome.state == State::Open)
+            .and_then(|o| super::read_banner(&s, o, connect_elapsed));
+        DetailedOutcome {
+            outcome: outcome.with_banner(banner),
+            reply: Some(reply),
         }
     }
 
@@ -259,22 +312,31 @@ impl Socks5Transport {
         from: usize,
         timing: &Timing,
     ) -> Result<(), ProbeOutcome> {
-        let request = build_connect_request(next);
-        if let Err(e) = s.write_all(&request) {
+        let hop = &self.hops[from];
+        if let Err(e) = s.write_all(&connect_request(hop, next)) {
             phases.total = started.elapsed();
             return Err(self.blame_hop(io_failure(&e, "extending the chain", *phases), from));
         }
-        match read_reply(s, Some(Instant::now() + timing.connect_timeout)) {
-            Ok(REP_SUCCEEDED) => Ok(()),
-            Ok(code) => {
+        let deadline = Some(Instant::now() + timing.connect_timeout);
+        // Success, or the hop's own words for why not.
+        let answer = match hop.kind {
+            HopKind::Socks5 => {
+                read_reply(s, deadline).map(|c| (c == REP_SUCCEEDED, format!("reply 0x{c:02x}")))
+            }
+            HopKind::Http => http::read_response(s, deadline)
+                .map(|r| ((200..=299).contains(&r.status), r.status_line)),
+        };
+        match answer {
+            Ok((true, _)) => Ok(()),
+            Ok((false, said)) => {
                 phases.total = started.elapsed();
                 Err(ProbeOutcome::new(
                     State::Error,
                     Source::ProxyReply,
                     format!(
-                        "hop {} ({}) refused to reach hop {} ({}): reply 0x{code:02x}",
+                        "hop {} ({}) refused to reach hop {} ({}): {said}",
                         from + 1,
-                        self.hops[from].address,
+                        hop.address,
                         from + 2,
                         self.hops[from + 1].address
                     ),
@@ -305,7 +367,7 @@ impl Socks5Transport {
     fn blame_hop(&self, o: ProbeOutcome, index: usize) -> ProbeOutcome {
         let what = o
             .reason
-            .unwrap_or_else(|| "the SOCKS5 handshake failed".into());
+            .unwrap_or_else(|| "the proxy handshake failed".into());
         // Single proxy and chain alike. The `hops.len() == 1` early return this replaces
         // was where the whole point of the function leaked away: a lone proxy that accepts
         // TCP and then stalls made `io_failure` classify the *destination* as `filtered`,
@@ -475,7 +537,7 @@ impl Socks5Transport {
     }
 }
 
-impl Transport for Socks5Transport {
+impl Transport for ProxyTransport {
     fn probe(&self, dest: &Destination, timing: &Timing) -> ProbeOutcome {
         self.probe_detailed(dest, timing).outcome
     }
@@ -488,8 +550,12 @@ impl Transport for Socks5Transport {
         &self.name
     }
 
+    /// What a single hop is; more than one is a chain whatever the hops speak.
     fn type_name(&self) -> &'static str {
-        "socks5"
+        match self.hops.as_slice() {
+            [one] => one.kind.as_str(),
+            _ => "chain",
+        }
     }
 
     fn fidelity(&self) -> Fidelity {
@@ -497,10 +563,17 @@ impl Transport for Socks5Transport {
     }
 }
 
-fn detailed(outcome: ProbeOutcome, reply_code: Option<u8>) -> DetailedOutcome {
-    DetailedOutcome {
-        outcome,
-        reply_code,
+fn detailed(outcome: ProbeOutcome, reply: Option<Reply>) -> DetailedOutcome {
+    DetailedOutcome { outcome, reply }
+}
+
+/// The CONNECT this hop understands, naming `dest`.
+fn connect_request(hop: &Hop, dest: &Destination) -> Vec<u8> {
+    match hop.kind {
+        HopKind::Socks5 => build_connect_request(dest),
+        HopKind::Http => {
+            http::build_connect_request(dest, hop.username.as_deref(), hop.password.as_deref())
+        }
     }
 }
 
@@ -585,45 +658,6 @@ fn io_failure(e: &std::io::Error, what: &str, phases: Phases) -> ProbeOutcome {
         format!("{what}: {e}"),
         phases,
     )
-}
-
-/// Read exactly `buf.len()` bytes, or fail — bounded in *time*, not only in bytes.
-///
-/// `SO_RCVTIMEO` bounds each `read` syscall, not the message. A peer that delivers one
-/// byte just inside the timeout resets that clock on every iteration, so the reply parser
-/// — up to 262 reads for an `ATYP_DOMAIN` address — could hold a worker for 262x the
-/// configured budget, chosen by the peer. Measured at 26x against a 200ms budget. Since
-/// concurrency here is the worker-thread count with no queue, a hostile proxy doing this
-/// on every connection stalls the whole scan.
-///
-/// `deadline` is `None` only where there is no clock to run against — a fuzz harness
-/// driving a `Cursor`, which cannot block.
-fn read_exact<R: Read>(
-    s: &mut R,
-    buf: &mut [u8],
-    deadline: Option<Instant>,
-) -> std::io::Result<()> {
-    let mut filled = 0;
-    while filled < buf.len() {
-        if deadline.is_some_and(|d| Instant::now() >= d) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "peer did not deliver a complete message within the budget",
-            ));
-        }
-        match s.read(&mut buf[filled..]) {
-            Ok(0) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "connection closed mid-message",
-                ));
-            }
-            Ok(n) => filled += n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(())
 }
 
 pub fn build_connect_request(dest: &Destination) -> Vec<u8> {
@@ -752,12 +786,12 @@ mod tests {
         }
     }
 
-    fn transport(fx: &Socks5Fixture) -> Socks5Transport {
-        Socks5Transport::new("fx".into(), fx.addr(), None, None, Fidelity::Unknown)
+    fn transport(fx: &Socks5Fixture) -> ProxyTransport {
+        ProxyTransport::new("fx".into(), fx.addr(), None, None, Fidelity::Unknown)
     }
 
-    fn authed(fx: &Socks5Fixture, u: &str, p: &str) -> Socks5Transport {
-        Socks5Transport::new(
+    fn authed(fx: &Socks5Fixture, u: &str, p: &str) -> ProxyTransport {
+        ProxyTransport::new(
             "fx".into(),
             fx.addr(),
             Some(u.into()),
@@ -766,17 +800,10 @@ mod tests {
         )
     }
 
-    fn chain(fixtures: &[&Socks5Fixture]) -> Socks5Transport {
-        Socks5Transport::chained(
+    fn chain(fixtures: &[&Socks5Fixture]) -> ProxyTransport {
+        ProxyTransport::chained(
             "chain".into(),
-            fixtures
-                .iter()
-                .map(|f| Hop {
-                    address: f.addr(),
-                    username: None,
-                    password: None,
-                })
-                .collect(),
+            fixtures.iter().map(|f| Hop::socks5(f.addr())).collect(),
             Fidelity::Full,
         )
     }
@@ -831,15 +858,7 @@ mod tests {
                 held.push(s);
             }
         });
-        let t = Socks5Transport::chained(
-            "one".into(),
-            vec![Hop {
-                address: addr,
-                username: None,
-                password: None,
-            }],
-            Fidelity::Full,
-        );
+        let t = ProxyTransport::chained("one".into(), vec![Hop::socks5(addr)], Fidelity::Full);
         let mut tm = timing();
         tm.handshake_timeout = std::time::Duration::from_millis(200);
 
@@ -862,19 +881,11 @@ mod tests {
     fn a_timed_out_link_is_not_a_verdict_on_the_destination() {
         let a = Socks5Fixture::start(Behavior::Faithful);
         // TEST-NET-1 never answers, so hop 1's CONNECT to hop 2 hangs.
-        let t = Socks5Transport::chained(
+        let t = ProxyTransport::chained(
             "c".into(),
             vec![
-                Hop {
-                    address: a.addr(),
-                    username: None,
-                    password: None,
-                },
-                Hop {
-                    address: "192.0.2.1:1080".parse().expect("valid literal"),
-                    username: None,
-                    password: None,
-                },
+                Hop::socks5(a.addr()),
+                Hop::socks5("192.0.2.1:1080".parse().expect("valid literal")),
             ],
             Fidelity::Full,
         );
@@ -908,20 +919,9 @@ mod tests {
         // one's CONNECT. That passed most of the time, which is the worst kind of test.
         let dead_addr: SocketAddr = "127.0.0.1:1".parse().expect("valid literal");
 
-        let t = Socks5Transport::chained(
+        let t = ProxyTransport::chained(
             "chain".into(),
-            vec![
-                Hop {
-                    address: a.addr(),
-                    username: None,
-                    password: None,
-                },
-                Hop {
-                    address: dead_addr,
-                    username: None,
-                    password: None,
-                },
-            ],
+            vec![Hop::socks5(a.addr()), Hop::socks5(dead_addr)],
             Fidelity::Full,
         );
         let o = t.probe(&Destination::Addr(open), &timing());
@@ -953,7 +953,7 @@ mod tests {
         let fx = Socks5Fixture::start(Behavior::Faithful);
         let d = transport(&fx).probe_detailed(&Destination::Addr(closed), &timing());
         assert_eq!(d.outcome.state, State::Closed);
-        assert_eq!(d.reply_code, Some(REP_CONNECTION_REFUSED));
+        assert_eq!(d.reply, Some(Reply::Socks5(REP_CONNECTION_REFUSED)));
     }
 
     #[test]
@@ -964,7 +964,7 @@ mod tests {
         let fx = Socks5Fixture::start(Behavior::Collapsing);
         let d = transport(&fx).probe_detailed(&Destination::Addr(closed), &timing());
         assert_eq!(d.outcome.state, State::Error);
-        assert_eq!(d.reply_code, Some(REP_GENERAL_FAILURE));
+        assert_eq!(d.reply, Some(Reply::Socks5(REP_GENERAL_FAILURE)));
         assert!(
             d.outcome
                 .reason
@@ -1083,7 +1083,7 @@ mod tests {
 
     #[test]
     fn unreachable_proxy_is_an_error_never_a_port_verdict() {
-        let t = Socks5Transport::new("dead".into(), closed_port(), None, None, Fidelity::Unknown);
+        let t = ProxyTransport::new("dead".into(), closed_port(), None, None, Fidelity::Unknown);
         let o = t.probe(
             &Destination::Addr("10.0.0.1:80".parse().unwrap()),
             &timing(),

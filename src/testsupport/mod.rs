@@ -4,6 +4,7 @@
 //! depends on an installed daemon — no dante or microsocks is required to test the
 //! SOCKS5 path, which also means CI needs no service setup.
 
+pub mod http;
 pub mod socks5;
 
 use std::net::{SocketAddr, TcpListener};

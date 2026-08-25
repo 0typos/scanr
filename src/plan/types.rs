@@ -237,6 +237,23 @@ impl fmt::Debug for Secret {
     }
 }
 
+/// The protocol a proxy hop speaks. Both open a tunnel with a CONNECT; they differ in
+/// how they authenticate and, decisively, in what a failure reply can say (D34).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HopKind {
+    Socks5,
+    Http,
+}
+
+impl HopKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HopKind::Socks5 => "socks5",
+            HopKind::Http => "http",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransportKind {
     Direct,
@@ -245,7 +262,14 @@ pub enum TransportKind {
         username: Option<String>,
         password: Option<Secret>,
     },
-    /// Several SOCKS5 servers traversed in order, each reached through the previous.
+    /// An HTTP CONNECT proxy, with optional Basic authentication.
+    Http {
+        address: SocketAddr,
+        username: Option<String>,
+        password: Option<Secret>,
+    },
+    /// Several proxies traversed in order, each reached through the previous. Hops may
+    /// mix protocols: either kind of CONNECT yields a raw tunnel.
     Chain {
         hops: Vec<ResolvedHop>,
     },
@@ -255,10 +279,11 @@ pub enum TransportKind {
     },
 }
 
-/// One SOCKS5 server on a chain.
+/// One proxy on a chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedHop {
     pub name: String,
+    pub kind: HopKind,
     pub address: SocketAddr,
     pub username: Option<String>,
     pub password: Option<Secret>,
@@ -276,14 +301,26 @@ impl ResolvedTransport {
         match self.kind {
             TransportKind::Direct => "direct",
             TransportKind::Socks5 { .. } => "socks5",
+            TransportKind::Http { .. } => "http",
             TransportKind::Chain { .. } => "chain",
             TransportKind::Pool { .. } => "pool",
         }
     }
 
     /// Whether hostnames can be handed over unresolved.
+    ///
+    /// Every proxied kind can: the last hop of a chain issues the CONNECT, and a pool
+    /// can only if every member can. This used to be true of a single `socks5` alone,
+    /// which handed a chain the *direct* default profile and resolved its targets
+    /// locally — a DNS leak through exactly the transport built to avoid one.
     pub fn supports_remote_dns(&self) -> bool {
-        matches!(self.kind, TransportKind::Socks5 { .. })
+        match &self.kind {
+            TransportKind::Direct => false,
+            TransportKind::Socks5 { .. }
+            | TransportKind::Http { .. }
+            | TransportKind::Chain { .. } => true,
+            TransportKind::Pool { members } => members.iter().all(Self::supports_remote_dns),
+        }
     }
 
     /// Display form with credentials redacted.
@@ -292,12 +329,21 @@ impl ResolvedTransport {
             TransportKind::Direct => "direct".into(),
             TransportKind::Socks5 {
                 address, username, ..
+            }
+            | TransportKind::Http {
+                address, username, ..
             } => match username {
-                Some(u) => format!("socks5 {address} (user {u}, password [redacted])"),
-                None => format!("socks5 {address}"),
+                Some(u) => format!(
+                    "{} {address} (user {u}, password [redacted])",
+                    self.type_name()
+                ),
+                None => format!("{} {address}", self.type_name()),
             },
             TransportKind::Chain { hops } => {
-                let path: Vec<String> = hops.iter().map(|h| h.address.to_string()).collect();
+                let path: Vec<String> = hops
+                    .iter()
+                    .map(|h| format!("{} {}", h.kind.as_str(), h.address))
+                    .collect();
                 format!("chain of {} via {}", hops.len(), path.join(" -> "))
             }
             TransportKind::Pool { members } => {
@@ -517,7 +563,8 @@ mod tests {
     }
 
     #[test]
-    fn only_socks5_supports_remote_dns() {
+    fn every_proxied_kind_supports_remote_dns_and_direct_does_not() {
+        let addr: SocketAddr = "127.0.0.1:1080".parse().unwrap();
         let direct = ResolvedTransport {
             name: "direct".into(),
             kind: TransportKind::Direct,
@@ -525,6 +572,45 @@ mod tests {
         };
         assert!(!direct.supports_remote_dns());
         assert_eq!(direct.type_name(), "direct");
+
+        let proxy = |kind: TransportKind| ResolvedTransport {
+            name: "p".into(),
+            kind,
+            fidelity: Fidelity::Unknown,
+        };
+        let socks = proxy(TransportKind::Socks5 {
+            address: addr,
+            username: None,
+            password: None,
+        });
+        let http = proxy(TransportKind::Http {
+            address: addr,
+            username: None,
+            password: None,
+        });
+        let chain = proxy(TransportKind::Chain {
+            hops: vec![ResolvedHop {
+                name: "a".into(),
+                kind: HopKind::Http,
+                address: addr,
+                username: None,
+                password: None,
+            }],
+        });
+        assert!(socks.supports_remote_dns());
+        assert!(http.supports_remote_dns());
+        assert_eq!(http.type_name(), "http");
+        assert_eq!(http.describe(), "http 127.0.0.1:1080");
+        // A chain's last hop issues the CONNECT; resolving locally instead was a leak.
+        assert!(chain.supports_remote_dns());
+        assert_eq!(chain.describe(), "chain of 1 via http 127.0.0.1:1080");
+
+        let pool = |members: Vec<ResolvedTransport>| proxy(TransportKind::Pool { members });
+        assert!(pool(vec![socks.clone(), http.clone()]).supports_remote_dns());
+        assert!(
+            !pool(vec![socks, direct]).supports_remote_dns(),
+            "one member that resolves locally makes the pool resolve locally"
+        );
     }
 
     #[test]

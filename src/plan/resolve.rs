@@ -779,9 +779,9 @@ fn resolve_transport_inner(
             kind: TransportKind::Direct,
             fidelity: Fidelity::Full,
         }),
-        Some("socks5") => {
+        Some(kind @ ("socks5" | "http")) => {
             let addr_s = raw.address.clone().ok_or_else(|| {
-                ConfigError::new(format!("socks5 transport `{name}` is missing `address`"))
+                ConfigError::new(format!("{kind} transport `{name}` is missing `address`"))
                     .at(path.clone())
             })?;
             let address: SocketAddr = addr_s.parse().map_err(|_| {
@@ -794,26 +794,55 @@ fn resolve_transport_inner(
                 ))
                 .at(path.clone()));
             }
-            // Unknown unless the operator recorded a measurement from
-            // `scanr transport test` (D8).
-            let fidelity = match raw.fidelity.as_deref() {
-                None => Fidelity::Unknown,
-                Some(f) => Fidelity::parse(f).ok_or_else(|| {
+            let declared = match raw.fidelity.as_deref() {
+                None => None,
+                Some(f) => Some(Fidelity::parse(f).ok_or_else(|| {
                     ConfigError::new(format!("unknown fidelity `{f}` for transport `{name}`"))
                         .at(path.clone())
                         .help(format!(
                             "expected one of: {}\nrun `scanr transport test {name}` to measure it",
                             Fidelity::DECLARABLE.join(", ")
                         ))
-                })?,
+                })?),
+            };
+            let (kind, fidelity) = if kind == "socks5" {
+                // Unknown unless the operator recorded a measurement from
+                // `scanr transport test` (D8).
+                (
+                    TransportKind::Socks5 {
+                        address,
+                        username: raw.username.clone(),
+                        password,
+                    },
+                    declared.unwrap_or(Fidelity::Unknown),
+                )
+            } else {
+                // HTTP standardises no status meaning "refused", and scanr does not guess
+                // one, so an HTTP proxy is open_only by construction — nothing to measure
+                // and nothing better to declare (D34).
+                if declared == Some(Fidelity::Full) {
+                    return Err(ConfigError::new(format!(
+                        "http transport `{name}` declares `fidelity = \"full\"`, which an \
+                         HTTP CONNECT proxy cannot provide"
+                    ))
+                    .at(path.clone())
+                    .help(
+                        "HTTP has no status meaning refused, so closed and filtered are \
+                         indistinguishable through it; leave `fidelity` unset",
+                    ));
+                }
+                (
+                    TransportKind::Http {
+                        address,
+                        username: raw.username.clone(),
+                        password,
+                    },
+                    Fidelity::OpenOnly,
+                )
             };
             Ok(ResolvedTransport {
                 name: name.to_string(),
-                kind: TransportKind::Socks5 {
-                    address,
-                    username: raw.username.clone(),
-                    password,
-                },
+                kind,
                 fidelity,
             })
         }
@@ -826,32 +855,44 @@ fn resolve_transport_inner(
                 .at(path));
             }
             let mut hops = Vec::with_capacity(names.len());
-            // Folded as we go. Resolving each hop a second time for its fidelity doubled
-            // the env/file reads behind `load_password` and made a pool of chains of
-            // chains resolve every leaf 2^depth times.
-            let mut fidelity = Fidelity::Full;
+            // The exit hop's, not the weakest hop's. Only the last CONNECT names the
+            // destination, and only its reply is a verdict on it; an intermediate hop's
+            // CONNECT either succeeds or fails the whole chain as `error`, and the exit's
+            // reply then travels back through the tunnels untouched. Measured: an HTTP
+            // first hop (open_only by construction) in front of a faithful SOCKS5 exit
+            // tests `full` end to end (D33, amended).
+            let mut fidelity = Fidelity::Unknown;
             for hop_name in &names {
                 let resolved = resolve_transport_at(files, hop_name, visiting)?;
-                // Only SOCKS5 can carry another hop: a chain is built out of CONNECTs,
-                // and a direct transport has nothing to CONNECT *through*.
-                let TransportKind::Socks5 {
-                    address,
-                    username,
-                    password,
-                } = resolved.kind
-                else {
-                    return Err(ConfigError::new(format!(
-                        "chain `{name}` names `{hop_name}`, which is a {} transport",
-                        resolved.type_name()
-                    ))
-                    .at(path.clone())
-                    .help("every hop of a chain must be a `socks5` transport"));
+                // Only a proxy can carry another hop: a chain is built out of CONNECTs,
+                // and a direct transport has nothing to CONNECT *through*. Either
+                // protocol's CONNECT yields a raw tunnel, so hops may mix.
+                let type_name = resolved.type_name();
+                let (kind, address, username, password) = match resolved.kind {
+                    TransportKind::Socks5 {
+                        address,
+                        username,
+                        password,
+                    } => (HopKind::Socks5, address, username, password),
+                    TransportKind::Http {
+                        address,
+                        username,
+                        password,
+                    } => (HopKind::Http, address, username, password),
+                    TransportKind::Direct
+                    | TransportKind::Chain { .. }
+                    | TransportKind::Pool { .. } => {
+                        return Err(ConfigError::new(format!(
+                            "chain `{name}` names `{hop_name}`, which is a {type_name} transport"
+                        ))
+                        .at(path.clone())
+                        .help("every hop of a chain must be a `socks5` or `http` transport"));
+                    }
                 };
-                // One collapsing link flattens everything behind it, so the path can
-                // only claim what its weakest hop can.
-                fidelity = fidelity.weakest(resolved.fidelity);
+                fidelity = resolved.fidelity;
                 hops.push(ResolvedHop {
                     name: hop_name.to_string(),
+                    kind,
                     address,
                     username,
                     password,
@@ -1264,7 +1305,10 @@ fn resolve_host(host: &str) -> Vec<IpAddr> {
 
 /// Warnings that depend on the host we are running on, added after the plan is built.
 fn add_operational_warnings(plan: &mut ScanPlan, facts: &HostFacts) {
-    if let TransportKind::Socks5 { address, .. } = &plan.transport.kind {
+    // Every proxied kind, not only a single socks5: a chain inherits `unknown` from any
+    // one unmeasured hop and a pool from any one member, and those are exactly the
+    // transports whose fidelity is least certain.
+    if !matches!(plan.transport.kind, TransportKind::Direct) {
         match plan.transport.fidelity {
             Fidelity::Unknown => plan.warnings.push(PlanWarning {
                 code: "fidelity_unknown",
@@ -1277,15 +1321,35 @@ fn add_operational_warnings(plan: &mut ScanPlan, facts: &HostFacts) {
             }),
             Fidelity::OpenOnly => plan.warnings.push(PlanWarning {
                 code: "fidelity_open_only",
-                message: format!(
-                    "proxy `{}` is recorded as open_only: it cannot distinguish a closed \
-                     port from a filtered one, so non-open results will be `error`",
-                    plan.transport.name
-                ),
+                message: if matches!(plan.transport.kind, TransportKind::Http { .. }) {
+                    format!(
+                        "proxy `{}` is an HTTP CONNECT proxy, which has no status meaning \
+                         refused: closed and filtered are indistinguishable through it, so \
+                         non-open results will be `error`",
+                        plan.transport.name
+                    )
+                } else {
+                    format!(
+                        "proxy `{}` is recorded as open_only: it cannot distinguish a closed \
+                         port from a filtered one, so non-open results will be `error`",
+                        plan.transport.name
+                    )
+                },
             }),
             Fidelity::Full => {}
         }
+    }
 
+    // The address the local stack connects to, for the ephemeral-port check: the proxy
+    // itself, or a chain's first hop. A pool connects to several and is not checked.
+    let first_hop = match &plan.transport.kind {
+        TransportKind::Socks5 { address, .. } | TransportKind::Http { address, .. } => {
+            Some(*address)
+        }
+        TransportKind::Chain { hops } => hops.first().map(|h| h.address),
+        TransportKind::Direct | TransportKind::Pool { .. } => None,
+    };
+    if let Some(address) = first_hop {
         let remote = !address.ip().is_loopback();
         if let Some(ceiling) = facts.sustained_rate_ceiling(remote) {
             let effective = if plan.timing.rate == 0 {
@@ -1407,13 +1471,21 @@ fidelity = "open_only"
     }
 
     /// One collapsing link flattens everything behind it, so a chain can only claim what
-    /// its weakest hop can — not what the first one happens to manage.
+    /// its exit hop can — the last CONNECT is the only verdict on the destination, and
+    /// its reply travels back through the earlier tunnels untouched (D33, amended).
     #[test]
-    fn a_chain_inherits_its_weakest_hop() {
+    fn a_chain_takes_its_exit_hops_fidelity() {
+        let a = transport_of(TWO_PROXIES, "a").expect("resolves").fidelity;
+        let b = transport_of(TWO_PROXIES, "b").expect("resolves").fidelity;
+        assert_ne!(a, b, "the fixture must have hops of differing fidelity");
+        let reversed =
+            format!("{TWO_PROXIES}\n[transports.r]\ntype = \"chain\"\nhops = [\"b\", \"a\"]\n");
+        assert_eq!(transport_of(&reversed, "r").expect("resolves").fidelity, a);
+
         let cfg =
             format!("{TWO_PROXIES}\n[transports.c]\ntype = \"chain\"\nhops = [\"a\", \"b\"]\n");
         let t = transport_of(&cfg, "c").expect("resolves");
-        assert_eq!(t.fidelity, Fidelity::OpenOnly, "weakest hop, not the first");
+        assert_eq!(t.fidelity, b, "the exit hop's, whatever came before it");
         let TransportKind::Chain { hops } = &t.kind else {
             panic!("expected a chain, got {:?}", t.kind)
         };

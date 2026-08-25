@@ -2,8 +2,8 @@
 
 Proxy-aware TCP connect scanner with reproducible, durable scan records.
 
-Unprivileged `connect()` probes, directly or through SOCKS5 (single proxy, chain, or
-pool). Open ports stream to stdout; every run writes a JSON Lines record holding the
+Unprivileged `connect()` probes, directly or through SOCKS5 or HTTP CONNECT proxies
+(single proxy, chain, or pool). Open ports stream to stdout; every run writes a JSON Lines record holding the
 fully resolved configuration and exactly one terminal event saying whether it completed,
 was interrupted, or failed. Roughly `nmap -Pn -sT -n -v --open -T4 -p <ports> <targets>`,
 proxy-native, config-first, forensically complete.
@@ -92,7 +92,9 @@ transport lab (socks5 127.0.0.1:1080)
 ```
 
 When a proxy cannot tell the difference, the result is `error` with
-`source: proxy_reply` — never an invented `closed`. Every result records where its
+`source: proxy_reply` — never an invented `closed`. HTTP CONNECT proxies never can: HTTP
+has no status meaning refused (squid, tinyproxy and 3proxy each pick a different one and
+use it for timeouts too), so they are `open_only` by construction. Every result records where its
 classification came from. `transport test --calibrate` finds the proxy's connection
 cap, which usually decides whether a scan succeeds. Detail:
 [docs/transports.md](docs/transports.md).
@@ -162,7 +164,7 @@ cargo clippy --all-targets
 cargo fmt --check
 ```
 
-Tests use in-process fixtures only, including a SOCKS5 server with injectable behaviour.
+Tests use in-process fixtures only, including SOCKS5 and HTTP CONNECT proxies with injectable behaviour.
 Nothing reaches the internet.
 
 ## Authorization

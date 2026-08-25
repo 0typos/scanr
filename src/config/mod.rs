@@ -328,16 +328,20 @@ fn validate_transport_kind(
                 ));
             }
         }
-        "socks5" => match &t.address {
+        "socks5" | "http" => match &t.address {
             None => errors.push(
                 err_at(
                     files,
                     p,
                     Some(table),
                     "type",
-                    format!("socks5 transport `{name}` is missing `address`"),
+                    format!("{kind} transport `{name}` is missing `address`"),
                 )
-                .help("add `address = \"127.0.0.1:1080\"`"),
+                .help(if kind == "http" {
+                    "add `address = \"127.0.0.1:3128\"`"
+                } else {
+                    "add `address = \"127.0.0.1:1080\"`"
+                }),
             ),
             Some(a) => {
                 if a.parse::<std::net::SocketAddr>().is_err() {
@@ -358,7 +362,7 @@ fn validate_transport_kind(
         // that cannot carry a hop is decided by the resolver, which is the one place that
         // can see every layer at once.
         "chain" | "pool" => {
-            // A chain's fidelity is its weakest hop's and a pool's its weakest member's,
+            // A chain's fidelity is its exit hop's and a pool's its weakest member's,
             // both derived. Accepting a declared one silently would leave the operator
             // believing a measurement had been recorded when nothing reads it.
             if t.fidelity.is_some() {
@@ -371,7 +375,7 @@ fn validate_transport_kind(
                         format!("`{name}` is a {kind}; its fidelity is derived, not declared"),
                     )
                     .help(
-                        "a chain can only claim what its weakest hop can, and a pool what \
+                        "a chain can only claim what its exit hop can, and a pool what \
                          its weakest member can. Declare `fidelity` on the socks5 \
                          transports underneath instead.",
                     ),
@@ -386,7 +390,7 @@ fn validate_transport_kind(
                         "hops",
                         format!("chain transport `{name}` needs at least one entry in `hops`"),
                     )
-                    .help("hops = [\"first\", \"second\"] — each a socks5 transport, in order"),
+                    .help("hops = [\"first\", \"second\"] — each a socks5 or http transport, in order"),
                 );
             }
             if kind == "pool" && t.members.as_ref().map(|m| m.items().len()).unwrap_or(0) == 0 {
@@ -423,7 +427,7 @@ fn validate_transport_kind(
                 "type",
                 format!("transport `{name}` is missing `type`"),
             )
-            .help("use `type = \"direct\"`, `\"socks5\"`, `\"chain\"`, or `\"pool\"`"),
+            .help("use `type = \"direct\"`, `\"socks5\"`, `\"http\"`, `\"chain\"`, or `\"pool\"`"),
         ),
         other => {
             let mut e = err_at(
@@ -433,7 +437,7 @@ fn validate_transport_kind(
                 "type",
                 format!("unknown transport type `{other}`"),
             );
-            if let Some(s) = suggest(other, ["direct", "socks5", "chain", "pool"]) {
+            if let Some(s) = suggest(other, ["direct", "socks5", "http", "chain", "pool"]) {
                 e = e.help(format!("did you mean `{s}`?"));
             }
             errors.push(e);
@@ -507,6 +511,27 @@ fn validate_transport_modes(
                 "expected one of: {}\nrun `scanr transport test {name}` to measure it",
                 crate::plan::types::Fidelity::DECLARABLE.join(", ")
             )),
+        );
+    }
+    // HTTP standardises no status meaning "refused", so an HTTP proxy is open_only by
+    // construction; a declared `full` would promise `closed` results that can never be
+    // produced (D34).
+    if t.kind.as_deref() == Some("http") && t.fidelity.as_deref() == Some("full") {
+        errors.push(
+            err_at(
+                files,
+                p,
+                Some(table),
+                "fidelity",
+                format!(
+                    "http transport `{name}` declares `fidelity = \"full\"`, which an HTTP \
+                     CONNECT proxy cannot provide"
+                ),
+            )
+            .help(
+                "HTTP has no status meaning refused, so closed and filtered are \
+                 indistinguishable through it; leave `fidelity` unset",
+            ),
         );
     }
     if let Some(d) = &t.dns

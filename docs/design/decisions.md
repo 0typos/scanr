@@ -221,12 +221,26 @@ accepted · on by default (amended) · trigger: TLS ClientHello → D35
 ### D33 — Chains are one path; pools are many
 accepted · supersedes D6
 
-- A chain is the general case: `Socks5Transport` holds hops and a single proxy is one hop. Fidelity is the weakest hop's; a failed intermediate CONNECT is `error` naming the hop, never a verdict on the destination.
+- A chain is the general case: `ProxyTransport` holds hops and a single proxy is one hop. A failed intermediate CONNECT is `error` naming the hop, never a verdict on the destination.
+- **Amended 2026-08-25: a chain's fidelity is its exit hop's, not its weakest hop's.** Only the last CONNECT names the destination; an intermediate CONNECT either succeeds or fails the whole chain, and the exit's reply travels back through the tunnels untouched. Measured: squid (`open_only` by construction) → 3proxy SOCKS5 tests `full` end to end; dante → tinyproxy tests `open_only`. `fidelity_source` is `exit_hop` (was `weakest_hop`).
 - A pool assigns by FNV-1a of the endpoint (stable across toolchains), so a scan stays reproducible. Not failover: a dead member fails its share. `via` on every result names the member.
 - `Fidelity` has no `Ord`; `Fidelity::weakest` says what it means.
 
-### D34 — HTTP CONNECT transport
-proposed · `ROADMAP.md` P1
+### D34 — HTTP CONNECT transport, open_only by construction
+accepted 2026-08-25 · alternatives rejected: per-proxy status mapping; Digest/NTLM auth · trigger: a second vendor exposing the connect errno, as squid's `X-Squid-Error` does
+
+- `type = "http"`, same keys as `socks5`; Basic auth only (`Proxy-Authorization`, base64 in the clear). A hop kind inside the existing path walker, so a chain may mix protocols: either CONNECT yields a raw tunnel.
+- HTTP standardises no status meaning "the destination refused". Measured, raw status lines:
+
+| proxy | refused | blackholed | distinguishes |
+|---|---|---|---|
+| squid 7.6 | `503`, `X-Squid-Error: ERR_CONNECT_FAIL 111` | `503`, `ERR_CONNECT_FAIL 110` (2 s `connect_timeout`; no reply under the 60 s default) | private header only |
+| tinyproxy 1.11.2 | `500 Unable to connect` | `500 Unable to connect` | no |
+| 3proxy 0.9.7 | `502 Bad Gateway` | `502 Bad Gateway` | no |
+
+- So `2xx` is open, `407` and `403` are named, everything else is `error` carrying the status line; the transport is `open_only` with `fidelity_source: inherent`, `fidelity = "full"` is refused in config, and `transport test` reports the statuses seen rather than judging them. Mapping squid's errno header would give one vendor `full` on a private signal; not taken.
+- Response parser is bounded at 8 KiB, deadline-driven against trickling, refuses anything not starting `HTTP/` byte by byte, filters peer text to printable ASCII, and stops at the blank line so a banner behind a `200` is left for the banner reader. Fuzz target `http_connect_reply`.
+- Also found: 3proxy's SOCKS5 answers `0x05` for its *own* connect timeout when that is shorter than scanr's, so its "refused" means "failed"; documented as a caveat in `transports.md`.
 
 ### D35 — TLS ClientHello probe
 proposed · `ROADMAP.md` P2 · offers TLS 1.2 only, because a 1.3 handshake needs a TLS stack with C, which D19/D28 exclude
@@ -242,7 +256,8 @@ The external-consumer gate is withdrawn. 1.0 promises the record, the CLI and th
 
 | item | status | note |
 |---|---|---|
-| HTTP CONNECT | proposed | D34 |
+| HTTP CONNECT | accepted, shipped | D34 |
+| squid `X-Squid-Error` errno → `full` for squid | deferred | D34 trigger: a second vendor exposing the errno |
 | TLS ClientHello | proposed | D35 |
 | commercial rotating pool fidelity | open | no access; add during soak if reachable |
 | sustained multi-hour run | open | measure during soak |

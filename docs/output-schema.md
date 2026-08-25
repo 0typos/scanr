@@ -15,7 +15,7 @@ is a major version of scanr. This build writes version 2 and reads 1 and 2.
 |---|---|---|
 | `state` | `open`, `closed`, `filtered`, `error` | yes |
 | `source` | `local_stack`, `proxy_reply`, `timeout`, `internal` | yes |
-| `transport.type` | `direct`, `socks5`, `chain`, `pool` | no |
+| `transport.type` | `direct`, `socks5`, `http`, `chain`, `pool` | no |
 | `fidelity`, `measured_fidelity` | `full`, `open_only`, `unknown` | no |
 | `fidelity_source` | [Fidelity](#fidelity) | no |
 | `scan_warning.code` | [`scan_warning`](#scan_warning) | no |
@@ -158,8 +158,11 @@ key automation on `state`, `source`, `reason`. `/etc/services` varies by host, s
 
 `scan_config.transport.fidelity_source`: `builtin` (direct: the local stack separates
 states), `config` (declared from a `transport test` measurement), `unmeasured`,
-`weakest_hop` (chain), `weakest_member` (pool). Unmeasured chain or pool members give
-`measured_fidelity: "unknown"` beside the derived source.
+`inherent` (http: the protocol has no status meaning refused, so `open_only` by
+construction), `exit_hop` (chain: the last hop's — `weakest_hop` in records before
+0.4.0), `weakest_member` (pool). Unmeasured chain or pool members give
+`measured_fidelity: "unknown"` beside the derived source. A chain's `hops[]` and a pool's
+`members[]` each carry `type`.
 
 ## `probe_span`
 
