@@ -1,0 +1,4 @@
+HTTP/1.1 503 Service Unavailable
+Server: squid/7.6
+X-Squid-Error: ERR_CONNECT_FAIL 110
+

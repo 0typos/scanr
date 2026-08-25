@@ -1,0 +1,5 @@
+HTTP/1.1 500 Unable to connect
+Server: tinyproxy/1.11.2
+Content-Type: text/html
+Connection: close
+

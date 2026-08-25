@@ -309,7 +309,7 @@ mod tests {
 
         for b in [Behavior::Faithful, Behavior::Collapsing] {
             let fx = Socks5Fixture::start(b.clone());
-            let t = crate::transport::Socks5Transport::new(
+            let t = crate::transport::ProxyTransport::new(
                 "fx".into(),
                 fx.addr(),
                 None,
@@ -327,14 +327,22 @@ mod tests {
                 banner: None,
             };
             let o = t.probe_detailed(&crate::transport::Destination::Addr(open), &timing);
-            assert_eq!(o.reply_code, Some(REP_SUCCEEDED), "{b:?} on open port");
+            assert_eq!(
+                o.reply,
+                Some(crate::transport::Reply::Socks5(REP_SUCCEEDED)),
+                "{b:?} on open port"
+            );
 
             let c = t.probe_detailed(&crate::transport::Destination::Addr(closed), &timing);
             let expected = match b {
                 Behavior::Faithful => REP_CONNECTION_REFUSED,
                 _ => REP_GENERAL_FAILURE,
             };
-            assert_eq!(c.reply_code, Some(expected), "{b:?} on closed port");
+            assert_eq!(
+                c.reply,
+                Some(crate::transport::Reply::Socks5(expected)),
+                "{b:?} on closed port"
+            );
         }
     }
 }

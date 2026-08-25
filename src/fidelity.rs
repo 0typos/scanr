@@ -24,19 +24,17 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use crate::plan::types::{Fidelity, ResolvedTransport, Timing, TransportKind};
+use crate::plan::types::{Fidelity, HopKind, ResolvedTransport, Timing, TransportKind};
 use crate::probe::State;
-use crate::transport::Destination;
-use crate::transport::socks5::{
-    REP_CONNECTION_REFUSED, REP_GENERAL_FAILURE, Socks5Transport, reply_name,
-};
+use crate::transport::socks5::{REP_CONNECTION_REFUSED, REP_GENERAL_FAILURE, reply_name};
+use crate::transport::{Destination, Hop, ProxyTransport, Reply};
 
 #[derive(Debug)]
 pub struct Check {
     pub label: &'static str,
     pub dest: String,
     pub state: State,
-    pub reply: Option<u8>,
+    pub reply: Option<Reply>,
     pub ms: f64,
     pub expectation: &'static str,
 }
@@ -153,7 +151,21 @@ pub fn measure(
             username,
             password,
         } => (
-            Socks5Transport::new(
+            ProxyTransport::new(
+                transport.name.clone(),
+                *address,
+                username.clone(),
+                password.as_ref().map(|s| s.expose().to_string()),
+                Fidelity::Unknown,
+            ),
+            *address,
+        ),
+        TransportKind::Http {
+            address,
+            username,
+            password,
+        } => (
+            ProxyTransport::http(
                 transport.name.clone(),
                 *address,
                 username.clone(),
@@ -166,13 +178,16 @@ pub fn measure(
         // proxy can distinguish, which is not what any result down the chain will show:
         // one collapsing link anywhere flattens everything behind it.
         TransportKind::Chain { hops } => (
-            Socks5Transport::chained(
+            ProxyTransport::chained(
                 transport.name.clone(),
                 hops.iter()
-                    .map(|h| crate::transport::socks5::Hop {
-                        address: h.address,
-                        username: h.username.clone(),
-                        password: h.password.as_ref().map(|s| s.expose().to_string()),
+                    .map(|h| {
+                        Hop::new(
+                            h.kind,
+                            h.address,
+                            h.username.clone(),
+                            h.password.as_ref().map(|s| s.expose().to_string()),
+                        )
                     })
                     .collect(),
                 Fidelity::Unknown,
@@ -184,6 +199,8 @@ pub fn measure(
             hops[hops.len() - 1].address,
         ),
     };
+    // The exit hop decides what a failure reply can express.
+    let exit_kind = client.hops().last().map_or(HopKind::Socks5, |h| h.kind);
 
     // Calibration needs a destination the proxy can definitely reach. Using the proxy's
     // own listening socket seemed obvious and fails against real software: dante refuses
@@ -223,7 +240,7 @@ pub fn measure(
         .find(|c| c.label == "known-open")
         .is_some_and(|c| c.state == State::Open);
 
-    let (fidelity, explanation) = judge(reachable, open_ok, closed_reply);
+    let (fidelity, explanation) = judge(exit_kind, reachable, open_ok, closed_reply);
 
     // Opt-in: this generates real traffic and takes time, so it is not part of the
     // default check.
@@ -255,7 +272,7 @@ struct Probes {
 
 /// Probe each calibration destination once and record what came back.
 fn run_checks(
-    client: &Socks5Transport,
+    client: &ProxyTransport,
     destinations: [(&'static str, SocketAddr, &'static str, &Timing); 3],
     authenticating: bool,
 ) -> Probes {
@@ -291,7 +308,7 @@ fn run_checks(
             label,
             dest: dest.to_string(),
             state: o.state,
-            reply: d.reply_code,
+            reply: d.reply,
             ms: o.phases.total.as_secs_f64() * 1000.0,
             expectation,
         });
@@ -339,7 +356,15 @@ fn known_open_destination(
 }
 
 /// Decide fidelity from the reply to a destination we know is closed.
-pub fn judge(reachable: bool, open_ok: bool, closed_reply: Option<u8>) -> (Fidelity, String) {
+///
+/// `exit` is the protocol of the hop that issued the CONNECT: it decides what a failure
+/// reply is able to say at all.
+pub fn judge(
+    exit: HopKind,
+    reachable: bool,
+    open_ok: bool,
+    closed_reply: Option<Reply>,
+) -> (Fidelity, String) {
     if !reachable {
         return (
             Fidelity::Unknown,
@@ -354,7 +379,7 @@ pub fn judge(reachable: bool, open_ok: bool, closed_reply: Option<u8>) -> (Fidel
         // refuse to connect to their own listening port, so a naive calibration reports
         // Unknown and looks like the tool is broken.
         let hint = match closed_reply {
-            Some(REP_CONNECTION_REFUSED) => {
+            Some(Reply::Socks5(REP_CONNECTION_REFUSED)) => {
                 " The known-closed probe did answer 0x05, which suggests full fidelity, \
                  but that is unconfirmed without a working open probe."
             }
@@ -369,27 +394,52 @@ pub fn judge(reachable: bool, open_ok: bool, closed_reply: Option<u8>) -> (Fidel
             ),
         );
     }
+    // HTTP defines no status for "the destination refused", and scanr does not guess
+    // one, so an HTTP exit is open_only by construction. The status it did send is
+    // reported so an operator can see what the proxy does, not just what scanr will not
+    // infer from it.
+    if exit == HopKind::Http {
+        let said = match closed_reply {
+            Some(r) => format!("answered a known-closed destination with {r}"),
+            None => "produced no usable status for a known-closed destination".into(),
+        };
+        return (
+            Fidelity::OpenOnly,
+            format!(
+                "This HTTP CONNECT proxy {said}. HTTP standardises no status meaning \
+                 refused, so scanr records non-open results through it as `error` with \
+                 source `proxy_reply` rather than guessing `closed` or `filtered`."
+            ),
+        );
+    }
     match closed_reply {
-        Some(REP_CONNECTION_REFUSED) => (
+        Some(Reply::Socks5(REP_CONNECTION_REFUSED)) => (
             Fidelity::Full,
             "This proxy reports refused connections distinctly (0x05), so scanr can \
              tell `closed` apart from `filtered` in your results."
                 .into(),
         ),
-        Some(REP_GENERAL_FAILURE) => (
+        Some(Reply::Socks5(REP_GENERAL_FAILURE)) => (
             Fidelity::OpenOnly,
             "This proxy reports a generic failure (0x01) for refused connections, so \
              scanr cannot distinguish `closed` from `filtered`. Non-open results will \
              be recorded as `error` with source `proxy_reply` rather than guessed."
                 .into(),
         ),
-        Some(other) => (
+        Some(Reply::Socks5(other)) => (
             Fidelity::OpenOnly,
             format!(
                 "This proxy answered a known-closed destination with 0x{other:02x} ({}), \
                  which is not the refused code (0x05). scanr will treat non-open results \
                  as `error` rather than infer a state it did not observe.",
                 reply_name(other)
+            ),
+        ),
+        Some(Reply::Http(status)) => (
+            Fidelity::OpenOnly,
+            format!(
+                "A SOCKS5 exit answered with HTTP status {status}, which should not \
+                 happen; non-open results will be recorded as `error`."
             ),
         ),
         None => (
@@ -411,7 +461,7 @@ const ROUNDS_PER_WORKER: u32 = 4;
 /// Reproduce a scan's connection churn at increasing concurrency and report where the
 /// proxy starts refusing.
 fn calibrate_concurrency(
-    client: &Socks5Transport,
+    client: &ProxyTransport,
     timing: &Timing,
     dest: SocketAddr,
 ) -> Calibration {
@@ -485,7 +535,7 @@ impl FidelityReport {
         for c in &self.checks {
             let reply = c
                 .reply
-                .map(|r| format!("reply 0x{r:02x}"))
+                .map(|r| r.to_string())
                 .unwrap_or_else(|| "no reply".into());
             let flag = if c.state.as_str() == c.expectation {
                 String::new()
@@ -546,7 +596,7 @@ impl FidelityReport {
         // Measuring is only half the job — recording it in config is what silences the
         // per-scan warning and puts the fact in version control (D8).
         //
-        // Only for a single proxy. A chain's fidelity is its weakest hop's and a pool's
+        // Only for a single proxy. A chain's fidelity is its exit hop's and a pool's
         // its weakest member's, both derived, and the config refuses a declared one — so
         // telling an operator to write it there would be advice that fails validation.
         if self.kind == "socks5" && self.fidelity != Fidelity::Unknown {
@@ -556,7 +606,7 @@ impl FidelityReport {
             ));
         } else if self.kind == "chain" && self.fidelity != Fidelity::Unknown {
             s.push_str(
-                "\n  a chain's fidelity is derived from its hops; record it on the socks5\n                   transports the chain names, not on the chain itself.\n",
+                "\n  a chain's fidelity is its exit hop's; record it on that transport,\n                   not on the chain itself.\n",
             );
         }
         s
@@ -672,27 +722,73 @@ mod tests {
 
     #[test]
     fn judgement_table_is_conservative() {
+        let socks = |reachable, open_ok, code: Option<u8>| {
+            judge(HopKind::Socks5, reachable, open_ok, code.map(Reply::Socks5)).0
+        };
         assert_eq!(
-            judge(true, true, Some(REP_CONNECTION_REFUSED)).0,
+            socks(true, true, Some(REP_CONNECTION_REFUSED)),
             Fidelity::Full
         );
         assert_eq!(
-            judge(true, true, Some(REP_GENERAL_FAILURE)).0,
+            socks(true, true, Some(REP_GENERAL_FAILURE)),
             Fidelity::OpenOnly
         );
-        assert_eq!(
-            judge(true, true, Some(REP_NOT_ALLOWED)).0,
-            Fidelity::OpenOnly
-        );
-        assert_eq!(judge(true, true, None).0, Fidelity::OpenOnly);
+        assert_eq!(socks(true, true, Some(REP_NOT_ALLOWED)), Fidelity::OpenOnly);
+        assert_eq!(socks(true, true, None), Fidelity::OpenOnly);
         // Anything that invalidates calibration must report Unknown, never a guess.
         assert_eq!(
-            judge(false, true, Some(REP_CONNECTION_REFUSED)).0,
+            socks(false, true, Some(REP_CONNECTION_REFUSED)),
             Fidelity::Unknown
         );
         assert_eq!(
-            judge(true, false, Some(REP_CONNECTION_REFUSED)).0,
+            socks(true, false, Some(REP_CONNECTION_REFUSED)),
             Fidelity::Unknown
+        );
+    }
+
+    /// HTTP has no status that means refused, so an HTTP exit can never be `full` —
+    /// whatever status the proxy chose, and however consistently.
+    #[test]
+    fn an_http_exit_is_open_only_by_construction() {
+        for closed in [Some(Reply::Http(503)), Some(Reply::Http(502)), None] {
+            let (f, why) = judge(HopKind::Http, true, true, closed);
+            assert_eq!(f, Fidelity::OpenOnly, "{closed:?}");
+            assert!(why.contains("no status meaning refused"), "{why}");
+        }
+        let (_, why) = judge(HopKind::Http, true, true, Some(Reply::Http(503)));
+        assert!(
+            why.contains("status 503"),
+            "the status seen must be reported: {why}"
+        );
+        assert_eq!(judge(HopKind::Http, false, true, None).0, Fidelity::Unknown);
+        assert_eq!(judge(HopKind::Http, true, false, None).0, Fidelity::Unknown);
+    }
+
+    #[test]
+    fn an_http_fixture_measures_as_open_only_and_reports_its_statuses() {
+        use crate::testsupport::http::{Behavior as H, HttpFixture};
+        let fx = HttpFixture::start(H::Faithful);
+        let t = ResolvedTransport {
+            name: "hx".into(),
+            kind: TransportKind::Http {
+                address: fx.addr(),
+                username: None,
+                password: None,
+            },
+            fidelity: Fidelity::OpenOnly,
+        };
+        let r = measure(&t, &timing(), None, None, false).unwrap();
+        assert!(r.reachable, "{}", r.explanation);
+        assert_eq!(r.fidelity, Fidelity::OpenOnly, "{}", r.explanation);
+        assert_eq!(r.kind, "http");
+        let closed = r.checks.iter().find(|c| c.label == "known-closed").unwrap();
+        assert_eq!(closed.reply, Some(Reply::Http(503)));
+        let out = r.render();
+        assert!(out.contains("status 200"), "{out}");
+        assert!(out.contains("status 503"), "{out}");
+        assert!(
+            !out.contains("to record this"),
+            "nothing to declare for http: {out}"
         );
     }
 

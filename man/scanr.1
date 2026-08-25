@@ -1,12 +1,12 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH scanr 1  "scanr 0.3.0" 
+.TH scanr 1  "scanr 0.4.0" 
 .SH NAME
 scanr \- Proxy\-aware TCP connect scanner with reproducible, durable scan records
 .SH SYNOPSIS
 \fBscanr\fR [\fB\-\-config\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-no\-color\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIsubcommands\fR>
 .SH DESCRIPTION
-scanr performs unprivileged TCP connect() probes directly or through a SOCKS5 proxy, streams open ports to stdout as they are found, and always writes a JSONL record containing the fully resolved configuration and a single terminal event stating whether the run completed, was interrupted, or failed.
+scanr performs unprivileged TCP connect() probes directly or through a SOCKS5 or HTTP CONNECT proxy, streams open ports to stdout as they are found, and always writes a JSONL record containing the fully resolved configuration and a single terminal event stating whether the run completed, was interrupted, or failed.
 .SH OPTIONS
 .TP
 \fB\-\-config\fR \fI<PATH>\fR
@@ -56,4 +56,4 @@ EXAMPLES:
   scanr transport test lab
   scanr output verify scanr\-results/scan\-*.jsonl.gz
 .SH VERSION
-v0.3.0
+v0.4.0

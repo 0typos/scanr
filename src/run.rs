@@ -879,9 +879,14 @@ fn config_event(plan: &ScanPlan, facts: &HostFacts) -> serde_json::Value {
             address,
             username,
             password,
+        }
+        | TransportKind::Http {
+            address,
+            username,
+            password,
         } => json!({
             "name": plan.transport.name,
-            "type": "socks5",
+            "type": plan.transport.type_name(),
             "address": address.to_string(),
             "username": username,
             // Credentials are never written, only their source.
@@ -894,10 +899,12 @@ fn config_event(plan: &ScanPlan, facts: &HostFacts) -> serde_json::Value {
             // Where the fidelity came from. Replaces the specified-but-never-emitted
             // `fidelity_measured_at`, which stopped meaning anything once fidelity
             // became a declared config value rather than a scan-time measurement.
-            "fidelity_source": if plan.transport.fidelity == Fidelity::Unknown {
-                "unmeasured"
-            } else {
-                "config"
+            "fidelity_source": match (&plan.transport.kind, plan.transport.fidelity) {
+                // HTTP has no status meaning refused; open_only is a property of the
+                // protocol, not a measurement or a declaration.
+                (TransportKind::Http { .. }, _) => "inherent",
+                (_, Fidelity::Unknown) => "unmeasured",
+                _ => "config",
             },
         }),
         // A chain records every hop, because "which link failed" is unanswerable
@@ -907,13 +914,15 @@ fn config_event(plan: &ScanPlan, facts: &HostFacts) -> serde_json::Value {
             "type": "chain",
             "hops": hops.iter().map(|h| json!({
                 "name": h.name,
+                "type": h.kind.as_str(),
                 "address": h.address.to_string(),
                 "username": h.username,
                 "password": h.password.as_ref().map(|_| "[redacted]"),
             })).collect::<Vec<_>>(),
             "measured_fidelity": plan.transport.fidelity.to_string(),
-            // The weakest hop decides what the whole path can distinguish.
-            "fidelity_source": "weakest_hop",
+            // The exit hop issues the CONNECT that names the destination, so its reply
+            // decides what the whole path can distinguish.
+            "fidelity_source": "exit_hop",
         }),
         // Every member by name, so the `via` on each result can be resolved back to the
         // proxy that produced it.

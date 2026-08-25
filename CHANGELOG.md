@@ -14,6 +14,35 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-25
+
+### Added
+
+- **HTTP CONNECT proxies**: `type = "http"` with the same keys as `socks5`; Basic
+  authentication; usable as a chain hop (mixed with `socks5` in either order) and a pool
+  member. Measured against squid 7.6, tinyproxy 1.11.2 and 3proxy 0.9.7: none has a
+  status meaning "refused" (`503`/`500`/`502`, the same for a timeout), so an http
+  transport is `open_only` by construction — non-open results are `error` carrying the
+  status line, `fidelity_source` is `inherent`, and declaring `fidelity = "full"` is
+  refused. Fuzz target `http_connect_reply` covers the response parser.
+
+### Changed
+
+- **A chain's fidelity is its exit hop's, not its weakest hop's.** Only the last CONNECT
+  names the destination and its reply travels back untouched; measured `full` through
+  squid → 3proxy SOCKS5. `fidelity_source` for a chain is `exit_hop` (was `weakest_hop`);
+  chain `hops[]` and pool `members[]` entries now carry `type`.
+- `transport test` prints `status NNN` for HTTP replies beside `reply 0xNN` for SOCKS5.
+
+### Fixed
+
+- **A chain or pool resolved hostnames locally and took the `direct` default profile.**
+  `supports_remote_dns` was true only for a single `socks5`, so `dns = "auto"` through a
+  chain leaked DNS from the host and the scan ran with no rate limit. Every proxied kind
+  now resolves through the transport; a pool does when every member does.
+- Chains and pools with `unknown` or `open_only` fidelity now get the `fidelity_unknown`
+  / `fidelity_open_only` plan warnings; only a single `socks5` did.
+
 ## [0.3.0] - 2026-08-25
 
 ### Changed

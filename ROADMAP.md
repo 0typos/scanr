@@ -36,7 +36,12 @@ was outside the project's control and is withdrawn (D36). 1.0.0 is tagged when:
 - Ship what is on `main`. Per `RELEASING.md`.
 - Docs compacted and drift fixed (done 2026-08-25).
 
-### P1 — HTTP CONNECT transport → 0.4.0 · D34 · ~2–3 days
+### P1 — HTTP CONNECT transport → 0.4.0 · D34 · done 2026-08-25
+
+Shipped as designed below, with two corrections the measurement forced: HTTP proxies
+are `open_only` by construction (no vendor has a refused status; `fidelity = "full"` is
+refused rather than "measured"), and a chain's fidelity is its exit hop's, not its
+weakest hop's (D33 amended). Real-proxy rows are in `docs/transports.md`.
 
 | | |
 |---|---|
@@ -115,7 +120,7 @@ triggers live in `docs/design/decisions.md`.
 ## Definition of done
 
 - [ ] 0.3.0 released from `main`
-- [ ] HTTP CONNECT: three-proxy fidelity table, mixed chains tested, fuzz clean (0.4.0)
+- [x] HTTP CONNECT: three-proxy fidelity table, mixed chains tested, fuzz clean (0.4.0) — code done 2026-08-25; release pending
 - [ ] TLS probe: 1.2 and 1.3-only verified, off-by-default proven, musl static (0.5.0)
 - [ ] `--format` unified; exit codes pinned; backlog "before freeze" items closed
 - [ ] `docs/stability.md` and compat corpus in place

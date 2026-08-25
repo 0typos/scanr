@@ -16,7 +16,7 @@ use std::time::Instant;
 use libfuzzer_sys::fuzz_target;
 use scanr::plan::types::Fidelity;
 use scanr::probe::{Phases, State};
-use scanr::transport::socks5::{Socks5Transport, read_reply};
+use scanr::transport::socks5::{ProxyTransport, read_reply};
 
 /// A peer that replies with fuzzer-supplied bytes and discards whatever we send.
 struct FuzzPeer<'a> {
@@ -59,7 +59,7 @@ fuzz_target!(|data: &[u8]| {
         _ => (Some("scanner".to_string()), None),
     };
 
-    let client = Socks5Transport::new(
+    let client = ProxyTransport::new(
         "fuzz".into(),
         "127.0.0.1:1080".parse().expect("valid literal"),
         user,

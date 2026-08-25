@@ -71,7 +71,7 @@ Seven built-ins. Flat and complete, no inheritance. `scanr config show` prints t
 | `ssh` | 96 | unlimited | 6s | 1 | `ssh -D` over a typical internet link |
 | `ssh-slow` | 128 | unlimited | 15s | 1 | `ssh -D` over a high-latency link |
 
-- Default follows the transport: `proxy` for SOCKS5, else `direct`.
+- Default follows the transport: `proxy` for any proxy (socks5, http, chain, pool), else `direct`.
 - `[profiles.proxy]` overrides only the fields set; a new name falls back to the transport-appropriate built-in.
 - See [tuning.md](tuning.md) before changing these.
 
@@ -79,7 +79,7 @@ Seven built-ins. Flat and complete, no inheritance. `scanr config show` prints t
 
 ```toml
 [transports.lab]
-type = "socks5"                       # or "direct"
+type = "socks5"                       # or "http", "direct"
 address = "127.0.0.1:1080"
 username = "scanner"                  # optional, RFC 1929
 password_env = "SCANR_LAB_PASSWORD"   # or password_file

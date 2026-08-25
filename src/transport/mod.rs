@@ -5,18 +5,77 @@
 //! landed where it did (D1), given SOCKS5 is the primary path.
 
 pub mod direct;
+pub mod http;
 pub mod pool;
 pub mod socks5;
 
 use std::fmt;
+use std::io::Read;
 use std::net::{IpAddr, SocketAddr, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use crate::plan::types::{Banner, Fidelity, Timing, TransportKind};
+use crate::plan::types::{Banner, Fidelity, HopKind, Timing, TransportKind};
 use crate::probe::ProbeOutcome;
 
 pub use direct::DirectTransport;
-pub use socks5::Socks5Transport;
+pub use socks5::{Hop, ProxyTransport};
+
+/// A proxy's raw answer to the CONNECT that named the destination, kept for
+/// `transport test`, which judges fidelity from it rather than from the state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reply {
+    /// RFC 1928 reply code.
+    Socks5(u8),
+    /// HTTP status code.
+    Http(u16),
+}
+
+impl fmt::Display for Reply {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Reply::Socks5(c) => write!(f, "reply 0x{c:02x}"),
+            Reply::Http(s) => write!(f, "status {s}"),
+        }
+    }
+}
+
+/// Read exactly `buf.len()` bytes, or fail — bounded in *time*, not only in bytes.
+///
+/// `SO_RCVTIMEO` bounds each `read` syscall, not the message. A peer that delivers one
+/// byte just inside the timeout resets that clock on every iteration, so a reply parser
+/// could hold a worker for many multiples of the configured budget, chosen by the peer —
+/// measured at 26x against a 200 ms budget. Concurrency here is the worker-thread count
+/// with no queue, so a hostile proxy doing this on every connection stalls the scan.
+///
+/// `deadline` is `None` only where there is no clock to run against — a fuzz harness
+/// driving a `Cursor`, which cannot block.
+pub fn read_exact<R: Read>(
+    s: &mut R,
+    buf: &mut [u8],
+    deadline: Option<Instant>,
+) -> std::io::Result<()> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "peer did not deliver a complete message within the budget",
+            ));
+        }
+        match s.read(&mut buf[filled..]) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "connection closed mid-message",
+                ));
+            }
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
 
 /// Where a probe is aimed. A hostname is only permitted when the transport resolves
 /// remotely; the planner enforces that before the scheduler ever sees one.
@@ -68,20 +127,40 @@ pub fn build(resolved: &crate::plan::types::ResolvedTransport) -> Box<dyn Transp
             address,
             username,
             password,
-        } => Box::new(Socks5Transport::new(
+        } => Box::new(ProxyTransport::chained(
             resolved.name.clone(),
-            *address,
-            username.clone(),
-            password.as_ref().map(|s| s.expose().to_string()),
+            vec![Hop::new(
+                HopKind::Socks5,
+                *address,
+                username.clone(),
+                password.as_ref().map(|s| s.expose().to_string()),
+            )],
             resolved.fidelity,
         )),
-        TransportKind::Chain { hops } => Box::new(socks5::Socks5Transport::chained(
+        TransportKind::Http {
+            address,
+            username,
+            password,
+        } => Box::new(ProxyTransport::chained(
+            resolved.name.clone(),
+            vec![Hop::new(
+                HopKind::Http,
+                *address,
+                username.clone(),
+                password.as_ref().map(|s| s.expose().to_string()),
+            )],
+            resolved.fidelity,
+        )),
+        TransportKind::Chain { hops } => Box::new(ProxyTransport::chained(
             resolved.name.clone(),
             hops.iter()
-                .map(|h| socks5::Hop {
-                    address: h.address,
-                    username: h.username.clone(),
-                    password: h.password.as_ref().map(|s| s.expose().to_string()),
+                .map(|h| {
+                    Hop::new(
+                        h.kind,
+                        h.address,
+                        h.username.clone(),
+                        h.password.as_ref().map(|s| s.expose().to_string()),
+                    )
                 })
                 .collect(),
             resolved.fidelity,

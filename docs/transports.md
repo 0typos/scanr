@@ -1,7 +1,7 @@
 # Transports
 
-Kinds: `direct`, `socks5`. One per scan; a `chain` traverses SOCKS5 proxies in order, a
-`pool` spreads probes across them.
+Kinds: `direct`, `socks5`, `http` (CONNECT). One per scan; a `chain` traverses proxies of
+either kind in order, a `pool` spreads probes across them.
 
 ## SOCKS4
 
@@ -16,9 +16,14 @@ ruleset. Raw bytes measured:
 | proxy | known-open | refused destination | unroutable destination | fidelity |
 |---|---|---|---|---|
 | microsocks | `0x00` | `0x05` | no reply, timeout | full |
-| dante (sockd 1.4.3) | `0x00` | `0x05` | `0x01` | full |
-| 3proxy | `0x00` | `0x05` | no reply, timeout | full |
+| dante (sockd 1.4.4) | `0x00` | `0x05` | `0x01` | full |
+| 3proxy 0.9.7 | `0x00` | `0x05` | no reply, timeout; `0x05` once its own connect timeout fires | full, with a caveat |
 | OpenSSH `ssh -D` | `0x00` | no reply, channel closed | no reply, timeout | open_only |
+
+3proxy's `0x05` means "connect failed", not "refused": with `timeouts` set so its connect
+timeout (2 s) is shorter than scanr's, a blackholed destination also came back `0x05` and
+would be recorded `closed`. Keep `connect_timeout` below the proxy's own connect timeout,
+or the proxy answers first and the distinction is lost.
 
 OpenSSH sends no reply for a refused destination (client log: `channel N: open failed:
 connect failed: Connection refused`), and its `BND.ADDR` is `0.0.0.0`, so a
@@ -108,6 +113,38 @@ Raise the proxy's cap rather than lower concurrency. A burst does not predict th
 3proxy accepts 64 held connections yet loses 48% of a churning scan at 64, since closed
 connections linger in its table.
 
+## HTTP CONNECT
+
+`type = "http"`, same keys as `socks5`; credentials become `Proxy-Authorization: Basic`
+(base64, cleartext — the same protection as RFC 1929). Hostnames are handed to the proxy
+unresolved.
+
+HTTP standardises no status meaning "the destination refused", so an HTTP proxy is
+`open_only` by construction: `2xx` is open, `407` and `403` are named, every other
+status is `error` carrying the status line. `fidelity` is not declared on an http
+transport (`full` is refused). Measured, raw status lines:
+
+| proxy | known-open | refused destination | unroutable destination | tells them apart |
+|---|---|---|---|---|
+| squid 7.6 | `HTTP/1.1 200 Connection established` | `503 Service Unavailable`, `X-Squid-Error: ERR_CONNECT_FAIL 111` | `503`, `X-Squid-Error: ERR_CONNECT_FAIL 110` (with `connect_timeout 2 seconds`; no reply under the 60 s default) | only in a private header |
+| tinyproxy 1.11.2 | `200 Connection established` | `500 Unable to connect` | `500 Unable to connect` | no |
+| 3proxy 0.9.7 | `HTTP/1.0 200 Connection established` | `502 Bad Gateway` | `502 Bad Gateway` | no |
+
+squid's `X-Squid-Error` carries the errno (`111` ECONNREFUSED, `110` ETIMEDOUT) and could
+support `full` fidelity for squid alone; not implemented, since it is one vendor's
+private header.
+
+```console
+$ scanr transport test corp
+transport corp (http 127.0.0.1:3128)
+  reachable         yes
+  known-open        open      status 200         0.5ms
+  known-closed      error     status 503         0.4ms   <- expected closed
+  blackholed        error     status 503      2815.2ms   <- expected filtered
+
+  fidelity          open_only
+```
+
 ## Chains
 
 ```toml
@@ -124,9 +161,12 @@ type = "chain"
 hops = ["bastion", "inner"]     # traversed left to right
 ```
 
-- Hops must be `socks5` (`direct` has nothing to CONNECT through); each has its own
-  credentials.
-- Fidelity: weakest hop's, measured end to end. Record it on the hops, not the chain.
+- Hops must be `socks5` or `http` (`direct` has nothing to CONNECT through) and may mix;
+  each has its own credentials.
+- Fidelity: the exit hop's, measured end to end. An intermediate CONNECT either succeeds
+  or fails the chain as `error`; the exit's reply travels back untouched. Measured: squid
+  → 3proxy SOCKS5 is `full`, dante → tinyproxy is `open_only`. Record it on the exit
+  hop, not the chain.
 - Failures name the link; the record stores every hop:
 
 ```
@@ -158,7 +198,7 @@ exit-c
 
 ## Authentication
 
-RFC 1929 username/password: cleartext, encrypts nothing.
+RFC 1929 username/password (`socks5`) and Basic (`http`): cleartext, encrypt nothing.
 
 ```toml
 [transports.lab]

@@ -47,3 +47,10 @@ path = "fuzz_targets/record.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "http_connect_reply"
+path = "fuzz_targets/http_connect_reply.rs"
+test = false
+doc = false
+bench = false

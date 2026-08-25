@@ -323,11 +323,11 @@ banner_timeout = "500ms"
 type = "direct"
 
 [transports.lab]
-# "direct", "socks5", "chain" or "pool". SOCKS4/4a are not supported: they define only
-# four reply codes and cannot distinguish a closed port from a filtered one.
+# "direct", "socks5", "http", "chain" or "pool". SOCKS4/4a are not supported: they
+# define only four reply codes and cannot distinguish a closed port from a filtered one.
 type = "socks5"
 
-# host:port of the proxy. Required for socks5.
+# host:port of the proxy. Required for socks5 and http.
 address = "127.0.0.1:1080"
 
 # Optional SOCKS5 username/password authentication (RFC 1929). Left commented so
@@ -364,9 +364,17 @@ dns = "auto"
 #   default: unset            CLI: (none)
 # fidelity = "full"
 
-# A chain traverses SOCKS5 transports in order, each reached through the one before it,
-# so the destination sees only the last. Every hop must be socks5. Latency is the sum of
-# the hops, and the chain's fidelity is its weakest hop's.
+# An HTTP CONNECT proxy takes the same keys. Credentials become `Proxy-Authorization:
+# Basic`, which is base64 in the clear — the same protection as SOCKS5's, none. HTTP
+# has no status meaning "refused", so an http transport is open_only by construction:
+# non-open results through it are recorded as `error`, and `fidelity` is not declared.
+# [transports.corp]
+# type = "http"
+# address = "proxy.corp.example:3128"
+
+# A chain traverses proxies in order, each reached through the one before it, so the
+# destination sees only the last. Every hop must be socks5 or http; they may mix.
+# Latency is the sum of the hops, and the chain's fidelity is its exit hop's.
 # [transports.doubled]
 # type = "chain"
 # hops = ["lab", "exit-b"]

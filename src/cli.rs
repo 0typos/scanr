@@ -50,7 +50,7 @@ pub const EXIT_INTERRUPTED: u8 = 130;
     long_version = build_version(),
     about = "Proxy-aware TCP connect scanner with reproducible, durable scan records",
     long_about = "scanr performs unprivileged TCP connect() probes directly or through a \
-                  SOCKS5 proxy, streams open ports to stdout as they are found, and always \
+                  SOCKS5 or HTTP CONNECT proxy, streams open ports to stdout as they are found, and always \
                   writes a JSONL record containing the fully resolved configuration and a \
                   single terminal event stating whether the run completed, was interrupted, \
                   or failed.",
@@ -665,6 +665,9 @@ pub fn render_plan(plan: &ScanPlan, facts: &HostFacts, no_color: bool) -> String
         TransportKind::Direct => {}
         TransportKind::Socks5 {
             address, username, ..
+        }
+        | TransportKind::Http {
+            address, username, ..
         } => {
             row("  address", address.to_string(), "");
             if let Some(u) = username {
@@ -679,7 +682,7 @@ pub fn render_plan(plan: &ScanPlan, facts: &HostFacts, no_color: bool) -> String
                 };
                 row(
                     &format!("  hop {}", i + 1),
-                    format!("{} ({}){creds}", h.address, h.name),
+                    format!("{} {} ({}){creds}", h.kind.as_str(), h.address, h.name),
                     "",
                 );
             }
@@ -699,8 +702,9 @@ pub fn render_plan(plan: &ScanPlan, facts: &HostFacts, no_color: bool) -> String
             "  fidelity",
             plan.transport.fidelity.to_string(),
             match (&plan.transport.kind, plan.transport.fidelity) {
+                (TransportKind::Http { .. }, _) => "inherent to HTTP CONNECT",
                 (_, Fidelity::Unknown) => "not measured",
-                (TransportKind::Chain { .. }, _) => "weakest hop",
+                (TransportKind::Chain { .. }, _) => "exit hop",
                 (TransportKind::Pool { .. }, _) => "weakest member",
                 _ => "declared in config",
             },
