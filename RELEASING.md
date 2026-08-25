@@ -1,35 +1,17 @@
 # Releasing
 
-Distribution is prebuilt static binaries attached to a GitHub release. The crate is
-marked `publish = false` and is not pushed to crates.io; remove that line if that ever
-changes.
-
-> `ci.yml` has gated every commit on `main` and is proven. `release.yml`'s build matrix
-> has run green via `workflow_dispatch`, covering compilation, the dirty-tree check,
-> packaging and artifact upload. Two things only a real tag can reach — the `publish` job
-> and the tag-versus-`--version` comparison — were first exercised by v0.1.0.
+Distribution is prebuilt static binaries on a GitHub release. `publish = false`: not on
+crates.io. GitHub (`origin`) is canonical; the forgejo remote is a mirror.
 
 ## Checklist
 
-1. **Move the changelog section.** `CHANGELOG.md` accumulates under `## [Unreleased]`.
-   Rename that heading to `## [X.Y.Z] - YYYY-MM-DD`, **and add a fresh `## [Unreleased]`
-   heading above it.**
-
-   The fresh heading is not cosmetic. Without it the next commit's changelog entry has no
-   correct home and lands under the version you just shipped — which happened twice, and
-   both times meant a release whose notes described work it did not contain.
-
-2. **Bump `version` in `Cargo.toml`** and run `cargo build` so `Cargo.lock` updates.
-
-   The release workflow refuses to publish if the tag does not match what the binary
-   reports, so a forgotten bump fails the build rather than shipping a mislabelled
-   artifact.
-
-3. **Commit with a clean tree.** `build.rs` stamps the commit into every scan record and
-   marks a dirty tree with a `-dirty` suffix. The release workflow refuses to publish a
-   binary that advertises `dirty`, because a record that cannot be traced to a commit
-   defeats the point of the record.
-
+1. **Changelog.** Rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` and add a fresh
+   `## [Unreleased]` above it. Without the fresh heading the next entry lands under the
+   version just shipped; that has happened twice.
+2. **Bump `version` in `Cargo.toml`**, then `cargo build` so `Cargo.lock` follows. The
+   release workflow refuses a tag that does not match `--version`.
+3. **Commit with a clean tree.** `build.rs` stamps the commit into every record and marks
+   a dirty tree `-dirty`; the workflow refuses a dirty binary.
 4. **Verify locally.**
 
    ```console
@@ -38,43 +20,39 @@ changes.
    cargo test
    cargo deny check
    cargo build --release --target x86_64-unknown-linux-musl
-   ldd target/x86_64-unknown-linux-musl/release/scanr   # "not a dynamic executable"
+   readelf -d target/x86_64-unknown-linux-musl/release/scanr | grep -c NEEDED   # 0
    ```
 
 5. **Tag and push.**
 
    ```console
    git tag -a vX.Y.Z -m "vX.Y.Z"
-   git push origin master --follow-tags
+   git push origin main --follow-tags
    ```
 
-6. **Check the release.** Both archives present with `.sha256` files, notes populated
-   from the changelog, and `scanr --version` inside the archive reporting the tag.
+6. **Check the release:** both archives with `.sha256` files, notes from the changelog,
+   `scanr --version` inside the archive reporting the tag.
 
-## What the workflows do
+## Workflows
 
-`ci.yml` runs on every push and pull request: formatting, clippy with warnings as
-errors, tests on both glibc and static musl, an MSRV job pinned to the `rust-version` in
-`Cargo.toml`, `cargo install` from a clean checkout, `cargo deny`, and a replay of the
-committed fuzz seeds.
+`ci.yml` on every push and PR: fmt, clippy `-D warnings`, tests on gnu and musl, the musl
+binary checked for 0 `NEEDED` entries, macOS build and test, the nmap differential, an 85 %
+region-coverage floor, MSRV (`rust-version` in `Cargo.toml`), `cargo install` from a clean
+checkout, `cargo deny`, and a replay of `fuzz/seeds/`.
 
-The fuzz job replays `fuzz/seeds/` only — it is a regression check, not a fuzzing run.
-It pins the two crashes fuzzing has already found. Real fuzzing is a manual activity:
+The fuzz job replays committed seeds only. Fuzzing itself is manual:
 
 ```console
 cargo +nightly fuzz run specs -- -max_total_time=600
 ```
 
-`release.yml` runs on a `v*` tag: builds both targets, verifies the tag matches the
-binary and that the tree was clean, packages each with the README, changelog, both
-licences and shell completions, generates SHA-256 sums, and attaches everything to the
-release.
+`release.yml` on a `v*` tag: builds both targets, checks tag versus `--version` and a
+clean tree, packages README, changelog, licences and completions, writes SHA-256 sums,
+attaches everything to the release. Only the `publish` job has `contents: write`.
 
-Both need `fetch-depth: 0`, because `build.rs` reads git history.
+Both need `fetch-depth: 0`: `build.rs` reads git history.
 
 ## Versioning
 
-`scanr` is at `0.x` deliberately. The JSONL record is additive-stable within
-`schema_version 1`, but that is not yet hardened into a semver `1.0` commitment — see the
-note at the top of `CHANGELOG.md`. `1.0.0` is reserved until an external consumer has
-parsed a record and said what the format is missing.
+See `CHANGELOG.md` "About the version number" and `ROADMAP.md`. Pre-1.0: a
+`schema_version` bump is a minor. From 1.0: a major.

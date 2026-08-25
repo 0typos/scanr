@@ -1,141 +1,126 @@
 # Architecture
 
-Single crate (D17). Modules, not workspace members.
+Single crate (D17), blocking sockets on a bounded thread pool (D1), no async runtime.
+
+## Modules
 
 ```
 src/
-  main.rs            entry point, exit-code mapping
-  cli/               clap definitions, override allowlist
-  config/            TOML types, discovery, merge, validation, provenance
-  plan/              ScanPlan, expansion, permutation, projections
-    permute.rs       seeded Feistel index permutation
+  main.rs           entry point, exit-code mapping
+  lib.rs            module list; the library surface is explicitly unsupported
+  cli.rs            clap tree, override allowlist, signal setup, dispatch
+  cancel.rs         cooperative cancellation flag (handler → workers and writer)
+  config/
+    mod.rs          discovery, loading, per-key merge, validation
+    raw.rs          deserialized TOML shapes; layered lookup with provenance
+    builtin.rs      built-in profiles; the annotated `config init` template
+    error.rs        caret-annotated errors; redacts credential lines
+  plan/
+    types.rs        ScanPlan (immutable, with provenance), Fidelity, Timing, Banner, TransportKind
+    resolve.rs      config + CLI overrides → ScanPlan; plan warnings
+    permute.rs      seeded Feistel permutation (D16)
   net/
-    target.rs        target spec parsing (IP, CIDR, range, hostname, file, stdin)
-    ports.rs         port spec parsing
-    dns.rs           resolution modes
+    target.rs       target spec parsing and expansion: IP, CIDR, range, hostname, file, stdin, pairs
+    ports.rs        port spec parsing
   transport/
-    mod.rs           Transport trait, Fidelity
-    direct.rs
-    socks5.rs        RFC 1928 / 1929, written directly
-  sched/             thread pool, rate limiter, cancellation
-  probe.rs           ProbeOutcome, classification
+    mod.rs          Transport trait, Destination, build(), read_banner, linger close (D9)
+    direct.rs       TcpStream::connect_timeout
+    socks5.rs       RFC 1928/1929; a chain is the general case, one hop the degenerate one (D33)
+    pool.rs         deterministic member assignment by FNV-1a (D33)
+  fidelity.rs       `transport test`: fidelity measurement and --calibrate (D8, D25)
+  sched.rs          worker pool, token-bucket rate limiter
+  probe.rs          ProbeOutcome, State, Source, OS-error classification
+  run.rs            execute(): workers, collection, record lifecycle, terminal events
   output/
-    jsonl.rs         writer thread, sequencing, durability
-    human.rs         streaming stdout, TTY detection
-  diag/              error model, sysctl inspection, remediation text
-tests/
-  fixtures/          in-process TCP + SOCKS5 servers
+    jsonl.rs        record writer: sequencing, flush policy, gzip frames, .partial rename
+    span.rs         span accumulation (D30)
+    human.rs        stdout/stderr rendering, colour, width-aware padding (D22)
+  verify.rs         readers: output events / results / summarize / verify / remainder
+  services.rs       layered service labels (D31)
+  diag.rs           host facts (sysctl, rlimit), pressure classification, WARNING_CODES
+  units.rs          duration parsing and rendering
+  timefmt.rs        RFC 3339 from epoch
+  testsupport/      in-process TCP and SOCKS5 fixtures; feature `testsupport`
+tests/              integration, cli_spec, spec_conformance, man_pages, differential (nmap; CI only)
+fuzz/               five libFuzzer targets and committed seeds, replayed in CI
 ```
 
 ## Data flow
 
 ```
-config discovery → merge → validate → ScanPlan (immutable, with provenance)
+config discovery → merge → validate → ScanPlan (immutable, provenance)
                                           │
-                            ┌─────────────┴─────────────┐
-                            │                           │
-                    permutation over N            writer thread
-                            │                     (bounded channel)
-                    worker pool (N = concurrency)       │
-                            │                    ┌──────┴──────┐
-                       Transport::probe       stdout        JSONL
+                        permutation over N probes
+                                          │
+                        worker pool (N = concurrency) → Transport::probe
+                                          │  bounded channel
+                        main thread: collect → stdout + JSONL record
 ```
 
 ## Transport
 
-The payoff of blocking I/O — no async trait, no pinning, no lifetimes:
-
 ```rust
 pub trait Transport: Send + Sync {
-    fn probe(&self, dest: &Destination, t: &Timeouts, cancel: &Cancel) -> ProbeOutcome;
+    fn probe(&self, dest: &Destination, timing: &Timing) -> ProbeOutcome;
     fn supports_remote_dns(&self) -> bool;
-    fn declared_fidelity(&self) -> Fidelity;
+    fn name(&self) -> &str;
+    fn type_name(&self) -> &'static str;
+    fn fidelity(&self) -> Fidelity;
 }
 ```
 
-`Destination` is either a resolved `SocketAddr` or a `(hostname, port)` pair — the
-latter only permitted when `supports_remote_dns()`.
-
-`Fidelity` records which of `open`/`closed`/`filtered` this transport can actually
-distinguish. `direct` is `Full`. SOCKS5 is `Unknown` until measured by
-`scanr transport test` (D8), then `Full` or `OpenOnly`.
+`Destination` is a `SocketAddr` or a `(hostname, port)`; the latter only when
+`supports_remote_dns()`. `Fidelity` is `Full` / `OpenOnly` / `Unknown`; `direct` is
+`Full`, SOCKS5 is whatever `transport test` measured and the config declares, a chain is
+its weakest hop, a pool reports per member via `via`.
 
 ## Scheduler
 
-Fixed pool of `min(concurrency, total_probes)` threads, 64 KiB stacks, spawned once.
-Each worker loops: check cancellation → take next index via `fetch_add` → map through
-the permutation → acquire a rate-limiter token → probe → send outcome.
-
-- **Concurrency** is the pool size. No semaphore, no queue.
-- **Rate limiting** is a token bucket behind a `Mutex`. At ≤5k threads and ms-scale
-  probes, acquisition rate stays in the low thousands/sec — uncontended in practice.
-- **Backpressure** is structural: workers block on the bounded writer channel.
-- **Fairness** is provided by the permutation (D16), which interleaves hosts and ports
-  by construction.
+`min(concurrency, probes)` threads, 64 KiB stacks, spawned once. Each worker: check
+cancel → `fetch_add` the next counter index → permute → take a rate token → probe → send.
+No queue; concurrency is the thread count. Backpressure is the bounded channel. Fairness
+is the permutation.
 
 ## Cancellation
 
-`AtomicBool` checked before each probe begins. In-flight probes are bounded by their
-own socket timeouts. First SIGINT: stop scheduling, drain bounded by
-`min(connect_timeout, 2s)`, write `scan_interrupted`, exit 130. Second SIGINT: flush
-what is buffered and exit immediately.
+`AtomicBool` checked before each probe; in-flight probes end on their own timeouts. First
+SIGINT: stop scheduling, drain, write `scan_interrupted`, exit 130. Second: exit
+immediately, record still finalised. The handler only touches atomics.
 
-Signal handling uses a flag set from the handler and polled by the main thread — no
-allocation, no locks, no async-signal-unsafe calls in the handler.
+## Writer
 
-## Output writer
+The main thread is the writer. Sequence numbers are assigned on write, so `seq` is write
+order, not probe order. Lifecycle events flush immediately; everything else every 250 ms.
+gzip is framed: a member per 256 KiB or per critical flush. No `fsync`: the guarantee is
+"survives process death", not power loss. Any writer failure on any event type sets the
+terminal event to `scan_failed` and exits 3. `.jsonl.partial` is renamed on the terminal
+event; a file still `.partial` means the process died.
 
-Dedicated thread, `mpsc::sync_channel(4096)`, `BufWriter`. Sequence numbers assigned by
-the writer, guaranteeing monotonicity regardless of worker completion order.
+## Errors
 
-Results are inherently unordered — randomized probe order plus N concurrent workers.
-`seq` therefore means *write order*, not probe order; each record carries its own
-timestamps and probe index.
-
-Flush policy: immediate `flush()` on lifecycle events (`scan_started`, `scan_config`,
-all terminal events) and every 250 ms otherwise. No `fsync` per record — the durability
-guarantee is "survives process death", not "survives power loss". Writer failure
-(including `ENOSPC`) aborts the scan with exit code 3, after one attempt to write
-`scan_failed`.
-
-File is `<name>.jsonl.partial` during execution, renamed to `<name>.jsonl` once a
-terminal event is persisted. Interrupted-but-finalized scans **are** renamed — the
-terminal event distinguishes them; `.partial` means "process died without finalizing".
-
-## Error model
-
-Two layers. `ProbeOutcome` is per-probe and never fatal. `ScanError` is fatal and maps
-to an exit code. Both carry an operational cause, not an errno — `EADDRNOTAVAIL`
-renders as ephemeral-port exhaustion with the sysctl remediation (D9),
-`ECONNREFUSED` to the proxy renders as "proxy not listening", SOCKS reply `0x02` as
-"denied by proxy policy".
-
-`thiserror` for definitions. No `miette` — the value it adds is span-annotated config
-errors, and `toml`'s `Error::span()` plus ~100 lines of caret rendering covers that
-without the tree.
+`ProbeOutcome` is per probe and never fatal. `ScanError` is fatal and maps to an exit
+code. Both carry an operational cause: `EADDRNOTAVAIL` → ephemeral-port exhaustion with
+the sysctl remediation, `ECONNREFUSED` to the proxy → "proxy not listening", reply `0x02`
+→ "denied by proxy policy".
 
 ## Dependencies
 
-| Crate | Need | Why not std |
+| crate | need | why not std |
 |---|---|---|
-| `clap` (derive) | Subcommand tree, help, completions | Hand-rolling a 6-group tree with completions is real work for no gain |
-| `serde` + `toml` | Config deserialization with spans | Writing a TOML parser is a liability for a config-first tool |
-| `serde_json` | JSONL emission | Correct escaping matters; hand-rolling is a bug source |
-| `socket2` | `SO_LINGER` (D9), socket setup | `TcpStream::set_linger` unstable (rust#88494) |
-| `thiserror` | Error definitions | Boilerplate only |
-| `libc` | `sysctl` reads, `signal`, `rlimit` | No std equivalent |
+| `clap` + `clap_complete` | 15-command tree, help, completions | real work for no gain |
+| `serde` + `toml` | config with byte spans | a TOML parser is a liability |
+| `serde_json` | JSONL | escaping |
+| `socket2` | `SO_LINGER` | `set_linger` unstable (rust#88494) |
+| `flate2` (`rust_backend`) | gzip frames | pure Rust keeps musl static |
+| `thiserror` | error definitions | boilerplate |
+| `libc` | sysctl, rlimit, signal, getrandom | no std equivalent |
 
-**Written directly:** SOCKS5 (D5), the Feistel permutation (D16), CIDR/range parsing,
-duration parsing, the token bucket, the caret-renderer for config errors.
-
-**Rejected:** `miette` (tree cost exceeds value), `tokio` (D1), `mio` (D2), any SOCKS
-crate (D5), `tracing`/`log` (stderr diagnostics are structured by the diag module),
-`uuid`/`ulid` (scan ID is epoch-ms plus 32 random bits from `getrandom`, sortable and
-collision-safe enough for one host), `chrono`/`time` (RFC 3339 formatting from epoch is
-~40 lines and we need no parsing or timezone handling).
+Written directly: SOCKS5, the permutation, CIDR/range/port/duration parsing, the token
+bucket, caret rendering, RFC 3339. Rejected: `miette`, `tokio`, `mio`, any SOCKS crate,
+`tracing`/`log`, `uuid`/`ulid`, `chrono`/`time`.
 
 ## Platform boundaries
 
-Linux-only assumptions are confined to `diag/` (sysctl and rlimit inspection) and the
-signal setup in `main.rs`. Everything else is portable `std` — which is what makes the
-deferred Windows/macOS work tractable later without an abstraction layer now.
+Linux-only assumptions are confined to `diag.rs` (sysctl and rlimit) and the signal setup
+in `cli.rs`. `unsafe` is denied crate-wide; the five allowed blocks are listed in
+`../security.md` and checked by a test.
