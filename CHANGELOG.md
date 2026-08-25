@@ -14,6 +14,8 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-25
+
 ### Changed
 
 - `schema_version` is `2`: `probe_span` ranges are counter indices, not matrix positions, so
