@@ -1,10 +1,6 @@
 # Command reference
 
-Every command and every command-line flag. `scanr <command> --help` has the detail; this
-page is the whole surface on one screen, and a test checks it against the binary so it
-cannot quietly fall behind.
-
-For what the commands *do*, start with [getting-started.md](getting-started.md).
+Checked against the binary by `tests/cli_spec.rs`. Workflows: [getting-started.md](getting-started.md).
 
 ## Commands
 
@@ -27,35 +23,26 @@ output results
 completion
 ```
 
-As a tree:
-
-```
-scanr
-├── run <scan>                 execute a named scan
-├── plan <scan>                resolve and print the plan; touches no network
-├── config
-│   ├── init                   write an annotated scanr.toml
-│   ├── show                   resolved config, credentials redacted
-│   ├── validate               check without running
-│   └── path                   which files were discovered
-├── transport
-│   ├── list
-│   ├── show <name>
-│   └── test <name>            measure proxy reachability and result fidelity
-├── output
-│   ├── summarize <file>       totals, and counts by host, network, service
-│   ├── verify <file>          integrity and completeness checks
-│   ├── remainder <file>       endpoints that were never probed
-│   ├── events <file>          the raw JSONL event stream, verbatim
-│   └── results <file>         every probe result, filterable
-└── completion <shell>
-```
+| | |
+|---|---|
+| `run [scan]` | execute; no name means an ad-hoc scan from flags |
+| `plan [scan]` | resolve and print the plan; no network |
+| `config init [path]` | write an annotated `scanr.toml` |
+| `config show` | resolved config, credentials redacted |
+| `config validate` | check without running |
+| `config path` | files discovered |
+| `transport list` / `show <name>` | defined transports / one transport's resolved settings |
+| `transport test <name>` | measure proxy reachability and result fidelity |
+| `output summarize <file>` | totals; counts by host, network, port, service |
+| `output verify <file>` | integrity and completeness |
+| `output remainder <file>` | endpoints never probed, as `--pairs` input |
+| `output events <file>` | raw JSONL event stream, verbatim |
+| `output results <file>` | every probe result, filterable |
+| `completion <shell>` | `bash` `zsh` `fish` `elvish` `power-shell` |
 
 ## Flags
 
-These are the only settings that can be given on the command line. Everything else lives
-in the config file, which is what makes a run reproducible from a file rather than from
-your shell history.
+The only command-line settings; all else is config, so a run is reproducible from a file.
 
 <!-- RUN FLAGS: checked against the clap definition by tests/cli_spec.rs -->
 ```
@@ -74,48 +61,26 @@ your shell history.
 --no-color                  --allow-large-range
 ```
 
-A few that are not self-explanatory:
-
-- `--seed` replays a randomized scan exactly. Probe order is randomized by default; the
-  seed is recorded, so passing it back reproduces the same order.
-- `--pairs` takes exact `host:port` endpoints instead of a target × port matrix. This is
-  what makes `scanr output remainder … | scanr run --pairs -` resume without re-probing
-  anything that already finished.
-- `--banner` / `--no-banner` controls reading what open services volunteer on connect,
-  **without sending anything**. On by default. Only services that greet first say anything — SSH, SMTP, FTP, POP3,
-  IMAP, MySQL — so an empty banner means "said nothing unprompted", not "nothing there".
-  HTTP and anything behind TLS greet nobody.
-
-  `banner_timeout` (default 500ms) is the *ceiling*, not the wait. A greeting arrives
-  about one round trip after connect, so the actual wait scales off this host's measured
-  connect time and only approaches the ceiling on genuinely slow paths. That matters:
-  concurrency is the worker-thread count with no queue, so a worker waiting on a silent
-  port is a worker issuing no probes.
-- `--resumed-from` records which scan is being continued. You rarely type it: `remainder`
-  emits it as a `# resumed-from:` comment and `run` picks it up from the pipe.
+- `--seed`: replay a randomized scan; order is randomized by default and the seed recorded.
+- `--pairs`: exact `host:port` endpoints, not target × port. `output remainder … | run --pairs -` resumes without re-probing.
+- `--resumed-from`: scan being continued. `remainder` emits `# resumed-from:`; `run` reads it from the pipe.
+- `--banner` (default on): read what an open service volunteers, sending nothing. Only SSH, SMTP, FTP, POP3, IMAP, MySQL greet first; HTTP and TLS do not, so empty means "said nothing unprompted". `banner_timeout` (500ms) is a ceiling; the wait scales off measured connect time. A worker waiting on a silent port issues no probes.
 
 ### Flags on the other commands
 
-The block above is the scan-override allowlist — the settings that change *how a scan
-runs*, and the reason a run is reproducible from a file. Everything below describes what a
-command should print or measure, so none of it belongs in that allowlist.
+These change what a command prints or measures, not how a scan runs.
 
 <!-- OTHER FLAGS: checked against the clap definition by tests/cli_spec.rs -->
 | command | flags |
 |---|---|
 | `config init` | `--force` overwrite an existing `scanr.toml` |
-| `transport test` | `--known-open`, `--known-closed` name endpoints with a known state to measure against; `--calibrate` finds the proxy's connection cap |
-| `output summarize` | `--by <section>` narrows to one of `totals`, `host`, `network`, `port`, `service`; `--json` emits the aggregates as one object |
-| `output results` | `--hosts`, `--ports`, `--states` filter; `--format` picks the shape (see below) |
+| `transport test` | `--known-open`, `--known-closed` endpoints of known state to measure against; `--calibrate` finds the proxy's connection cap |
+| `output summarize` | `--by <section>`: `scan`, `host`, `network`, `port`, `service`; `--json` aggregates as one object |
+| `output results` | `--hosts`, `--ports`, `--states` filter; `--format` (below) |
 
-`plan`, `config show`, `config validate`, `config path`, `transport list`,
-`transport show`, `output verify`, `output remainder`, `output events` and `completion`
-take no flags of their own beyond the globals.
+All other commands take only the globals.
 
 ## Handing results to another tool
-
-`scanr` is good at finding open ports quickly through a proxy. `nmap -sV` is good at
-saying what is behind them. `output results --format` hands one to the other:
 
 ```console
 $ scanr output results --states open --format nmap scan-*.jsonl.gz
@@ -132,53 +97,33 @@ $ scanr output results --states open --format list scan-*.jsonl.gz | httpx
 | `table` | reading (default) |
 | `json` | one JSON object per result |
 | `nmap` | runnable `nmap -sV` commands, one per distinct set of open ports |
-| `list` | `host:port` per line — what `httpx`, `tlsx` and `nuclei` read from stdin |
+| `list` | `host:port` per line, for `httpx`, `tlsx`, `nuclei` |
 
-The `nmap` form groups hosts by the exact ports found open on them, so no host is handed
-a port that was never open on it, and `-Pn -n` stop nmap repeating the liveness and DNS
-work `scanr` already did. Pointing nmap at the fraction of endpoints that answered is far
-faster than letting it scan everything, and it keeps nmap's signature database rather
-than reimplementing it badly.
-
-Filter to `--states open` — the other states are rarely what you want to hand on, and
-`scanr` will say so on stderr if you forget.
+`nmap` groups hosts by exact open-port set; `-Pn -n` skip repeated liveness and DNS work.
+Use `--states open`; stderr warns otherwise.
 
 ## stdout and stderr
 
-**stdout is results only**, one per line, safe to pipe:
+stdout: results only — `target:port/proto`, state, service label, elapsed. Hostname
+targets show the hostname; `-v` appends the resolved address.
 
 ```
 10.20.30.40:22/tcp    open   ssh      18.2ms
 10.20.30.40:443/tcp   open   https    21.4ms
 ```
 
-Columns are `target:port/proto`, state, service label, elapsed. Hostname targets show the
-hostname; `-v` appends the resolved address. The transport name and scan ID are not on
-these lines — they are the same for every row and belong in the header.
+stderr: header (transport, scan ID), progress, warnings, errors.
 
-**stderr is everything else**: the header, progress, warnings, errors.
-
-Alignment and colour appear only when the stream is a terminal. Redirect either one and
-you get plain, unaligned text; `--no-color` and `NO_COLOR` turn colour off explicitly.
+Colour, alignment and the progress line only on a terminal; `--no-color` or `NO_COLOR`
+disables colour. Never prompts: a missing credential is an error naming its environment
+variable.
 
 ## Exit codes
 
 | code | meaning |
 |---|---|
-| 0 | completed naturally, including when nothing was open |
-| 1 | usage or configuration error; nothing was scanned |
-| 2 | the scan failed after starting; for `output verify`, the record has problems |
-| 3 | the record could not be written |
-| 130 | interrupted by SIGINT; the record was finalized |
-
-Finding no open ports is a successful scan, not an error.
-
-`output verify` distinguishes the two ways it can fail to say "ok": `1` means it could
-not read the record, `2` means it read it and found problems. A caller that treats any
-non-zero as "bad record" would otherwise report a mistyped path as corruption.
-
-## Non-interactive by default
-
-No terminal means no colour, no alignment, no progress line, and no prompts. Nothing ever
-waits for input: a missing credential is an error naming the environment variable it
-wanted, never a password prompt.
+| 0 | completed naturally, including nothing open |
+| 1 | usage or configuration error; nothing scanned. `output verify`: record unreadable |
+| 2 | scan failed after starting. `output verify`: record read, has problems |
+| 3 | record could not be written |
+| 130 | SIGINT; record finalized |

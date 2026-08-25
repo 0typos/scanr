@@ -1,104 +1,60 @@
 # Scan record schema
 
-Reference for the JSONL file every run produces. This is the normative description of the
-format — tests check the running code against this page, so what it says is what you get.
+Normative reference for the JSONL record every run writes; tests check the binary against it.
 
 ## Stability
 
-`schema_version` is `2`, and within it the format is **additive-stable**. Concretely,
-what will not change without a version bump:
+Within a major version of scanr the record is additive-stable: new optional fields and new
+event types may appear; existing fields keep their type and meaning and are not removed;
+`state` and `source` are closed sets. Consumers dispatch on `type`, ignore unknown types
+and fields, and read totals from the terminal event's `counts`. Widening a closed set or
+changing any existing field's meaning bumps `schema_version`, and a `schema_version` bump
+is a major version of scanr. This build writes version 2 and reads 1 and 2.
 
-- an existing field will not change type or meaning
-- an existing field will not be removed
-- an event type that exists will not be renamed
-
-And what may change within version 2:
-
-- **new optional fields** may appear on any event
-- **new event types** may appear
-- **new values** may appear in the open-ended enumerations listed below
-
-So a consumer must dispatch on `type` and ignore both unknown fields and unknown event
-types. It must **not** assume any one event type accounts for every probe — `probe_span`
-already breaks that assumption, and it is on by default.
-
-### Which enumerations are closed
-
-A field carrying one of a fixed set of strings is only safe to match exhaustively if that
-set is closed. These are:
-
-| field | set | may gain values? |
+| field | set | closed |
 |---|---|---|
-| `state` | `open`, `closed`, `filtered`, `error` | **no** — closed within a version |
-| `source` | `local_stack`, `proxy_reply`, `timeout`, `internal` | **no** — closed within a version |
-| `transport.type` | `direct`, `socks5`, `chain`, `pool` | yes — a new transport type adds one |
-| `fidelity` / `measured_fidelity` | `full`, `open_only`, `unknown` | yes |
-| `fidelity_source` | how fidelity was determined | yes |
-| `scan_warning.code` | see [`scan_warning`](#scan_warning) | yes — new diagnostics are added routinely |
-| terminal `error_code` | see the terminal events | yes |
+| `state` | `open`, `closed`, `filtered`, `error` | yes |
+| `source` | `local_stack`, `proxy_reply`, `timeout`, `internal` | yes |
+| `transport.type` | `direct`, `socks5`, `chain`, `pool` | no |
+| `fidelity`, `measured_fidelity` | `full`, `open_only`, `unknown` | no |
+| `fidelity_source` | [Fidelity](#fidelity) | no |
+| `scan_warning.code` | [`scan_warning`](#scan_warning) | no |
+| terminal `error_code` | [Terminal event](#terminal-event) | no |
 
-`state` and `source` are the two a consumer is most likely to `match` on exhaustively, and
-they are the two that will not move. Everything else needs a default branch: a reader that
-rejects an unrecognised `scan_warning.code` will break the first time a new diagnostic
-ships, which is a normal within-version change and not a schema break.
-
-Widening a closed set is a version bump. `chain` and `pool` joining `transport.type` was
-not, which is exactly the distinction this table exists to make.
-
-**The terminal event's `counts` are the authority on totals**, not the number of lines of
-any given type. `scanr output verify` reconciles the two and fails if they disagree, so
-if you need "how many probes were there", read `counts`.
-
-This is a wider promise than the one this document made before spans existed, which
-covered only new *fields*. That wording would have let a consumer count `probe_result`
-lines and believe it had them all.
-
-`scanr` itself is `0.x` — see the note in `CHANGELOG.md`. Schema feedback is explicitly
-wanted before `1.0` hardens this into a semver commitment.
-
-### Version history
+Open sets need a default branch. Never total by counting lines of one type:
+`probe_span` (default on) collapses probes, and `scanr output verify` fails a record
+whose `counts` disagree with its lines.
 
 | version | change |
 |---|---|
-| 2 | `probe_span.probe_indices` moved from matrix order to counter order (see [Spans](#spans)) |
+| 2 | `probe_span.probe_indices` in counter space; version 1 used matrix space — see [`probe_span`](#probe_span) |
 | 1 | initial |
 
-Writing moves forward; **reading does not drop support**. This build writes version 2 and
-reads 1 and 2, because a record is an archive and the tool that wrote it may be long gone.
-A reader that meets a version it does not know must refuse rather than guess — a version 1
-reader handed a version 2 record would expand every span to the wrong endpoints, including
-ones already reported open, and nothing in the file would look malformed. `scanr output
-verify` names the versions the build accepts when it refuses.
+Reading never drops a version. An unknown version is refused, not guessed (a version 1
+reader given version 2 spans expands them to wrong endpoints with nothing looking
+malformed); `verify` names the accepted versions.
 
 ## File
 
 ```
 scanr-results/scan-<epoch_ms>-<scan_id>.jsonl.gz     # default
-scanr-results/scan-<epoch_ms>-<scan_id>.jsonl        # with --no-compress
+scanr-results/scan-<epoch_ms>-<scan_id>.jsonl        # --no-compress
 ```
 
-Records are gzip by default. It is written as concatenated gzip **members**, so `zcat`,
-`zless` and `gzip -d` read it normally and a killed scan still decodes up to its last
-completed frame. Every `scanr output` command reads either form without being told which.
-
-`.partial` is appended while running and dropped once a terminal event is written. **A
-file still named `.partial` means the process died without finalizing** — the results in
-it are valid but incomplete.
-
-One JSON object per line, UTF-8, LF-terminated. Every line carries `type`, `seq`, `ts`
-(RFC 3339, ms) and `scan_id`.
-
-`seq` is monotonic in **write** order, which is not probe order: probes are randomized and
-complete concurrently.
+- gzip as concatenated members: `zcat`, `zless`, `gzip -d` work; a killed scan decodes
+  to its last frame. `scanr output` reads either form.
+- `.partial` suffix until the terminal event; if it remains, the process died — contents
+  valid, incomplete.
+- One object per line, UTF-8, LF. Every line: `type`, `seq`, `ts` (RFC 3339, ms), `scan_id`.
+- `seq` is write order, not probe order.
 
 ## Guaranteed structure
 
-`scanr output verify` checks all of this:
+Checked by `scanr output verify`:
 
 1. `scan_started` first, `scan_config` second.
-2. Exactly one terminal event (`scan_completed` / `scan_interrupted` / `scan_failed`),
-   last, with nothing after it.
-3. `seq` strictly increasing, one `scan_id` throughout.
+2. One terminal event (`scan_completed` / `scan_interrupted` / `scan_failed`), last.
+3. `seq` strictly increasing; one `scan_id`.
 4. `planned == completed + abandoned + not_started`.
 5. `completed == open + closed + filtered + error`.
 6. No unredacted credentials.
@@ -107,36 +63,26 @@ complete concurrently.
 
 | type | count | purpose |
 |---|---|---|
-| `scan_started` | 1, first | identity and build provenance |
-| `scan_config` | 1, second | fully resolved configuration |
+| `scan_started` | 1, first | identity, build provenance |
+| `scan_config` | 1, second | resolved configuration |
 | `target_resolved` | 0..n | only when local DNS ran |
-| `probe_result` | 1 per uncollapsed probe | the results |
-| `probe_span` | 0..n | many probes that shared one outcome |
+| `probe_result` | 1 per uncollapsed probe | results |
+| `probe_span` | 0..n | probes sharing one outcome |
 | `scan_progress` | 0..n | periodic counters |
 | `scan_warning` | 0..n | non-fatal conditions |
-| terminal | 1, last | outcome and counts |
+| `scan_completed` / `scan_interrupted` / `scan_failed` | 1, last | outcome, counts |
 
-There is no per-probe *start* event. At high concurrency it would double file size to
-record something derivable.
-
-Every event carries `type`, `seq`, `ts` (RFC 3339, millisecond precision) and `scan_id`.
-`seq` is assigned by the writer and is monotonic in **write** order, which is not probe
-order — probes are randomized and complete concurrently.
+No per-probe start event: derivable, and it would double file size.
 
 ### Dropped and why
 
-Three event types were specified at one point and deliberately do not exist, so a
-consumer written against an early draft is not waiting for them:
-
 | type | why not |
 |---|---|
-| `scan_plan` | folded into `scan_config`; two events describing the same immutable object invites divergence |
-| `scan_error` | non-fatal errors are `scan_warning`, fatal ones are the `scan_failed` terminal |
-| `scan_interrupt_requested` | `scan_interrupted` carries `requested_at`, which says the same thing without a second write during shutdown — exactly when writes are least reliable |
+| `scan_plan` | folded into `scan_config` |
+| `scan_error` | non-fatal is `scan_warning`, fatal is `scan_failed` |
+| `scan_interrupt_requested` | `scan_interrupted.requested_at`, with no write during shutdown |
 
 ## `probe_result`
-
-The one you will mostly consume.
 
 ```json
 {"type":"probe_result","seq":118,"ts":"2026-07-30T12:42:16.049Z","scan_id":"a3f19c02",
@@ -149,61 +95,46 @@ The one you will mostly consume.
 | field | notes |
 |---|---|
 | `state` | `open` · `closed` · `filtered` · `error` |
-| `source` | `local_stack` · `proxy_reply` · `timeout` · `internal` — **where the verdict came from** |
-| `reason` | free text when not open; `null` when open |
-| `resolved_address` | `null` for hostname targets under transport DNS |
-| `service_label` | a guess from the port number, **not a fingerprint**; `null` if unknown. Layered — see below |
-| `via` | which pool member produced this result; absent unless the transport was a pool |
-| `banner` | what the service volunteered, when `--banner` is on and it said anything. Absent otherwise |
-| `banner_hex` | the same bytes in hex, used instead of `banner` when they are not valid UTF-8 |
-| `banner_bytes` | how many bytes were read |
-| `attempts` | retries are merged into one row (timeouts only) |
-| `attempt_states` | per-attempt states, so the merge loses nothing |
-| `timing_ms` | `proxy_connect` and `handshake` absent on the direct path |
+| `source` | `local_stack` · `proxy_reply` · `timeout` · `internal`: where the verdict came from |
+| `reason` | free text; `null` when open |
+| `resolved_address` | `null` for hostnames under transport DNS |
+| `service_label` | port-number guess, not a fingerprint; `null` if unknown |
+| `via` | pool member; only under a pool |
+| `banner` | bytes volunteered; absent if none or `--banner` off |
+| `banner_hex` | replaces `banner` when not valid UTF-8 |
+| `banner_bytes` | bytes read |
+| `attempts` | timeout retries merged into one row |
+| `attempt_states` | per-attempt states |
+| `timing_ms` | `proxy_connect`, `handshake` absent on the direct path |
+
+- Read `source` before trusting a non-open `state`: a proxy that cannot separate refused
+  from filtered yields `error` / `proxy_reply`, never a fabricated verdict;
+  `scan_config.transport.measured_fidelity` says which applies.
+- Runs of identical `closed`/`filtered` outcomes collapse into `probe_span`; handle both
+  or use `--no-spans`. `open`, `error`, resource-pressure hits and disagreeing retries
+  never collapse.
 
 ### Banners
 
-Banners are read by default: what an open service volunteers on connect is recorded.
-**Nothing is sent** — the
-`scan_config` event records `banner.sent_bytes: 0` to say so — which is what keeps
-"scanr connected and listened" a true description of the scan.
-
-Only services that greet first say anything: SSH, SMTP, FTP, POP3, IMAP, MySQL, Telnet.
-HTTP does not, and neither does anything behind TLS. **An absent `banner` means the
-service said nothing unprompted, never that nothing is there.**
-
-The bytes are recorded as sent. Valid UTF-8 goes in `banner`, where JSON escaping renders
-control characters inertly (`\u001b`); anything else goes in `banner_hex`. Nothing is
-normalised away, because a record that quietly replaced bytes would be evidence of
-nothing.
-
-> **Do not print a banner straight to a terminal.** The bytes are chosen by the scanned
-> host, and a terminal acts on what it is given — `ESC [ 2J` clears the screen, `ESC ] 0 ;`
-> rewrites the window title. `scanr` renders banners as printable ASCII only, replacing
-> everything else with `.`; anything consuming the record should do the same.
-
-`timeout_ms` is the ceiling. The wait scales off each host's measured connect time — a
-greeting arrives about a round trip after the connection is established — so a fast host
-is not waited on for half a second. `scan_config.banner` records the settings the scan
-ran with:
+- Read by default; nothing is sent (`sent_bytes` is `0`).
+- Only greet-first services produce one (SSH, SMTP, FTP, POP3, IMAP, MySQL, Telnet); HTTP
+  and anything behind TLS do not. Absent means nothing volunteered, not nothing there.
+- Recorded as sent: UTF-8 in `banner` (control characters JSON-escaped, `\u001b`), else
+  `banner_hex`.
+- Never print raw to a terminal: `ESC [ 2J` clears the screen, `ESC ] 0 ;` rewrites the
+  title. `scanr` shows printable ASCII, `.` for the rest.
+- `timeout_ms` is a ceiling; the wait scales off the host's measured connect time.
 
 ```json
 {"banner": {"enabled": true, "sent_bytes": 0, "max_bytes": 1024, "timeout_ms": 500}}
 ```
 
-### Where `service_label` comes from
+### `service_label`
 
-Three layers, most specific first: a file named by `defaults.services_file`, then
-`/etc/services` if the host has one, then a compiled-in table of 59 well-known ports.
-The first layer with an answer wins, so a two-line custom file still inherits the rest.
-
-None of them is a fingerprint. Nothing connects to the service or reads a banner — the
-port answered, and a table says what usually sits on that number. Port 4444 is `krb524`
-to all three layers and is essentially never Kerberos. Key automation on `state`,
-`source` and `reason`, which are unaffected by any of this.
-
-Because `/etc/services` differs between machines, so can the labels. `scan_config`
-therefore records exactly which layers produced them:
+First answer wins: `defaults.services_file`, `/etc/services`, 59 builtin ports — see
+[configuration](configuration.md#service-labels). Port 4444 is `krb524` to all three;
+key automation on `state`, `source`, `reason`. `/etc/services` varies by host, so
+`scan_config.service_labels` records the layers:
 
 ```json
 {"service_labels": {
@@ -216,46 +147,21 @@ therefore records exactly which layers produced them:
 }}
 ```
 
-`entries` counts the tcp ports that layer was the first to claim, so the rows sum to the
-number of ports the table can answer for, with no port counted twice. Note what that
-means for the builtin row: it holds 59 ports but reports only those no file above it
-claimed, and a stock Linux `/etc/services` names 57 of them. A small number there is the
-normal case, not a sign that something is missing — it is the count of ports the builtin
-is still the answer for. `malformed`
-counts lines the parser gave up on; UDP and SCTP rows are skipped without being counted,
-since roughly half of a real `/etc/services` is UDP. A layer that contributed nothing is
-absent; `builtin` is always last and always present.
+- `entries`: tcp ports the layer claimed first; no port counted twice. `builtin` holds 59
+  but reports only those no file claimed (a stock Linux `/etc/services` names 57).
+- `malformed`: lines the parser gave up on. UDP/SCTP rows skipped, uncounted.
+- Empty layers are absent; `builtin` is always last and present.
+- `use_etc_services` is `false` only when config declined the host layer; a host without
+  `/etc/services` reports `true` with the layer absent.
 
-`use_etc_services` is `false` only when the config declined the host layer. A machine
-that simply has no `/etc/services` still reports `true`, and the layer's absence from
-the list says the rest — the two cases are otherwise indistinguishable.
+### Fidelity
 
-Two records that label a port differently can be reconciled from this field alone.
-
-`scan_config.transport.fidelity_source` says where the fidelity claim came from:
-`builtin` (direct, where the local stack separates states inherently), `config` (declared
-from a `transport test` measurement), `unmeasured`, `weakest_hop` (a chain, which can only
-claim what its least capable hop can) or `weakest_member` (a pool). A chain or pool whose
-underlying proxies were never measured reports `measured_fidelity: "unknown"` alongside
-the derived source, so "nothing was measured" is still visible.
-
-**Read `source` before trusting a non-open `state`.** Through a proxy that cannot
-distinguish refused from filtered, non-open results are `error` with
-`source: "proxy_reply"` rather than a fabricated verdict. `transport.measured_fidelity` in
-`scan_config` tells you which situation you are in.
-
-**By default, `probe_result` does not cover every probe.** Runs of identical
-`closed`/`filtered` outcomes are collapsed into `probe_span` events, so counting
-`probe_result` lines under-reports. Either handle both event types, or scan with
-`--no-spans` for one row per probe.
-
-`open` and `error` results are never collapsed, nor is anything that hit resource
-pressure or whose retry disagreed with its first attempt — so if you only care about
-what was found, `probe_result` is still the whole answer.
+`scan_config.transport.fidelity_source`: `builtin` (direct: the local stack separates
+states), `config` (declared from a `transport test` measurement), `unmeasured`,
+`weakest_hop` (chain), `weakest_member` (pool). Unmeasured chain or pool members give
+`measured_fidelity: "unknown"` beside the derived source.
 
 ## `probe_span`
-
-Stands for many probes that shared an outcome.
 
 ```json
 {"type":"probe_span","seq":41,"ts":"2026-07-31T12:42:16.049Z","scan_id":"a3f19c02",
@@ -264,10 +170,8 @@ Stands for many probes that shared an outcome.
  "timing_ms":{"min":300.1,"mean":300.4,"max":300.9}}
 ```
 
-`probe_indices` are inclusive, sorted, disjoint ranges of **counter indices** — the order
-in which probes were issued, not the position of the endpoint in the matrix. Expanding a
-span is two steps: run each counter index through the recorded permutation to get a
-`probe_index`, then map that to an endpoint.
+`probe_indices`: inclusive, sorted, disjoint ranges of counter indices (issue order).
+Expanding:
 
 ```
 probe_index = permute(counter_index, permutation.seed, probes_planned)
@@ -275,45 +179,48 @@ target      = targets[probe_index / ports.count]
 port        = ports[probe_index % ports.count]
 ```
 
-When `targets.mode` is `"pairs"` — which is what a resumed scan writes — only the last
-step changes; the permutation still applies:
+Under `targets.mode = "pairs"` (a resumed scan) the last step is instead:
 
 ```
-probe_index = permute(counter_index, permutation.seed, probes_planned)
 endpoint    = targets.pairs[probe_index]
 ```
 
-So **the permutation seed is required to expand a span**, and `scan_config` carries
-everything the two steps need. The permutation is the 4-round Feistel network named by
-`permutation.algorithm`; `scanr output results` and `scanr output remainder` do this for
-you, which is the easier path unless you are writing your own reader.
-
-Storing counter indices rather than matrix ones is what makes the collapse work. Probe
-order is randomised, so a drain window covers a scattered subset of the matrix and matrix-
-space ranges degenerate to roughly one per probe. Measured on a rate-limited 20,001-probe
-scan long enough to drain repeatedly: 10,023 ranges in matrix space against 595 in counter
-space, an 11× smaller record. This is the difference between schema 1 and 2 — version 1
-wrote matrix indices, and a reader expands those by skipping the permutation step.
-
-A collapsed probe still counts as `completed` in the terminal event, and
-`scanr output remainder` expands spans, so resuming works the same either way. What you
-lose is the per-probe `ts` and exact per-probe timing — the span keeps min/mean/max.
+- The seed is required; `scan_config` carries everything. The permutation is the 4-round
+  Feistel network named by `permutation.algorithm`. `output results` and `remainder`
+  expand for you.
+- Counter space is why the collapse works: order is randomised, so matrix-space ranges
+  degenerate to about one per probe. Measured on a rate-limited 20,001-probe scan that
+  drained repeatedly: 10,023 matrix-space ranges, 595 counter-space, 11× smaller.
+  Version 1 wrote matrix indices; expand those by skipping the permutation.
+- Collapsed probes count as `completed`; `remainder` expands them. Lost: per-probe `ts`
+  and exact timing (min/mean/max kept).
 
 ## `scan_warning`
 
-Non-fatal conditions, each with a stable `code`. Worth filtering on: several of them mean
-the results are less trustworthy than they look.
-
-Emitted before probing, from plan resolution:
+Stable `code`. Before probing, from plan resolution:
 
 | code | meaning |
 |---|---|
-| `dns_failure` | a hostname did not resolve and will not be probed |
-| `dns_mode_auto` | `auto` resolved to a specific mode; switching transports would change it |
-| `fidelity_unknown` | proxy fidelity has not been measured |
-| `fidelity_open_only` | the proxy cannot distinguish closed from filtered |
-| `ephemeral_budget` | configured rate exceeds the sustainable ephemeral-port ceiling |
+| `dns_failure` | hostname did not resolve; not probed |
+| `dns_mode_auto` | `auto` picked a mode; another transport would change it |
+| `fidelity_unknown` | proxy fidelity not measured |
+| `fidelity_open_only` | proxy cannot separate closed from filtered |
+| `ephemeral_budget` | rate exceeds the ephemeral-port ceiling |
 | `fd_budget` | concurrency exceeds `RLIMIT_NOFILE` |
+
+During the scan, at most once per code, with `detail.remediation`:
+
+| code | meaning |
+|---|---|
+| `ephemeral_pressure` | source ports ran out |
+| `fd_pressure` | descriptors ran out |
+| `proxy_saturation` | proxy stopped accepting connections |
+
+Just before the terminal event; a `scanr` bug, not the environment:
+
+| code | meaning |
+|---|---|
+| `worker_panic` | a worker died; its probes abandoned, results incomplete |
 
 ```json
 {"type":"scan_warning","seq":204,"ts":"2026-07-31T12:00:04.100Z","scan_id":"a3f19c02",
@@ -321,33 +228,13 @@ Emitted before probing, from plan resolution:
  "detail":{"remediation":"the local ephemeral port range (28232 ports) is exhausted"}}
 ```
 
-Emitted during the scan, at most once each, with `detail.remediation`. Rate-limited to
-one per code per scan, or a saturated host would emit one warning per failing probe:
-
-| code | meaning |
-|---|---|
-| `ephemeral_pressure` | source ports actually ran out mid-scan |
-| `fd_pressure` | descriptors actually ran out mid-scan |
-| `proxy_saturation` | the proxy stopped accepting connections |
-
-Emitted just before the terminal event, and unlike the rest a report of a `scanr` bug
-rather than an environmental condition:
-
-| code | meaning |
-|---|---|
-| `worker_panic` | a scan worker died; the probes it held were abandoned and the results are incomplete |
-
-The codes are owned by `diag::WARNING_CODES` and a test asserts this list matches it, so
-the two cannot drift. An earlier version listed `fidelity_degraded`, `dns_mode_changed`
-and `slow_writer`, none of which the code could ever emit — which is why the test now
-also checks the reverse direction.
+Codes are owned by `diag::WARNING_CODES`; a test checks this list against it both ways.
+`fidelity_open_only`, `proxy_saturation` or either `*_pressure` means some non-open
+results describe the scanning environment, not the target.
 
 ```console
 scanr output events scan-*.jsonl.gz | jq -r 'select(.type=="scan_warning") | "\(.code)\t\(.message)"'
 ```
-
-Seeing `fidelity_open_only`, `proxy_saturation`, or either `*_pressure` code means some
-non-open results describe the scanning environment rather than the target.
 
 ## Terminal event
 
@@ -359,26 +246,25 @@ non-open results describe the scanning environment rather than the target.
            "retried":0}}
 ```
 
-Three buckets, summing to `planned`:
+| bucket (sum = `planned`) | meaning |
+|---|---|
+| `completed` | reported a result |
+| `abandoned` | issued, interrupt ended the drain first; may have touched the network |
+| `not_started` | never issued |
 
-- `completed` — reported a result
-- `abandoned` — a worker picked it up but an interrupt ended the drain first, so it **may
-  have touched the network**; do not treat these as untried
-- `not_started` — never issued
+`scan_interrupted` adds `signal`, `requested_at`, `forced`; `scan_failed` adds `error`,
+`error_code` (currently `worker_panic`, `writer_failure`; open set — `worker_panic` wins when both
+occurred, and `counts.worker_panics` survives either way).
 
-`scan_interrupted` adds `signal`, `requested_at`, `forced`. `scan_failed` adds `error` and
-`error_code`.
+## `output summarize`
 
-## Reading a record without `jq`
-
-`output summarize` aggregates the whole record: totals, then counts per host, per
-network, and per service. With no `--by` you get every section, which is the right first
-look at a record you have not seen.
+Totals, then per host, network, port, service; spans expanded. Flags:
+[cli.md](cli.md#flags-on-the-other-commands).
 
 ```console
 $ scanr output summarize scan-*.jsonl.gz
   scan            internal-web
-  started         2026-08-01T09:14:02.117Z  (scanr 0.1.0)
+  started         2026-08-01T09:14:02.117Z  (scanr 0.3.0)
   transport       lab via socks5 (full)
   scope           3 targets x 3 ports = 9 probes
   seed            9f2c00a1b4de7731
@@ -409,36 +295,16 @@ by service (3 services):
   microsoft-ds          0      0        3      0  445
 ```
 
-`--by host`, `--by network`, `--by port`, `--by service` or `--by scan` narrows to one
-section. `--json` emits the same aggregates as one object, for anything that wants to
-compare two scans.
+- Every state counted; ports and services rank by open, then filtered.
+- Networks are fixed `/24` (IPv6 `/64`) buckets, not target specs, so records compare.
+- Unnarrowed view caps sections at 25 rows; `--by <section>` is full. Cost is hosts plus
+  ports, not probes.
+- Out-of-range ports go to a `note` line; a state outside the four is counted separately,
+  not as `error`.
 
-Every state is counted, not just `open` — which is the point. Port 445 above was never
-open on any host and is still reported, because "445 was filtered on every host" is
-usually the finding. Ports and services are ranked by open, then filtered, so what
-answered comes first.
+## `output results`
 
-Getting those counts means expanding spans, so `summarize` sees every probe even though
-most have no row of their own.
-
-Networks are fixed `/24` (IPv6 `/64`) buckets rather than your target specs: specs can
-overlap or nest, so there is no single network a host belongs to, and fixed buckets are
-what let two records be compared.
-
-The unnarrowed view caps each section at 25 rows and says what it left out — a /16 has
-65,536 hosts. `--by <section>` shows that section in full. Counting streams into
-counters, so a summary costs hosts plus ports rather than probes.
-
-Two things are reported rather than hidden. A result whose port the record states as out
-of range is counted in a `note` line and left out of the tables, instead of vanishing
-and leaving the totals unsupported. A state that is none of the four is counted
-separately rather than as `error`, so the tables cannot contradict the totals above
-them.
-
-## Looking up results
-
-`output results` filters the record, and — unlike `jq` over `probe_result` — it expands
-spans, so a collapsed `closed` is still findable:
+Filters with spans expanded, so a collapsed `closed` is findable:
 
 ```console
 $ scanr output results scan-*.jsonl.gz --states open
@@ -450,50 +316,32 @@ $ scanr output results scan-*.jsonl.gz --hosts 10.0.0.0/24 --ports 22,443 --stat
 $ scanr output results scan-*.jsonl.gz --states open --format json | jq -r .target
 ```
 
-| flag | accepts |
-|---|---|
-| `--hosts` | IPs, CIDR blocks, ranges, hostnames — the same forms as `--targets`, repeatable |
-| `--ports` | `80`, `1-1024`, lists — the same forms as `--ports` |
-| `--states` | `open`, `closed`, `filtered`, `error`, comma-separated |
-| `--format` | `table` (default), `json`, `nmap`, `list` — see [Handing results to another tool](cli.md#handing-results-to-another-tool) |
-
-Omit a flag and it matches everything. An unknown state is an error rather than a query
-that silently matches nothing.
-
-Host filters match **without expanding**, so `--hosts 10.0.0.0/8` costs nothing.
-
-States are coloured when stdout is a terminal — the same palette `run` uses, so `open`
-looks the same wherever you see it. Redirect or pipe the output and it is plain text;
-`--no-color` and `NO_COLOR` turn it off explicitly. Only `--format table` is ever
-coloured — `json`, `nmap` and `list` are not, and neither is `output events`: those are
-data, and an escape sequence in them would be a bug.
-
-Results reconstructed from a span carry `"collapsed": true` in JSON output and have no
-`timing_ms` — the span keeps only aggregate timing, and inventing a per-probe number
-would be worse than omitting it. The count goes to stderr, so stdout stays pipe-clean.
+`--hosts` takes `--targets` forms, repeatable, matched without expanding; `--ports` takes
+`--ports` forms; `--states` is a comma list of `open`, `closed`, `filtered`, `error`
+(unknown is an error); `--format` is `table` (default), `json`, `nmap`, `list` — see
+[cli.md](cli.md#handing-results-to-another-tool). Only `table` is coloured, only on a
+terminal (`--no-color`, `NO_COLOR` disable). Span-reconstructed results carry
+`"collapsed": true` in JSON and no `timing_ms`. The count goes to stderr.
 
 ## Recipes
 
-`scanr output events` writes the record as plain JSONL whichever format it is in, so these
-work unchanged on a compressed or uncompressed record and on any platform. `zcat -f`
-does the same on GNU systems, but its pass-through of uncompressed input is a GNU
-extension and macOS ships BSD gzip — hence the built-in.
+`scanr output events` emits plain JSONL from either form on any platform (`zcat -f`
+pass-through is a GNU extension).
 
-
-Open ports, as `host:port`:
+Open ports as `host:port`:
 
 ```console
 scanr output events scan-*.jsonl.gz | jq -r 'select(.type=="probe_result" and .state=="open") | "\(.target):\(.port)"'
 ```
 
-Only verdicts you can trust as `closed`:
+Trustworthy `closed`:
 
 ```console
 scanr output events scan-*.jsonl.gz | jq -r 'select(.type=="probe_result" and .state=="closed" and .source=="local_stack")
        | "\(.target):\(.port)"'
 ```
 
-Did it finish, and what settings produced it?
+Outcome and settings:
 
 ```console
 scanr output events scan-*.jsonl.gz | jq -r 'select(.counts)
@@ -501,7 +349,7 @@ scanr output events scan-*.jsonl.gz | jq -r 'select(.counts)
 scanr output events scan-*.jsonl.gz | jq -r 'select(.type=="scan_config") | .timing, .transport, .permutation'
 ```
 
-Diff two scans for ports that changed:
+Ports that changed:
 
 ```console
 for f in old.jsonl.gz new.jsonl.gz; do
@@ -511,7 +359,7 @@ done
 diff old.jsonl.gz.st new.jsonl.gz.st
 ```
 
-Which build produced this record:
+Producing build:
 
 ```console
 scanr output events scan-*.jsonl.gz | jq -r 'select(.type=="scan_started") | "\(.tool_version) \(.git_commit) \(.target_triple)"'
@@ -526,9 +374,8 @@ scanr output events scan-*.jsonl.gz | jq -r 'select(.type=="probe_result" and .s
 
 ## Reproducing a scan
 
-`scan_config` records the **canonical unexpanded** target spec plus counts, never the
-expanded matrix — a /16 × 1000 ports is 65M probes. With the recorded permutation seed
-that is enough to reproduce the scan exactly:
+`scan_config` records the unexpanded spec plus counts, never the matrix (a /16 × 1000
+ports is 65M probes); `provenance` records which layer supplied each value.
 
 ```console
 cfg() { scanr output events scan-*.jsonl.gz | jq -r "select(.type==\"scan_config\")|$1"; }
@@ -537,28 +384,17 @@ scanr run --targets "$(cfg '.targets.spec[]')" \
           --seed    "$(cfg '.permutation.seed')"
 ```
 
-`provenance` records which configuration layer supplied each value, so a record explains
-not just what ran but why.
-
 ## Resuming an interrupted scan
-
-`output remainder` emits the endpoints that were never reported, as exact `host:port`
-lines, which `run --pairs` consumes:
 
 ```console
 scanr output remainder scan-*.jsonl.gz | scanr run --pairs -
 ```
 
-This probes precisely what is outstanding — not whole targets — so a target whose first
-two ports completed resumes with only its remaining ports.
-
-`abandoned` probes are included in the remainder. They were issued to a worker but never
-reported, so whether they reached the network is unknown and re-probing is the safe
-choice.
-
-### The two records stay connected
-
-A resumed scan writes its own record, and that record names the one it continues:
+- `remainder` emits exactly the outstanding `host:port` endpoints, `abandoned` included.
+- Its `# resumed-from:` comment is provenance, not an endpoint; `--pairs` reads it,
+  `--resumed-from <scan-id>` overrides it, and `verify` prints `resumed from scan <id>`.
+- A pair scan records `targets.mode = "pairs"` and embeds its list; above 50,000 pairs
+  the list is omitted, `pairs_truncated` is set, and `remainder` refuses.
 
 ```console
 $ scanr output remainder scan-...-a7b012c0.jsonl | head -3
@@ -569,20 +405,3 @@ $ scanr output remainder scan-...-a7b012c0.jsonl | head -3
 $ jq -r 'select(.type=="scan_config") | .resumed_from' scan-...-441e1980.jsonl
 a7b012c0
 ```
-
-The link travels through the pipe on its own — the leading comment is provenance, not an
-endpoint, and `--pairs` reads it. `scanr output verify` prints it back:
-
-```
-  terminal: scan_completed
-  resumed from scan a7b012c0
-```
-
-Without this a scan split across an interruption would leave two files that only a human
-memory connects, which is a poor answer from a tool whose point is the record. If you
-have edited or reassembled a list and want to state its origin yourself, pass
-`--resumed-from <scan-id>`; it wins over the directive.
-
-A pair scan records `targets.mode = "pairs"` and embeds its endpoint list, since an
-explicit list has no compact spec. Above 50,000 pairs the list is omitted and
-`pairs_truncated` is set; `remainder` then refuses rather than returning a wrong answer.

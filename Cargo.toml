@@ -38,7 +38,7 @@ testsupport = []
 
 [dependencies]
 # CLI: subcommand tree, help rendering, shell completions. Hand-rolling this for a
-# 12-command tree with completions is real work for no gain. (D18)
+# 15-command tree with completions is real work for no gain. (D18)
 clap = { version = "4", features = ["derive", "wrap_help"] }
 clap_complete = "4"
 

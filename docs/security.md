@@ -2,14 +2,10 @@
 
 ## Authorization
 
-`scanr` connects to hosts you point it at. Port scanning without permission is unlawful in
-many jurisdictions and against the terms of most networks. Scan only what you are
-authorized to scan.
-
-Nothing in this tool tries to be stealthy. There is no evasion, no timing obfuscation, no
-source spoofing, and probe order randomization exists to spread load rather than to hide.
-A `connect()` scan completes full TCP handshakes and is trivially visible in logs on the
-destination.
+Port scanning without permission is unlawful in many jurisdictions and against most
+networks' terms. Scan only what you are authorized to scan. Nothing is stealthy: no
+evasion, timing obfuscation or source spoofing; randomized order spreads load. A
+`connect()` scan completes full handshakes and is visible in destination logs.
 
 ## Trust boundaries
 
@@ -17,30 +13,24 @@ destination.
    you ──▶ scanr ──▶ [proxy] ──▶ destination
 ```
 
-* **The proxy sees everything**: every destination address and port you ask for, in
-  cleartext, plus your credentials if you use RFC 1929 authentication. A proxy you do not
-  control is an observer of your entire scan.
-* **The destination sees the proxy**, not you — which is usually the point. With the
-  direct transport it sees your source address.
-* **A hostile proxy can lie.** Every non-open verdict through a proxy is that proxy's
-  assertion. It can report ports closed that are open, or open that are closed. `scanr`
-  records `source: proxy_reply` on exactly those results so the distinction is visible in
-  the record, but it cannot verify them.
+| party | sees |
+|---|---|
+| proxy | every destination and port in cleartext, plus RFC 1929 credentials: the entire scan |
+| destination | the proxy's address; with the direct transport, yours |
+
+A hostile proxy can lie: every non-open verdict through it is its assertion, recorded
+with `source: proxy_reply` but unverifiable.
 
 ## SOCKS5 authentication does not encrypt
 
-RFC 1929 username/password authenticates you *to* the proxy. It provides no
-confidentiality and no integrity. The credentials and the whole session cross the network
-in cleartext. If the path to your proxy is untrusted, tunnel it — `ssh -D` gives you a
-proxy whose transport is encrypted, at the cost of `open_only` result fidelity.
+RFC 1929 authenticates you *to* the proxy; credentials and session cross the wire in
+cleartext ([transports](transports.md#authentication)). Untrusted path: tunnel it with
+`ssh -D`, at the cost of `open_only` fidelity.
 
 ## Every hop in a chain sees the credentials of every hop after it
 
-This is the property most likely to surprise, and it follows directly from how chaining
-works. A chain reuses one socket: `scanr` completes the SOCKS5 handshake with hop 1, asks
-it for a tunnel to hop 2, then performs hop 2's handshake **inside that tunnel**, and so on.
-
-The consequence, for `hops = ["a", "b", "c"]`:
+A chain reuses one socket: hop 1's handshake, a tunnel to hop 2, hop 2's handshake inside
+it, and so on. For `hops = ["a", "b", "c"]`:
 
 | what | who can read it |
 |---|---|
@@ -49,26 +39,18 @@ The consequence, for `hops = ["a", "b", "c"]`:
 | `c`'s credentials | all of the above, plus `c` |
 | the destination and every probe result | every hop |
 
-RFC 1929 sends the username and password with no confidentiality (above), and a tunnel
-does not change that: hop 1 terminates its own encryption, so it reads the bytes you send
-onward in cleartext. **Chaining through a hop is trusting it with every credential
-downstream of it**, not just its own. Encrypting the link to hop 1 — `ssh -D`, say —
-protects those bytes from an observer *on that link*, never from hop 1 itself.
+Hop 1 terminates its own encryption and reads the onward bytes in cleartext; `ssh -D` to
+it protects against an observer *on that link*, never hop 1. This is nested SOCKS5, not
+`scanr`.
 
-Practical consequences:
-
-- **Do not reuse one password across hops.** Give each hop its own, so a hop that logs or
-  leaks what passes through it compromises only the hops after it.
-- **Order matters.** The least trusted hop belongs last, where it sees the fewest secrets.
-- **A pool is not a chain.** Members are probed *across*, never *through*, so a pool
-  member sees only its own credentials and its own share of the destinations.
-
-None of this is specific to `scanr` — it is how nested SOCKS5 works — but the tool makes
-chains easy enough to build that the property is worth stating plainly.
+- One password per hop: a leaking hop compromises only the hops after it.
+- Least trusted hop last, where it sees the fewest secrets.
+- A pool is not a chain: members are probed *across*, never *through*; each sees only its
+  own credentials and share of destinations.
 
 ## Credentials
 
-**Inline passwords in configuration are rejected**, not warned about:
+Inline passwords are rejected, because project config is normally committed:
 
 ```
 error: transport `lab` sets an inline `password`
@@ -78,101 +60,66 @@ help: scanr never reads inline passwords, because project config is
         password_file = "~/.config/scanr/lab.password"
 ```
 
-A warning is not protection when the expected workflow is to commit `./scanr.toml`.
+`password_file` must be mode `0600` or narrower.
 
-`password_file` must be mode `0600` or narrower; loading fails otherwise.
+| path | behaviour |
+|---|---|
+| scan record | `"password": "[redacted]"` plus the source (`env:SCANR_LAB_PASSWORD`) |
+| `plan`, `config show` | redact |
+| in-memory type | `Debug` prints `Secret([redacted])` |
+| caret renderer | redacts a credential line, so an error *pointing at* a password does not print it |
+| `scanr output verify` | fails a record whose credential-shaped keys hold real values |
 
-Credentials are kept out of every output path:
-
-- The scan record stores `"password": "[redacted]"` and the *source*
-  (`env:SCANR_LAB_PASSWORD`), never the value.
-- `plan` and `config show` redact.
-- The in-memory type has a `Debug` implementation that prints `Secret([redacted])`, so a
-  stray `{:?}` cannot leak one.
-- The caret renderer redacts the value on a credential line, so an error *pointing at* a
-  password does not print it. This was a real leak, found by an end-to-end test rather
-  than by review: rejecting `password = "hunter2"` printed the password while doing so.
-- `scanr output verify` scans a record for credential-shaped keys with real values, so a
-  leak is caught by the tool rather than by a human reading the file.
-
-Fuzzing covers the redaction path. Stating the property correctly took two attempts, both
-defeated by the fuzzer — see `fuzz/fuzz_targets/config.rs`.
+Fuzzed: `fuzz/fuzz_targets/config.rs`.
 
 ## DNS leakage
 
-Resolving a hostname locally tells your resolver — and anyone observing it — what you are
-about to scan, which defeats much of the point of scanning through a proxy.
-
-| mode | who resolves | leaks locally | records the address probed |
-|---|---|---|---|
-| `transport` | the proxy | no | **no** |
-| `local` | this host | **yes** | yes |
-| `disabled` | nobody; hostnames rejected | no | n/a |
-| `auto` | transport if supported, else local | depends | depends |
-
-`auto` is the default. For a SOCKS5 transport it resolves remotely, so the default does not
-leak. The tradeoff is that the address actually probed cannot be recorded: the SOCKS5
-reply's `BND.ADDR` is the proxy's own bound address — measured as literally `0.0.0.0` from
-`ssh -D` — not the destination's.
-
-Because `auto` follows the transport, the same configuration can resolve differently when
-you switch transports. `plan` prints the effective mode and warns when this applies.
+Local resolution tells your resolver what is about to be scanned. Modes:
+[configuration](configuration.md#dns). `auto` (default) resolves through a SOCKS5
+transport, so it does not leak; the probed address then goes unrecorded, since the
+reply's `BND.ADDR` is the proxy's own (literally `0.0.0.0` from `ssh -D`). `auto` follows
+the transport, so one configuration can resolve differently per transport; `plan` prints
+the effective mode and warns.
 
 ## Untrusted input
 
-`scanr` parses bytes from a proxy it does not control, including a peer-supplied length
-field in the `ATYP_DOMAIN` bound address of a CONNECT reply. Five fuzz targets cover it:
+Bytes from an uncontrolled proxy are parsed, including a peer-supplied length in the
+`ATYP_DOMAIN` bound address of a CONNECT reply. Five fuzz targets under
+`fuzz/fuzz_targets/`, seeds committed and replayed in CI:
 
 | target | covers |
 |---|---|
-| `socks5_handshake` | greeting, method selection, RFC 1929 auth — the proxy chooses the method and supplies the status byte we act on |
-| `socks5_reply` | the CONNECT reply parser, including the peer-supplied address length |
-| `config` | loading, validation, and the caret renderer that slices source by byte offset |
+| `socks5_handshake` | greeting, method selection, RFC 1929 auth; the proxy picks the method and status byte |
+| `socks5_reply` | CONNECT reply parser, including the address length |
+| `config` | loading, validation, the caret renderer's byte-offset slicing |
 | `specs` | target, port and duration parsing |
-| `record` | reading a truncated or corrupted scan record |
+| `record` | truncated or corrupted records |
 
-See `fuzz/fuzz_targets/`. Seeds are committed and replayed in CI as a regression check.
+One real defect found: an address-count overflow that panicked in debug and wrapped in
+release, so `::/0` reported one address.
 
-Fuzzing found and fixed one real defect: an address-count overflow that panicked in debug
-builds and silently wrapped in release, so `::/0` reported covering one address.
-
-`unsafe_code` is denied crate-wide, so each of the five `unsafe` blocks is an explicit
-`#[allow(unsafe_code)]` carrying a safety comment. All five are thin libc calls:
+`unsafe_code` is denied crate-wide; each block is an explicit `#[allow(unsafe_code)]`
+with a safety comment. All five are thin libc calls:
 
 | where | call | why |
 |---|---|---|
 | `plan::permute` | `getrandom` | seed entropy (Linux) |
 | `plan::permute` | `getentropy` | seed entropy (Apple) |
-| `run` | `gethostname` | the scanning host, recorded in the record |
-| `diag` | `getrlimit` | the file-descriptor budget warning |
-| `cli` | `signal` | SIGINT/SIGTERM handling, and ignoring SIGPIPE/SIGXFSZ |
+| `run` | `gethostname` | scanning host, recorded |
+| `diag` | `getrlimit` | file-descriptor budget warning |
+| `cli` | `signal` | SIGINT/SIGTERM; ignoring SIGPIPE/SIGXFSZ |
 
-There is no `unsafe` anywhere else in the shipped crate — no raw-pointer data structures,
-no transmutes, no manual synchronization. Adding a sixth block fails the build until
-someone writes the comment justifying it. (The test harness has two more, both
-`setrlimit` in a `pre_exec` closure, used to drive writer-failure paths. They do not ship.)
+No other `unsafe` ships; a sixth block fails the build. The test harness has two more
+(`setrlimit` in a `pre_exec` closure).
 
 ## What lands on disk
 
-Every run writes a JSONL record to `output_dir` unconditionally. It contains every
-destination probed and the outcome, which is a sensitive artifact: it is a map of what you
-scanned and what answered.
-
-- No credentials, by the guarantees above.
-- The full resolved configuration, so the file explains itself.
-- The scanning host's name and PID, plus the commit the binary was built from.
-
-The record is created **mode 0600**, readable only by the user who ran the scan, and the
-`.partial` file it is written through carries the same mode from the moment it exists.
-Refusing a `password_file` that group or others can read while writing a world-readable
-map of the target network would have been a contradiction. The containing `output_dir` is
-created with the process umask, so tighten that directory yourself if its *name* is
-sensitive — the record contents are not exposed by it.
-
-Nothing is transmitted anywhere. There is no telemetry, no update check, and no network
-activity beyond the probes you asked for and any DNS resolution the chosen mode implies.
+Every run writes a record to `output_dir`: a map of what was scanned and what answered.
+It holds no credentials, the full resolved configuration, and the host's name, PID and
+build commit. Record and `.partial` are created mode `0600`; `output_dir` follows the
+umask, so tighten it if the directory *name* is sensitive. No telemetry, update check, or
+network activity beyond the probes and the DNS the chosen mode implies.
 
 ## Privileges
 
-None required, by design. `scanr` performs ordinary `connect()` calls. It does not need
-`CAP_NET_RAW`, does not open raw sockets, and should not be run as root.
+None: ordinary `connect()` calls, no `CAP_NET_RAW`, no raw sockets. Do not run as root.
