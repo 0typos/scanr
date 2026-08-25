@@ -2021,3 +2021,229 @@ fn a_mixed_chain_records_each_hop_with_its_protocol() {
             .any(|e| e["type"] == "probe_result" && e["state"] == "open")
     );
 }
+
+#[test]
+fn the_tls_probe_is_off_by_default_and_the_record_says_so() {
+    use scanr::testsupport::tls::{Behavior, TlsFixture};
+    let d = tempfile::tempdir().unwrap();
+    let fx = TlsFixture::start(Behavior::Tls12 { alpn: Some("h2") });
+    let port = fx.addr().port().to_string();
+    let out = scanr(
+        d.path(),
+        &[
+            "run",
+            "--no-spans",
+            "--targets",
+            "127.0.0.1",
+            "--ports",
+            &port,
+            "--output-dir",
+            "out",
+            "-q",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let events = read_events(d.path());
+    let config = events.iter().find(|e| e["type"] == "scan_config").unwrap();
+    assert_eq!(config["tls"]["enabled"], false);
+    assert_eq!(config["tls"]["sent_bytes"], 0);
+    let open = events.iter().find(|e| e["type"] == "probe_result").unwrap();
+    assert_eq!(open["state"], "open");
+    assert!(open.get("tls").is_none(), "no probe, no field: {open}");
+}
+
+#[test]
+fn the_tls_probe_records_the_leaf_and_verify_accepts_it() {
+    use scanr::testsupport::tls::{Behavior, FIXTURE_CERT_DER, TlsFixture};
+    let d = tempfile::tempdir().unwrap();
+    let fx = TlsFixture::start(Behavior::Tls12 { alpn: Some("h2") });
+    let (_l, greeting) = greeting_port(b"220 smtp fixture\r\n");
+    let ports = format!("{},{}", fx.addr().port(), greeting.port());
+
+    let plan = scanr(
+        d.path(),
+        &["plan", "--tls", "--targets", "127.0.0.1", "--ports", &ports],
+    );
+    assert_eq!(code(&plan), 0, "{}", stderr(&plan));
+    assert!(stdout(&plan).contains("ClientHello"), "{}", stdout(&plan));
+
+    let out = scanr(
+        d.path(),
+        &[
+            "run",
+            "--tls",
+            "--no-spans",
+            "--targets",
+            "127.0.0.1",
+            "--ports",
+            &ports,
+            "--output-dir",
+            "out",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let shown = stdout(&out);
+    assert!(shown.contains("tls1.2 h2 sha256:"), "{shown}");
+
+    let events = read_events(d.path());
+    let config = events.iter().find(|e| e["type"] == "scan_config").unwrap();
+    assert_eq!(config["tls"]["enabled"], true);
+    assert!(config["tls"]["sent_bytes"].as_u64().unwrap() > 100);
+
+    let by_port = |p: u16| {
+        events
+            .iter()
+            .find(|e| e["type"] == "probe_result" && e["port"] == p)
+            .unwrap_or_else(|| panic!("no result for port {p}"))
+            .clone()
+    };
+    let tls = by_port(fx.addr().port());
+    assert_eq!(tls["tls"]["negotiated"], "1.2");
+    assert_eq!(tls["tls"]["alpn"], "h2");
+    assert_eq!(tls["tls"]["cipher_name"], "ECDHE-RSA-AES128-GCM-SHA256");
+    assert_eq!(tls["tls"]["chain_len"], 2);
+    let der = tls["tls"]["leaf_der"].as_str().unwrap();
+    assert_eq!(der, scanr::transport::http::base64(FIXTURE_CERT_DER));
+    // The greeting port said something first, so it was never probed.
+    let smtp = by_port(greeting.port());
+    assert_eq!(smtp["banner"], "220 smtp fixture\r\n");
+    assert!(smtp.get("tls").is_none(), "{smtp}");
+
+    let rec = scanr::testsupport::find_record(&d.path().join("out")).expect("a finalised record");
+    let v = scanr(d.path(), &["output", "verify", rec.to_str().unwrap()]);
+    assert_eq!(code(&v), 0, "{}", stderr(&v));
+}
+
+/// Against real OpenSSL: a TLS 1.2 server yields its certificate, a 1.3-only server
+/// answers `protocol_version`. Needs the `openssl` binary; run with `--ignored`.
+#[test]
+#[ignore = "needs openssl installed; run with --ignored"]
+fn the_tls_probe_agrees_with_openssl_s_server() {
+    use std::process::{Command, Stdio};
+    let d = tempfile::tempdir().unwrap();
+    let key = d.path().join("key.pem");
+    let cert = d.path().join("cert.pem");
+    let generated = Command::new("openssl")
+        .args([
+            "req",
+            "-x509",
+            "-newkey",
+            "ec",
+            "-pkeyopt",
+            "ec_paramgen_curve:prime256v1",
+            "-nodes",
+        ])
+        .args([
+            "-keyout",
+            key.to_str().unwrap(),
+            "-out",
+            cert.to_str().unwrap(),
+        ])
+        .args(["-days", "2", "-subj", "/CN=s-server.test"])
+        .stderr(Stdio::null())
+        .status()
+        .expect("openssl req");
+    assert!(generated.success());
+    let der = Command::new("openssl")
+        .args(["x509", "-in", cert.to_str().unwrap(), "-outform", "DER"])
+        .output()
+        .expect("openssl x509")
+        .stdout;
+
+    let free = || {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let (p12, p13) = (free(), free());
+    let mut s12 = Command::new("openssl")
+        .args([
+            "s_server",
+            "-accept",
+            &format!("127.0.0.1:{p12}"),
+            "-tls1_2",
+            "-alpn",
+            "h2,http/1.1",
+        ])
+        .args([
+            "-key",
+            key.to_str().unwrap(),
+            "-cert",
+            cert.to_str().unwrap(),
+            "-quiet",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("openssl s_server 1.2");
+    let mut s13 = Command::new("openssl")
+        .args([
+            "s_server",
+            "-accept",
+            &format!("127.0.0.1:{p13}"),
+            "-tls1_3",
+        ])
+        .args([
+            "-key",
+            key.to_str().unwrap(),
+            "-cert",
+            cert.to_str().unwrap(),
+            "-quiet",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("openssl s_server 1.3");
+    // s_server takes a moment to listen.
+    for _ in 0..50 {
+        if std::net::TcpStream::connect(("127.0.0.1", p12)).is_ok()
+            && std::net::TcpStream::connect(("127.0.0.1", p13)).is_ok()
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    let ports = format!("{p12},{p13}");
+    let out = scanr(
+        d.path(),
+        &[
+            "run",
+            "--tls",
+            "--no-spans",
+            "--targets",
+            "127.0.0.1",
+            "--ports",
+            &ports,
+            "--output-dir",
+            "out",
+            "-q",
+        ],
+    );
+    let _ = s12.kill();
+    let _ = s12.wait();
+    let _ = s13.kill();
+    let _ = s13.wait();
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let events = read_events(d.path());
+    let by_port = |p: u16| {
+        events
+            .iter()
+            .find(|e| e["type"] == "probe_result" && e["port"] == p)
+            .unwrap_or_else(|| panic!("no result for port {p}"))
+            .clone()
+    };
+    let tls12 = by_port(p12);
+    assert_eq!(tls12["tls"]["negotiated"], "1.2", "{tls12}");
+    assert_eq!(tls12["tls"]["alpn"], "h2", "{tls12}");
+    assert_eq!(tls12["tls"]["chain_len"], 1, "{tls12}");
+    assert_eq!(
+        tls12["tls"]["leaf_der"].as_str().unwrap(),
+        scanr::transport::http::base64(&der),
+        "the leaf must be the certificate s_server was given"
+    );
+    let tls13 = by_port(p13);
+    assert_eq!(tls13["tls"]["alert"]["name"], "protocol_version", "{tls13}");
+    assert!(tls13["tls"]["leaf_der"].is_null(), "{tls13}");
+}

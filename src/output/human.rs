@@ -160,10 +160,15 @@ impl ResultPrinter {
             if s.ends_with(' ') {
                 s.pop();
             }
-            return match &outcome.banner {
+            let mut s = match &outcome.banner {
                 Some(b) => format!("{s} {latency} {}", safe_banner(b, Self::BANNER_W)),
                 None => format!("{s} {latency}"),
             };
+            if let Some(t) = &outcome.tls {
+                s.push(' ');
+                s.push_str(&t.display());
+            }
+            return s;
         }
 
         let pad = |n: usize| " ".repeat(n);
@@ -188,6 +193,11 @@ impl ResultPrinter {
         if let Some(b) = &outcome.banner {
             line.push_str(&pad(Self::GAP));
             line.push_str(&self.style.dim(&safe_banner(b, Self::BANNER_W)));
+        }
+        // Already printable ASCII: `TlsObservation` filters the one peer-chosen string.
+        if let Some(t) = &outcome.tls {
+            line.push_str(&pad(Self::GAP));
+            line.push_str(&self.style.dim(&t.display()));
         }
         line
     }
@@ -318,6 +328,7 @@ mod tests {
             pressure: None,
             banner: None,
             via: None,
+            tls: None,
         }
     }
 

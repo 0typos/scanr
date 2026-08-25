@@ -59,6 +59,7 @@ pub fn builtin_profiles() -> Vec<BuiltinProfile> {
                 retries: 0,
                 retry_delay: ms(250),
                 banner: None,
+                tls: None,
             },
         },
         BuiltinProfile {
@@ -73,6 +74,7 @@ pub fn builtin_profiles() -> Vec<BuiltinProfile> {
                 retries: 1,
                 retry_delay: ms(500),
                 banner: None,
+                tls: None,
             },
         },
         BuiltinProfile {
@@ -88,6 +90,7 @@ pub fn builtin_profiles() -> Vec<BuiltinProfile> {
                 retries: 1,
                 retry_delay: ms(1_000),
                 banner: None,
+                tls: None,
             },
         },
         BuiltinProfile {
@@ -102,6 +105,7 @@ pub fn builtin_profiles() -> Vec<BuiltinProfile> {
                 retries: 1,
                 retry_delay: ms(500),
                 banner: None,
+                tls: None,
             },
         },
         BuiltinProfile {
@@ -117,6 +121,7 @@ pub fn builtin_profiles() -> Vec<BuiltinProfile> {
                 retries: 1,
                 retry_delay: ms(250),
                 banner: None,
+                tls: None,
             },
         },
         BuiltinProfile {
@@ -131,6 +136,7 @@ pub fn builtin_profiles() -> Vec<BuiltinProfile> {
                 retries: 1,
                 retry_delay: ms(250),
                 banner: None,
+                tls: None,
             },
         },
         // A short timeout is only safe when something else covers a lost SYN.
@@ -162,6 +168,7 @@ pub fn builtin_profiles() -> Vec<BuiltinProfile> {
                 retries: 1,
                 retry_delay: ms(100),
                 banner: None,
+                tls: None,
             },
         },
     ]
@@ -243,6 +250,14 @@ spans = true
 #   default: true             CLI: --banner / --no-banner
 banner = true
 
+# Send a TLS 1.2 ClientHello to open ports that volunteered no banner, and record the
+# certificate, cipher and ALPN the server answers with. This is the one active probe
+# scanr has — it sends bytes to the service — so it is off unless you turn it on, and
+# the record states `tls.sent_bytes` either way. TLS 1.2 only: a 1.3-only server answers
+# with a `protocol_version` alert, which is recorded as such.
+#   default: false            CLI: --tls / --no-tls
+tls = false
+
 # A file of `name port/proto` lines to label ports from, consulted ahead of
 # /etc/services and the built-in table. `~` is expanded.
 #   default: unset
@@ -313,6 +328,11 @@ banner_bytes = 1024
 # port is a worker issuing no probes.
 #   default: "500ms"          CLI: (none)
 banner_timeout = "500ms"
+
+# Ceiling on the wait for a server's TLS flight after the ClientHello, when the TLS probe
+# is on. Scaled off the measured connect like the banner wait.
+#   default: "1s"             CLI: (none)
+tls_timeout = "1s"
 
 
 # ─── Transports ──────────────────────────────────────────────────────────────
@@ -465,6 +485,7 @@ mod tests {
             retry_delay,
             banner_bytes,
             banner_timeout,
+            tls_timeout,
         } = crate::config::raw::RawProfile::default();
         // Named so the bindings are used and a typo above cannot silently pass.
         let fields = [
@@ -477,6 +498,7 @@ mod tests {
             ("retry_delay", retry_delay.is_none()),
             ("banner_bytes", banner_bytes.is_none()),
             ("banner_timeout", banner_timeout.is_none()),
+            ("tls_timeout", tls_timeout.is_none()),
         ];
         for (field, _) in fields {
             assert!(
@@ -497,6 +519,7 @@ mod tests {
             compress,
             spans,
             banner,
+            tls,
             services_file,
             use_etc_services,
         } = crate::config::raw::RawDefaults::default();
@@ -508,6 +531,7 @@ mod tests {
             ("compress", compress.is_none()),
             ("spans", spans.is_none()),
             ("banner", banner.is_none()),
+            ("tls", tls.is_none()),
             ("services_file", services_file.is_none()),
             ("use_etc_services", use_etc_services.is_none()),
         ];

@@ -179,12 +179,15 @@ fn handle(mut s: TcpStream, behavior: Behavior, shutdown: Arc<AtomicBool>) -> st
             read_exact(&mut s, &mut l)?;
             let mut d = vec![0u8; l[0] as usize];
             read_exact(&mut s, &mut d)?;
-            // Resolve remotely, which is the point of transport-side DNS.
+            // Resolve remotely, which is the point of transport-side DNS. IPv4 first
+            // when a name has both, since the fixtures under test listen on 127.0.0.1.
             String::from_utf8(d)
                 .ok()
                 .and_then(|h| std::net::ToSocketAddrs::to_socket_addrs(&(h.as_str(), 0)).ok())
-                .and_then(|mut it| it.next())
-                .map(|sa| sa.ip())
+                .and_then(|it| {
+                    let all: Vec<_> = it.map(|sa| sa.ip()).collect();
+                    all.iter().find(|ip| ip.is_ipv4()).or(all.first()).copied()
+                })
         }
         _ => None,
     };
@@ -325,6 +328,7 @@ mod tests {
                 retries: 0,
                 retry_delay: Duration::ZERO,
                 banner: None,
+                tls: None,
             };
             let o = t.probe_detailed(&crate::transport::Destination::Addr(open), &timing);
             assert_eq!(

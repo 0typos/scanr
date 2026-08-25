@@ -14,6 +14,19 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-25
+
+### Added
+
+- **The TLS ClientHello probe**, `--tls` / `tls = true` — off by default, the one active
+  probe scanr has. On open ports that volunteered no banner it sends a fixed 163-byte TLS
+  1.2 ClientHello on the same connection and records what comes back: negotiated version,
+  cipher, ALPN, the leaf certificate (SHA-256, and the DER when ≤ 8 KiB) and chain length,
+  or the alert — a 1.3-only server answers `protocol_version`. Verified against `openssl
+  s_server`. `scan_config.tls.sent_bytes` states what was sent (`0` when off);
+  `docs/security.md` lists the exact bytes and a test holds it to them. `tls_timeout` (1s)
+  is the profile ceiling. Fuzz target `tls_reply`. No new dependencies.
+
 ## [0.4.0] - 2026-08-25
 
 ### Added

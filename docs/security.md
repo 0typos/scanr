@@ -82,18 +82,50 @@ reply's `BND.ADDR` is the proxy's own (literally `0.0.0.0` from `ssh -D`). `auto
 the transport, so one configuration can resolve differently per transport; `plan` prints
 the effective mode and warns.
 
+## The one active probe
+
+Everything else scanr does is connect and listen. `--tls` (or `tls = true`) sends one
+thing: a fixed TLS 1.2 ClientHello, to open ports that volunteered no banner, on the
+connection the scan already made. It addresses the service rather than observing it,
+which is why it is **off by default** and why the record states `tls.sent_bytes` — `0`
+when it never ran.
+
+What is sent, byte for byte (163 bytes; an SNI extension is added when the target is a
+hostname the transport resolves):
+
+```
+160301009e0100009a03037363616e7220746c732070726f62653a206e6f7420
+72616e646f6d2020763120000028c02cc02bc030c02fcca9cca8c024c023c028
+c027c00ac009c014c013009d009c003d003c0035002f01000049000a00080006
+001d00170018000b00020100000d001800160403050306030804080508060401
+05010601020302010010000e000c02683208687474702f312e3100170000ff01
+000100
+```
+
+Client random is a fixed string, cipher suites are twenty common TLS 1.2 suites, ALPN
+offers `h2` and `http/1.1`, and there is no `supported_versions` extension, so nothing
+newer than 1.2 is ever negotiated. The server's first flight is read — ServerHello,
+Certificate, or an Alert — and the socket is reset. No key exchange, no verification,
+no bytes after the flight. A test holds this document to the bytes the code sends.
+
+What comes back is peer-chosen and treated as such: record and message lengths are
+bounded (64 KiB flight, 8 KiB embedded leaf), the read is deadline-driven, the ALPN
+string is filtered to printable ASCII, and the leaf certificate is stored as base64 DER
+for other tools to parse — scanr does not parse x509.
+
 ## Untrusted input
 
 Bytes from an uncontrolled proxy are parsed, including a peer-supplied length in the
 `ATYP_DOMAIN` bound address of a CONNECT reply and the length of an HTTP CONNECT
-response. Six fuzz targets under `fuzz/fuzz_targets/`, seeds committed and replayed in
-CI:
+response, and every length in a TLS server flight. Seven fuzz targets under
+`fuzz/fuzz_targets/`, seeds committed and replayed in CI:
 
 | target | covers |
 |---|---|
 | `socks5_handshake` | greeting, method selection, RFC 1929 auth; the proxy picks the method and status byte |
 | `socks5_reply` | CONNECT reply parser, including the address length |
 | `http_connect_reply` | HTTP CONNECT response parser: status line, header block bound, printable filtering |
+| `tls_reply` | TLS server flight: record, handshake and certificate lengths; ALPN filtering; leaf bound |
 | `config` | loading, validation, the caret renderer's byte-offset slicing |
 | `specs` | target, port and duration parsing |
 | `record` | truncated or corrupted records |

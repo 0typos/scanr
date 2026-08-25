@@ -54,6 +54,8 @@ pub struct Overrides {
     /// false.
     pub spans: Option<bool>,
     pub banner: Option<bool>,
+    /// Send the TLS ClientHello probe. Off unless asked for; `--tls` sets this true.
+    pub tls: Option<bool>,
     pub allow_large_range: bool,
 }
 
@@ -317,6 +319,7 @@ fn resolve_timing(
             profile,
         )?,
         banner: resolve_banner(files, scan_name, profile, ov, prov)?,
+        tls: resolve_tls(files, scan_name, profile, ov, prov)?,
         retry_delay: duration_field(
             prov,
             "retry_delay",
@@ -579,6 +582,45 @@ fn resolve_banner(
              by a hostile service",
         )
     })
+}
+
+/// Whether to send the TLS ClientHello probe, and how long to wait for the answer.
+///
+/// Off by default, and the only setting here that defaults that way: unlike a banner
+/// read it *sends* something to the service, which is a different act from connecting
+/// and listening (D32, D35). The toggle is a scan-level choice; the ceiling is timing
+/// and lives on the profile beside the other timeouts.
+fn resolve_tls(
+    files: &Layered,
+    scan_name: Option<&str>,
+    profile: &str,
+    ov: &Overrides,
+    prov: &mut Provenance,
+) -> Result<Option<crate::tls::TlsProbe>, ConfigError> {
+    let on = resolve_flag(
+        files,
+        scan_name,
+        "tls",
+        ov.tls,
+        |s| s.tls,
+        |c| c.defaults.tls,
+        false,
+        prov,
+    );
+    if !on {
+        return Ok(None);
+    }
+    let timeout = duration_field(
+        prov,
+        "tls_timeout",
+        None,
+        timing_source(files, scan_name, profile, |p| p.tls_timeout.clone()),
+        crate::tls::DEFAULT_TLS_TIMEOUT,
+        profile,
+    )?;
+    crate::tls::TlsProbe::new(timeout)
+        .map(Some)
+        .map_err(ConfigError::new)
 }
 
 fn resolve_spans(

@@ -4,7 +4,7 @@
 .SH NAME
 scanr\-plan \- Resolve a scan and show the plan without touching the network
 .SH SYNOPSIS
-\fBscanr\-plan\fR [\fB\-\-profile\fR] [\fB\-\-transport\fR] [\fB\-\-targets\fR] [\fB\-\-ports\fR] [\fB\-\-pairs\fR] [\fB\-\-resumed\-from\fR] [\fB\-\-exclude\fR] [\fB\-\-concurrency\fR] [\fB\-\-rate\fR] [\fB\-\-connect\-timeout\fR] [\fB\-\-retries\fR] [\fB\-\-dns\fR] [\fB\-\-output\-dir\fR] [\fB\-\-seed\fR] [\fB\-\-open\-only\fR] [\fB\-\-all\fR] [\fB\-\-compress\fR] [\fB\-\-no\-compress\fR] [\fB\-\-spans\fR] [\fB\-\-no\-spans\fR] [\fB\-\-banner\fR] [\fB\-\-no\-banner\fR] [\fB\-\-allow\-large\-range\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fISCAN\fR] 
+\fBscanr\-plan\fR [\fB\-\-profile\fR] [\fB\-\-transport\fR] [\fB\-\-targets\fR] [\fB\-\-ports\fR] [\fB\-\-pairs\fR] [\fB\-\-resumed\-from\fR] [\fB\-\-exclude\fR] [\fB\-\-concurrency\fR] [\fB\-\-rate\fR] [\fB\-\-connect\-timeout\fR] [\fB\-\-retries\fR] [\fB\-\-dns\fR] [\fB\-\-output\-dir\fR] [\fB\-\-seed\fR] [\fB\-\-open\-only\fR] [\fB\-\-all\fR] [\fB\-\-compress\fR] [\fB\-\-no\-compress\fR] [\fB\-\-spans\fR] [\fB\-\-no\-spans\fR] [\fB\-\-banner\fR] [\fB\-\-no\-banner\fR] [\fB\-\-tls\fR] [\fB\-\-no\-tls\fR] [\fB\-\-allow\-large\-range\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fISCAN\fR] 
 .SH DESCRIPTION
 Resolve a scan and show the plan without touching the network
 .SH OPTIONS
@@ -74,6 +74,12 @@ Read what open services volunteer on connect, without sending anything (default)
 .TP
 \fB\-\-no\-banner\fR
 Do not read banners
+.TP
+\fB\-\-tls\fR
+Send a TLS 1.2 ClientHello to open ports that volunteered no banner and record the certificate, cipher and ALPN that come back. The one active probe scanr has; off by default
+.TP
+\fB\-\-no\-tls\fR
+Do not send the TLS probe (default)
 .TP
 \fB\-\-allow\-large\-range\fR
 Permit target sets larger than 4,000,000 addresses

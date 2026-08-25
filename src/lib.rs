@@ -31,6 +31,7 @@ pub mod run;
 pub mod sched;
 pub mod services;
 pub mod timefmt;
+pub mod tls;
 pub mod transport;
 pub mod units;
 pub mod verify;

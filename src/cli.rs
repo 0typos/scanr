@@ -311,6 +311,16 @@ struct OverrideArgs {
     #[arg(long)]
     no_banner: bool,
 
+    /// Send a TLS 1.2 ClientHello to open ports that volunteered no banner and record
+    /// the certificate, cipher and ALPN that come back. The one active probe scanr has;
+    /// off by default.
+    #[arg(long, conflicts_with = "no_tls")]
+    tls: bool,
+
+    /// Do not send the TLS probe (default)
+    #[arg(long)]
+    no_tls: bool,
+
     /// Permit target sets larger than 4,000,000 addresses
     #[arg(long)]
     allow_large_range: bool,
@@ -403,6 +413,7 @@ impl OverrideArgs {
             compress: flag(self.compress, self.no_compress),
             spans: flag(self.spans, self.no_spans),
             banner: flag(self.banner, self.no_banner),
+            tls: flag(self.tls, self.no_tls),
             open_only: flag(self.open_only, self.all),
             allow_large_range: self.allow_large_range,
         }
@@ -845,6 +856,19 @@ fn render_plan_timing(s: &mut String, plan: &ScanPlan, style: &Style) {
             ),
         },
         &plan.provenance.render("banner"),
+    );
+    // The one active probe: it sends bytes to the target, so it is the line on this
+    // screen most worth reading before a run.
+    row(
+        "tls probe",
+        match &plan.timing.tls {
+            None => "off".to_string(),
+            Some(t) => format!(
+                "ClientHello to silent open ports, {} max wait",
+                render_duration(t.timeout())
+            ),
+        },
+        &plan.provenance.render("tls"),
     );
     row(
         "retries",

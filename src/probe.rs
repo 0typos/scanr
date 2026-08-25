@@ -102,6 +102,9 @@ pub struct ProbeOutcome {
     /// the one path every probe took. An `Arc` because it is the same handful of strings
     /// repeated across every probe in the scan.
     pub via: Option<std::sync::Arc<str>>,
+    /// What the TLS ClientHello probe observed, when it was on and this port was open
+    /// and silent. The one active probe scanr sends (D35); the record states it ran.
+    pub tls: Option<crate::tls::TlsObservation>,
 }
 
 impl ProbeOutcome {
@@ -117,6 +120,12 @@ impl ProbeOutcome {
         self
     }
 
+    /// Attach what the TLS probe observed, if it ran.
+    pub fn with_tls(mut self, tls: Option<crate::tls::TlsObservation>) -> Self {
+        self.tls = tls;
+        self
+    }
+
     pub fn open(phases: Phases, source: Source) -> Self {
         Self {
             state: State::Open,
@@ -126,6 +135,7 @@ impl ProbeOutcome {
             pressure: None,
             banner: None,
             via: None,
+            tls: None,
         }
     }
 
@@ -138,6 +148,7 @@ impl ProbeOutcome {
             pressure: None,
             banner: None,
             via: None,
+            tls: None,
         }
     }
 

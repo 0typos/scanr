@@ -282,6 +282,7 @@ mod tests {
                 pressure: None,
                 banner: None,
                 via: None,
+                tls: None,
             },
             attempts: 1,
             attempt_states: vec![state],

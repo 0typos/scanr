@@ -129,6 +129,9 @@ pub struct RawDefaults {
     /// it off. Nothing is ever sent — only services that greet first say anything — so it
     /// adds no traffic to the target beyond the connection the scan already made.
     pub banner: Option<bool>,
+    /// Send a TLS 1.2 ClientHello to open ports that volunteered no banner and record
+    /// what comes back. **Off by default**: it is the one active probe scanr has (D35).
+    pub tls: Option<bool>,
     /// A file of `name port/proto` lines to label ports from, ahead of `/etc/services`
     /// and the builtin table. `~` is expanded.
     pub services_file: Option<String>,
@@ -152,6 +155,8 @@ pub struct RawProfile {
     pub banner_bytes: Option<u32>,
     /// How long to wait for a service to volunteer a greeting.
     pub banner_timeout: Option<String>,
+    /// Ceiling on the wait for a server's TLS flight after the ClientHello.
+    pub tls_timeout: Option<String>,
 }
 
 impl RawProfile {
@@ -211,6 +216,7 @@ pub struct RawScan {
     pub compress: Option<bool>,
     pub spans: Option<bool>,
     pub banner: Option<bool>,
+    pub tls: Option<bool>,
     pub dns: Option<String>,
     pub output_dir: Option<String>,
     /// Inline timing overrides, same shape as a profile.

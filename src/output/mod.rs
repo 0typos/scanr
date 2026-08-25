@@ -94,6 +94,10 @@ impl ProbeRecord {
                 Err(_) => v["banner_hex"] = serde_json::json!(hex(b)),
             }
         }
+        // What the TLS probe observed, present exactly when it ran (D35).
+        if let Some(t) = &self.outcome.tls {
+            v["tls"] = t.to_json();
+        }
         v
     }
 }
@@ -123,6 +127,7 @@ mod tests {
                 pressure: None,
                 banner: None,
                 via: None,
+                tls: None,
             },
             attempts: 2,
             attempt_states: vec![State::Filtered, State::Open],
