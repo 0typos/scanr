@@ -129,18 +129,21 @@ is 130. `completed` + `abandoned` (may have touched the network) + `not_started`
 
 ## Speed, next to nmap
 
-A `/24` × nmap's top 100 ports, 25,600 probes, both unprivileged connect scans. nmap
-7.92, `-sT -T5 --min-rate 10000 --max-retries 0 -Pn -n`.
+A loopback `/24`, every port refused except the real listeners, both tools doing
+unprivileged connect scans. nmap 7.92, `-sT -T5 --min-rate 10000 --max-retries 0 -Pn -n`.
+Measured 2026-08-25 on a 64-core machine; same open ports from both.
 
-| responsive hosts, every port refused | wall | probes/s |
-|---|---|---|
-| `scanr`, default profile | 0.17 s | ~150,000 |
-| nmap `-T5` | 0.52 s | ~49,000 |
+| responsive hosts | probes | scanr (default profile) | nmap `-T5` | ratio |
+|---|---|---|---|---|
+| `/24` × 1,000 ports | 256,000 | **0.40 s** (~640,000/s) | 4.82 s | 12× |
+| `/24` × 10,000 ports | 2,560,000 | **4.3 s** (~600,000/s) | 48.4 s | 11× |
 
-Same 259 open ports from both. Against unresponsive hosts nmap adapts its timeout from
-observed RTTs and `scanr` does not — `--connect-timeout` is yours to set and `scanr plan`
-projects the cost. Given the same single-attempt budget, `scanr` is ~3.2× quicker.
-Methodology and knobs: [docs/tuning.md](docs/tuning.md).
+Peak RSS 18 MB against 105 MB, and the 2.56M-probe record is 36 KB. Against
+unresponsive hosts nmap adapts its timeout from observed RTTs and `scanr` does not —
+`--connect-timeout` is yours to set and `scanr plan` projects the cost; on equal
+single-attempt terms `scanr` is ~3× quicker there. Loopback measures the engines, not a
+network; through a proxy the proxy's cap decides for both. Methodology and knobs:
+[docs/tuning.md](docs/tuning.md).
 
 ## Documentation
 

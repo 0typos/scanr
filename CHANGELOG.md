@@ -14,6 +14,17 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
 
 ## [Unreleased]
 
+### Changed
+
+- **Direct scans are 2.5–4× faster.** Workers hand results to the collector in batches
+  of up to 64 (an `open` or a pressure event still flushes at once), and the hot path no
+  longer allocates per probe: target names are formatted once, reasons are borrowed,
+  attempt states live inline, the TLS observation is boxed. Measured on a 64-core box,
+  loopback `/24`, every port refused: 256k probes 1.54 s → 0.40 s at the default
+  concurrency (166k → 640k probes/s); 2.56M probes 14.1 s → 4.3 s. Throughput no longer
+  falls with concurrency (512 was 40% slower than 64; now within 5%). Record contents,
+  order and every reader output are unchanged — the compat corpus passes as pinned.
+
 ## [1.0.0-rc.1] - 2026-08-25
 
 ### Added

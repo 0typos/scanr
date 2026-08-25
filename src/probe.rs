@@ -86,7 +86,10 @@ pub struct Phases {
 pub struct ProbeOutcome {
     pub state: State,
     pub source: Source,
-    pub reason: Option<String>,
+    /// Borrowed for the common outcomes ("connection refused", "connect timed out"),
+    /// owned only when formatted with detail. A `String` here was one allocation per
+    /// probe on the hot path, and the span accumulator cloned it again as its key.
+    pub reason: Option<std::borrow::Cow<'static, str>>,
     pub phases: Phases,
     /// Set when this probe failed for a reason that will degrade the whole scan if it
     /// continues. Typed rather than inferred from `reason`, so the scan-level warning
@@ -104,7 +107,74 @@ pub struct ProbeOutcome {
     pub via: Option<std::sync::Arc<str>>,
     /// What the TLS ClientHello probe observed, when it was on and this port was open
     /// and silent. The one active probe scanr sends (D35); the record states it ran.
-    pub tls: Option<crate::tls::TlsObservation>,
+    /// Boxed: it is large and rare, and every outcome crosses a channel by value.
+    pub tls: Option<Box<crate::tls::TlsObservation>>,
+}
+
+/// The state of each attempt at one endpoint, in order (D10).
+///
+/// Almost every probe is one attempt and retries are single digits, so the states live
+/// inline; a `Vec` here was an allocation per probe for a one-element list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttemptStates {
+    len: u8,
+    inline: [State; 4],
+    spill: Vec<State>,
+}
+
+impl AttemptStates {
+    pub fn first(state: State) -> Self {
+        Self {
+            len: 1,
+            inline: [state; 4],
+            spill: Vec::new(),
+        }
+    }
+
+    pub fn push(&mut self, state: State) {
+        if (self.len as usize) < self.inline.len() {
+            self.inline[self.len as usize] = state;
+            self.len += 1;
+        } else {
+            self.spill.push(state);
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len as usize + self.spill.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = State> + '_ {
+        self.inline[..self.len as usize]
+            .iter()
+            .copied()
+            .chain(self.spill.iter().copied())
+    }
+
+    /// The states as one slice; allocates only when attempts spilled past four.
+    pub fn as_slice(&self) -> std::borrow::Cow<'_, [State]> {
+        if self.spill.is_empty() {
+            std::borrow::Cow::Borrowed(&self.inline[..self.len as usize])
+        } else {
+            std::borrow::Cow::Owned(self.iter().collect())
+        }
+    }
+}
+
+impl From<Vec<State>> for AttemptStates {
+    fn from(v: Vec<State>) -> Self {
+        let mut it = v.into_iter();
+        let first = it.next().expect("at least one attempt");
+        let mut out = Self::first(first);
+        for s in it {
+            out.push(s);
+        }
+        out
+    }
 }
 
 impl ProbeOutcome {
@@ -122,7 +192,7 @@ impl ProbeOutcome {
 
     /// Attach what the TLS probe observed, if it ran.
     pub fn with_tls(mut self, tls: Option<crate::tls::TlsObservation>) -> Self {
-        self.tls = tls;
+        self.tls = tls.map(Box::new);
         self
     }
 
@@ -139,7 +209,12 @@ impl ProbeOutcome {
         }
     }
 
-    pub fn new(state: State, source: Source, reason: impl Into<String>, phases: Phases) -> Self {
+    pub fn new(
+        state: State,
+        source: Source,
+        reason: impl Into<std::borrow::Cow<'static, str>>,
+        phases: Phases,
+    ) -> Self {
         Self {
             state,
             source,

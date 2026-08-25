@@ -22,13 +22,27 @@ use crate::output::{
 };
 use crate::plan::types::{ScanPlan, TransportKind};
 use crate::plan::{Permutation, types::Fidelity};
-use crate::probe::State;
+use crate::probe::{AttemptStates, State};
 use crate::sched::{RateLimiter, WORKER_STACK_BYTES, WorkCounter, worker_count};
 use crate::timefmt::{now_epoch_ms, rfc3339_ms};
 use crate::transport::{Destination, Transport};
 use crate::units::{HumanElapsed, commas};
 
-const CHANNEL_DEPTH: usize = 4096;
+/// Batches in flight between workers and the collector. Sized in batches, not probes:
+/// 256 x `BATCH_MAX` is ~16k outstanding results, a few MB.
+const CHANNEL_DEPTH: usize = 256;
+/// Results a worker accumulates before handing them to the collector as one message.
+///
+/// Measured before batching: the single `sync_channel` carrying one message per probe
+/// cost ~29% of all CPU in lock contention and waker traffic with 64 producers, and the
+/// collector thread was the scan's ceiling — one process reached 278k probes/s while
+/// four in parallel reached 850k/s on the same box. Batching amortises the lock over
+/// many results; an `open` or a pressure event still flushes at once, so what the
+/// operator watches for is not delayed.
+const BATCH_MAX: usize = 64;
+/// A batch older than this is flushed after the next probe, whatever its size, so a
+/// slow scan still streams results rather than holding them.
+const BATCH_AGE: Duration = Duration::from_millis(20);
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
 /// Upper bound on how long we wait for in-flight probes after an interrupt. The real
 /// How long the *collector* keeps reading results after an interrupt.
@@ -367,10 +381,19 @@ fn spawn_workers(
     cancel: &Cancel,
     n_workers: usize,
     total: u64,
-) -> Result<(Vec<std::thread::JoinHandle<()>>, Receiver<Completed>), ScanError> {
-    let permutation = Arc::new(Permutation::new(total.max(1), plan.seed));
-    let limiter = Arc::new(RateLimiter::new(plan.timing.rate));
-    let (tx, rx) = sync_channel::<Completed>(CHANNEL_DEPTH);
+) -> Result<Workers, ScanError> {
+    let (tx, rx) = sync_channel::<Vec<Completed>>(CHANNEL_DEPTH);
+    let shared = Arc::new(Shared {
+        plan: plan.clone(),
+        // Every target's display name, formatted once. Formatting an address per probe
+        // was one allocation and one `fmt` per result on the hot path, for a string that
+        // is the same for every port of the target.
+        names: plan.target_names().into(),
+        transport: transport.clone(),
+        permutation: Permutation::new(total.max(1), plan.seed),
+        counter: counter.clone(),
+        limiter: RateLimiter::new(plan.timing.rate),
+    });
 
     // Hoisted: the loop shadows `plan`, `cancel` and `tx` with clones that move into the
     // worker closure, so the error path cannot reach the outer ones.
@@ -378,29 +401,11 @@ fn spawn_workers(
     let outer_cancel = cancel.clone();
     let mut handles: Vec<std::thread::JoinHandle<()>> = Vec::with_capacity(n_workers);
     for i in 0..n_workers {
-        let (plan, transport, permutation, counter, limiter, cancel, tx) = (
-            plan.clone(),
-            transport.clone(),
-            permutation.clone(),
-            counter.clone(),
-            limiter.clone(),
-            cancel.clone(),
-            tx.clone(),
-        );
+        let (shared, cancel, tx) = (shared.clone(), cancel.clone(), tx.clone());
         let handle = std::thread::Builder::new()
             .name(format!("scanr-w{i}"))
             .stack_size(WORKER_STACK_BYTES)
-            .spawn(move || {
-                worker(
-                    &plan,
-                    &*transport,
-                    &permutation,
-                    &counter,
-                    &limiter,
-                    &cancel,
-                    &tx,
-                );
-            })
+            .spawn(move || worker(&shared, &cancel, &tx))
             .map_err(|e| ScanError::Output {
                 path: out_dir.clone(),
                 source: e,
@@ -497,7 +502,7 @@ struct Collected {
 impl Collector<'_> {
     fn run(
         mut self,
-        rx: &Receiver<Completed>,
+        rx: &Receiver<Vec<Completed>>,
         writer: &mut JsonlWriter,
         writer_error: &mut Option<std::io::Error>,
     ) -> Collected {
@@ -516,34 +521,36 @@ impl Collector<'_> {
 
         loop {
             match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(Completed { raw_index, record }) => {
-                    counts.record(record.outcome.state, record.attempts);
-                    if let Some(r) = self.reported.as_mut() {
-                        r.mark(raw_index);
-                    }
-                    if self.printer.should_print(&record.outcome) {
-                        self.progress.clear();
-                        self.printer.print(
-                            &mut stdout,
-                            &record.target,
-                            record.port,
-                            &record.outcome,
-                        );
-                    }
-                    if let Some(p) = record.outcome.pressure
-                        && pressure_seen.insert(p.code())
-                    {
-                        self.report_pressure(p, writer, writer_error);
-                    }
-                    // A bulk outcome goes into the span accumulator instead of getting
-                    // a row, and is written out at the next progress tick alongside
-                    // every probe that shared its outcome.
-                    let absorbed = self
-                        .spans
-                        .as_mut()
-                        .is_some_and(|s| s.absorb(raw_index, &record));
-                    if !absorbed {
-                        emit(writer, writer_error, "probe_result", record.to_json());
+                Ok(batch) => {
+                    for Completed { raw_index, record } in batch {
+                        counts.record(record.outcome.state, record.attempts);
+                        if let Some(r) = self.reported.as_mut() {
+                            r.mark(raw_index);
+                        }
+                        if self.printer.should_print(&record.outcome) {
+                            self.progress.clear();
+                            self.printer.print(
+                                &mut stdout,
+                                &record.target,
+                                record.port,
+                                &record.outcome,
+                            );
+                        }
+                        if let Some(p) = record.outcome.pressure
+                            && pressure_seen.insert(p.code())
+                        {
+                            self.report_pressure(p, writer, writer_error);
+                        }
+                        // A bulk outcome goes into the span accumulator instead of getting
+                        // a row, and is written out at the next progress tick alongside
+                        // every probe that shared its outcome.
+                        let absorbed = self
+                            .spans
+                            .as_mut()
+                            .is_some_and(|s| s.absorb(raw_index, &record));
+                        if !absorbed {
+                            emit(writer, writer_error, "probe_result", record.to_json());
+                        }
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
@@ -756,15 +763,84 @@ fn emit(
     }
 }
 
-fn worker(
-    plan: &ScanPlan,
-    transport: &dyn Transport,
-    permutation: &Permutation,
-    counter: &WorkCounter,
-    limiter: &RateLimiter,
-    cancel: &Cancel,
-    tx: &std::sync::mpsc::SyncSender<Completed>,
-) {
+/// A worker's outgoing results, handed to the collector in batches.
+///
+/// Whatever is left is sent on drop, so every return path — counter exhausted,
+/// cancellation, a panic unwinding — delivers the results of probes that completed.
+/// Losing them would make a finished probe read as `abandoned`.
+struct Batch<'a> {
+    tx: &'a std::sync::mpsc::SyncSender<Vec<Completed>>,
+    items: Vec<Completed>,
+    started: Instant,
+    /// The collector has gone; stop accumulating.
+    closed: bool,
+}
+
+impl<'a> Batch<'a> {
+    fn new(tx: &'a std::sync::mpsc::SyncSender<Vec<Completed>>) -> Self {
+        Self {
+            tx,
+            items: Vec::with_capacity(BATCH_MAX),
+            started: Instant::now(),
+            closed: false,
+        }
+    }
+
+    /// Queue one result; flush when the batch is full, old, or carries something the
+    /// operator is watching for. Returns `false` once the collector is gone.
+    fn push(&mut self, item: Completed) -> bool {
+        let urgent =
+            item.record.outcome.state == State::Open || item.record.outcome.pressure.is_some();
+        if self.items.is_empty() {
+            self.started = Instant::now();
+        }
+        self.items.push(item);
+        if urgent || self.items.len() >= BATCH_MAX || self.started.elapsed() >= BATCH_AGE {
+            self.flush();
+        }
+        !self.closed
+    }
+
+    fn flush(&mut self) {
+        if self.items.is_empty() || self.closed {
+            return;
+        }
+        let batch = std::mem::replace(&mut self.items, Vec::with_capacity(BATCH_MAX));
+        if self.tx.send(batch).is_err() {
+            self.closed = true;
+        }
+    }
+}
+
+impl Drop for Batch<'_> {
+    fn drop(&mut self) {
+        self.flush();
+    }
+}
+
+/// What every worker reads and none of them owns.
+struct Shared {
+    plan: Arc<ScanPlan>,
+    names: Arc<[Arc<str>]>,
+    transport: Arc<dyn Transport>,
+    permutation: Permutation,
+    counter: Arc<WorkCounter>,
+    limiter: RateLimiter,
+}
+
+type Workers = (Vec<std::thread::JoinHandle<()>>, Receiver<Vec<Completed>>);
+
+fn worker(shared: &Shared, cancel: &Cancel, tx: &std::sync::mpsc::SyncSender<Vec<Completed>>) {
+    let Shared {
+        plan,
+        names,
+        transport,
+        permutation,
+        counter,
+        limiter,
+    } = shared;
+    let transport: &dyn Transport = &**transport;
+    let mut batch = Batch::new(tx);
     while let Some(index) = counter.take() {
         if cancel.is_cancelled() {
             return;
@@ -781,9 +857,8 @@ fn worker(
             Target::Host(h) => (Destination::Host(h.clone(), port), None),
         };
 
-        let mut attempt_states = Vec::with_capacity(1);
         let mut outcome = transport.probe(&dest, &plan.timing);
-        attempt_states.push(outcome.state);
+        let mut attempt_states = AttemptStates::first(outcome.state);
         let mut attempts = 1u32;
 
         // Only timeouts are retried: a refusal is definitive, a timeout is not (D10).
@@ -804,7 +879,7 @@ fn worker(
 
         let record = ProbeRecord {
             probe_index: permuted,
-            target: target.to_string(),
+            target: names[plan.target_index_at(permuted)].clone(),
             resolved_address: resolved,
             port,
             outcome,
@@ -812,13 +887,10 @@ fn worker(
             attempt_states,
         };
         // A send failure means the collector has gone; stop rather than spin.
-        if tx
-            .send(Completed {
-                raw_index: index,
-                record,
-            })
-            .is_err()
-        {
+        if !batch.push(Completed {
+            raw_index: index,
+            record,
+        }) {
             return;
         }
     }
@@ -1856,7 +1928,7 @@ mod tests {
                 tls: None,
             },
             attempts: 1,
-            attempt_states: vec![state],
+            attempt_states: vec![state].into(),
         };
         let records = vec![mk(State::Open), mk(State::Open), mk(State::Closed)];
         assert_eq!(tally(&records), vec![(State::Open, 2), (State::Closed, 1)]);

@@ -468,6 +468,24 @@ impl ScanPlan {
         (&self.targets[t], self.ports[p])
     }
 
+    /// Which entry of [`ScanPlan::target_names`] a permuted index probes.
+    pub fn target_index_at(&self, index: u64) -> usize {
+        match &self.pairs {
+            Some(_) => index as usize,
+            None => (index / self.ports.len() as u64) as usize,
+        }
+    }
+
+    /// Every target's display form, indexed by [`ScanPlan::target_index_at`]: one entry
+    /// per target for a matrix scan, one per pair for a pair scan. Formatted once here
+    /// rather than once per probe.
+    pub fn target_names(&self) -> Vec<std::sync::Arc<str>> {
+        match &self.pairs {
+            Some(pairs) => pairs.iter().map(|(t, _)| t.to_string().into()).collect(),
+            None => self.targets.iter().map(|t| t.to_string().into()).collect(),
+        }
+    }
+
     /// Projected duration at the configured rate, if one is set.
     pub fn projected_duration(&self) -> Option<Duration> {
         if self.timing.rate == 0 {

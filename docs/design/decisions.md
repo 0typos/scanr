@@ -251,6 +251,14 @@ accepted 2026-08-25 · alternatives rejected: a full handshake via rustls (C/asm
 - SHA-256 and base64 are hand-rolled; no new dependency, musl binary still 0 `NEEDED`.
 - Known limit: on the direct path a locally resolved hostname reaches the probe as an address, so no SNI is sent; through a proxy with transport DNS the name survives and SNI is sent. `sni` in the record says which.
 
+### D37 — Results cross the worker→collector channel in batches
+accepted 2026-08-25 · alternatives rejected: a lock-free queue; sharding the collector
+
+- Profiled at 278k probes/s (loopback `/24 × 1000`, c=64): the single `sync_channel` carrying one message per probe cost ~29% of CPU in `Mutex::lock_contended` and waker traffic, allocation ~20%, syscalls ~12%; the collector thread held 44% of all samples. One process 0.92 s, four in parallel 0.30 s for the same work — the process, not the kernel, was the ceiling.
+- Workers batch up to 64 results or 20 ms, flushing immediately on `open` or pressure so what the operator watches for is not delayed; `Drop` flushes on every exit path so a completed probe can never read as `abandoned`. Per-probe allocations removed: target names formatted once per target (`Arc<str>`), reasons `Cow<'static, str>`, attempt states inline, TLS observation boxed.
+- Result: 256k probes 0.92 → 0.37 s at c=64, 1.54 → 0.40 s at c=512; 2.56M probes 14.1 → 4.3 s at c=512. The concurrency curve is flat to 512 (D1's non-monotonic finding was this contention). Rows mode (`--no-spans`) 2.37 → 1.70 s; its remaining cost is `serde_json::Value` per row.
+- Amends D1: concurrency is still a tunable, but above ~64 it no longer costs throughput on the direct path; the right value is rate × RTT.
+
 ### D36 — 1.0 gate and stability policy
 accepted 2026-08-25
 
