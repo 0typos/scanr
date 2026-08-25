@@ -1,0 +1,13 @@
+127.0.0.1:80/tcp      closed    local_stack  http
+127.0.0.1:9090/tcp    closed    local_stack
+127.0.0.1:33191/tcp   open      local_stack
+192.0.2.1:443/tcp     filtered  timeout      https
+192.0.2.1:8080/tcp    filtered  timeout      http-proxy
+192.0.2.1:9090/tcp    filtered  timeout
+192.0.2.1:33191/tcp   filtered  timeout
+192.0.2.1:44391/tcp   filtered  timeout
+192.0.2.2:80/tcp      filtered  timeout      http
+192.0.2.2:8080/tcp    filtered  timeout      http-proxy
+192.0.2.2:9090/tcp    filtered  timeout
+192.0.2.2:33191/tcp   filtered  timeout
+192.0.2.2:44391/tcp   filtered  timeout

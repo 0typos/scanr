@@ -79,7 +79,14 @@ names (deferred, decisions table). SHA-256 hand-rolled rather than `sha2`.
 | done when | correct against `openssl s_server` in 1.2 and 1.3-only modes; fuzz clean; a test proves zero bytes sent when off; musl binary still has 0 `NEEDED` |
 | revisit | a mature pure-Rust rustls provider makes a 1.3 handshake possible without C |
 
-### P3 — freeze → 1.0.0-rc.1 · ~1–2 days
+### P3 — freeze → 1.0.0-rc.1 · done 2026-08-25
+
+Done: `docs/stability.md`; `output summarize --format` (with `--json` as a warning alias);
+exit codes were already pinned; `tests/compat/` holds 11 scenario records (one written by
+the real 0.2.2 binary) and the `config init` template of every release, with the exact
+reader output pinned; `docs/evidence.md` maps every claim to its test, corpus scenario or
+measurement and `tests/evidence.rs` keeps the map honest; the nmap differential covers
+HTTP CONNECT and the TLS probe is checked against `openssl s_server` in CI.
 
 - `docs/stability.md`: the promise table above plus deprecation and MSRV policy.
 - Surface audit — free now, a major later:
@@ -123,7 +130,7 @@ triggers live in `docs/design/decisions.md`.
 - [ ] 0.3.0 released from `main`
 - [x] HTTP CONNECT: three-proxy fidelity table, mixed chains tested, fuzz clean (0.4.0) — code done 2026-08-25; release pending
 - [x] TLS probe: 1.2 and 1.3-only verified, off-by-default proven, musl static (0.5.0) — code done 2026-08-25; release pending
-- [ ] `--format` unified; exit codes pinned; backlog "before freeze" items closed
-- [ ] `docs/stability.md` and compat corpus in place
-- [ ] `1.0.0-rc.1` tagged; soak period completed with no surface change
+- [x] `--format` unified; exit codes pinned; backlog "before freeze" items closed (backlog was empty)
+- [x] `docs/stability.md` and compat corpus in place; `docs/evidence.md` added
+- [ ] `1.0.0-rc.1` tagged (commit is release-ready); soak period completed with no surface change
 - [ ] `1.0.0`

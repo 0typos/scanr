@@ -11,7 +11,9 @@ Start with [getting-started.md](getting-started.md).
 | [output-schema.md](output-schema.md) | the record, its guarantees, `jq` recipes (test-checked) |
 | [tuning.md](tuning.md) | where the limits are, with numbers |
 | [troubleshooting.md](troubleshooting.md) | keyed to emitted diagnostics |
-| [security.md](security.md) | trust boundaries, credentials, DNS leakage, `unsafe` inventory (test-checked) |
+| [security.md](security.md) | trust boundaries, credentials, DNS leakage, the one active probe, `unsafe` inventory (test-checked) |
+| [stability.md](stability.md) | what 1.x promises and what it does not |
+| [evidence.md](evidence.md) | every claim mapped to its test, corpus scenario or measurement (test-checked) |
 
 Man pages are in [`../man/`](../man), generated from the CLI definition and test-checked;
 `cargo run --example gen_man` regenerates them.

@@ -1,0 +1,2 @@
+{"port":33191,"protocol":"tcp","reason":null,"service_label":null,"source":"proxy_reply","state":"open","target":"127.0.0.1","timing_ms":{"total":0.58}}
+{"port":44391,"protocol":"tcp","reason":"HTTP proxy answered `HTTP/1.1 503 Service Unavailable` — no standard status means refused, so closed and filtered are not distinguished","service_label":null,"source":"proxy_reply","state":"error","target":"127.0.0.1","timing_ms":{"total":2.15}}

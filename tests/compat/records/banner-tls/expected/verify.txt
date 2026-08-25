@@ -1,0 +1,6 @@
+record.jsonl.gz
+  5 events
+  terminal: scan_completed
+  2 probe results
+
+ok — record is complete and internally consistent

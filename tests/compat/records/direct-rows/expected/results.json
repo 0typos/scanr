@@ -1,0 +1,8 @@
+{"port":33191,"protocol":"tcp","reason":null,"service_label":null,"source":"local_stack","state":"open","target":"127.0.0.1","timing_ms":{"total":0.04}}
+{"port":33653,"protocol":"tcp","reason":null,"service_label":null,"source":"local_stack","state":"open","target":"127.0.0.1","timing_ms":{"total":0.04}}
+{"port":44391,"protocol":"tcp","reason":"connection refused","service_label":null,"source":"local_stack","state":"closed","target":"127.0.0.1","timing_ms":{"total":0.05}}
+{"port":46323,"protocol":"tcp","reason":"connection refused","service_label":null,"source":"local_stack","state":"closed","target":"127.0.0.1","timing_ms":{"total":0.09}}
+{"port":33191,"protocol":"tcp","reason":"connect timed out","service_label":null,"source":"timeout","state":"filtered","target":"192.0.2.1","timing_ms":{"total":1000.11}}
+{"port":33653,"protocol":"tcp","reason":"connect timed out","service_label":null,"source":"timeout","state":"filtered","target":"192.0.2.1","timing_ms":{"total":1000.1}}
+{"port":44391,"protocol":"tcp","reason":"connect timed out","service_label":null,"source":"timeout","state":"filtered","target":"192.0.2.1","timing_ms":{"total":1000.17}}
+{"port":46323,"protocol":"tcp","reason":"connect timed out","service_label":null,"source":"timeout","state":"filtered","target":"192.0.2.1","timing_ms":{"total":1001.08}}

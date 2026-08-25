@@ -1,0 +1,2 @@
+{"port":37889,"protocol":"tcp","reason":null,"service_label":null,"source":"local_stack","state":"open","target":"127.0.0.1","timing_ms":{"total":0.1}}
+{"port":40813,"protocol":"tcp","reason":null,"service_label":null,"source":"local_stack","state":"open","target":"127.0.0.1","timing_ms":{"total":0.07}}

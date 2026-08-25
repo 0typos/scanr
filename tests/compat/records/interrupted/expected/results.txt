@@ -1,0 +1,5 @@
+127.0.0.1:443/tcp     closed    local_stack  https
+127.0.0.1:8080/tcp    closed    local_stack  webcache
+127.0.0.1:44391/tcp   closed    local_stack
+192.0.2.1:80/tcp      filtered  timeout      http
+192.0.2.2:443/tcp     filtered  timeout      https
