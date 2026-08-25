@@ -56,10 +56,11 @@ weakest hop's (D33 amended). Real-proxy rows are in `docs/transports.md`.
 | security | Basic is base64 in the clear — same class as RFC 1929; the chain-credentials table applies unchanged |
 | done when | fidelity rows for three real proxies; `http→socks5` and `socks5→http` chains tested; fuzz clean |
 
-### P2 — TLS ClientHello probe → 0.5.0 · D35 · ~4–6 days
+### P2 — TLS ClientHello probe → 0.5.0 · D35 · done 2026-08-25
 
-The largest item and the one most likely to slip; it is last before the freeze for that
-reason.
+Shipped as designed below and verified against `openssl s_server` in `-tls1_2` and
+`-tls1_3` modes. One limit recorded: no SNI on the direct path for locally resolved
+names (deferred, decisions table). SHA-256 hand-rolled rather than `sha2`.
 
 | | |
 |---|---|
@@ -121,7 +122,7 @@ triggers live in `docs/design/decisions.md`.
 
 - [ ] 0.3.0 released from `main`
 - [x] HTTP CONNECT: three-proxy fidelity table, mixed chains tested, fuzz clean (0.4.0) — code done 2026-08-25; release pending
-- [ ] TLS probe: 1.2 and 1.3-only verified, off-by-default proven, musl static (0.5.0)
+- [x] TLS probe: 1.2 and 1.3-only verified, off-by-default proven, musl static (0.5.0) — code done 2026-08-25; release pending
 - [ ] `--format` unified; exit codes pinned; backlog "before freeze" items closed
 - [ ] `docs/stability.md` and compat corpus in place
 - [ ] `1.0.0-rc.1` tagged; soak period completed with no surface change

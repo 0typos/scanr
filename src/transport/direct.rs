@@ -56,8 +56,19 @@ impl Transport for DirectTransport {
                     .banner
                     .as_ref()
                     .and_then(|o| super::read_banner(&stream, o, elapsed));
+                // TLS servers never speak first, so a silent open port is exactly where
+                // a ClientHello can learn something. Same connection; nothing is sent
+                // to a service that already greeted. A locally resolved name has been
+                // reduced to its address by here, so no SNI travels on the direct path.
+                let tls = timing
+                    .tls
+                    .as_ref()
+                    .filter(|_| banner.is_none())
+                    .map(|o| crate::tls::probe(&stream, o, elapsed, None));
                 close_without_time_wait(&stream);
-                ProbeOutcome::open(phases, Source::LocalStack).with_banner(banner)
+                ProbeOutcome::open(phases, Source::LocalStack)
+                    .with_banner(banner)
+                    .with_tls(tls)
             }
             Err(e) => classify_os_error(&e, phases),
         }
@@ -97,6 +108,7 @@ mod tests {
             retries: 0,
             retry_delay: Duration::from_millis(0),
             banner: None,
+            tls: None,
         }
     }
 

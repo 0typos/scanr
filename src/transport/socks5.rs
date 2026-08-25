@@ -296,8 +296,18 @@ impl ProxyTransport {
             .as_ref()
             .filter(|_| outcome.state == State::Open)
             .and_then(|o| super::read_banner(&s, o, connect_elapsed));
+        // Through a proxy the hostname survives to here, so SNI can name it.
+        let sni = match dest {
+            Destination::Host(h, _) => Some(h.as_str()),
+            Destination::Addr(_) => None,
+        };
+        let tls = timing
+            .tls
+            .as_ref()
+            .filter(|_| outcome.state == State::Open && banner.is_none())
+            .map(|o| crate::tls::probe(&s, o, connect_elapsed, sni));
         DetailedOutcome {
-            outcome: outcome.with_banner(banner),
+            outcome: outcome.with_banner(banner).with_tls(tls),
             reply: Some(reply),
         }
     }
@@ -783,6 +793,7 @@ mod tests {
             retries: 0,
             retry_delay: Duration::from_millis(0),
             banner: None,
+            tls: None,
         }
     }
 

@@ -121,6 +121,12 @@ jobs:
       - name: Differential against nmap
         run: cargo test --test differential -- --ignored --test-threads=1
 
+      # The TLS probe against real OpenSSL: a 1.2 server yields the certificate it was
+      # given, a 1.3-only server answers protocol_version. Ignored by default so a
+      # machine without `openssl` still gets a clean `cargo test`.
+      - name: TLS probe against openssl s_server
+        run: cargo test --test integration -- --ignored the_tls_probe_agrees_with_openssl_s_server
+
   coverage:
     name: Coverage floor
     runs-on: ubuntu-latest
@@ -227,7 +233,7 @@ jobs:
       # That has happened twice.
       - name: Replay seeds
         run: |
-          for target in socks5_reply socks5_handshake http_connect_reply config specs record; do
+          for target in socks5_reply socks5_handshake http_connect_reply tls_reply config specs record; do
             echo "--- $target ---"
             for seed in fuzz/seeds/"$target"/*; do
               cargo fuzz run "$target" "$seed"

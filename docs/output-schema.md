@@ -103,6 +103,7 @@ No per-probe start event: derivable, and it would double file size.
 | `banner` | bytes volunteered; absent if none or `--banner` off |
 | `banner_hex` | replaces `banner` when not valid UTF-8 |
 | `banner_bytes` | bytes read |
+| `tls` | present exactly when the TLS probe ran (open, no banner, `--tls`): `offered` (`"1.2"`), `sent_bytes`, `read_bytes`, `sni`, `negotiated` (`"1.2"` … or `null`), `cipher` (`"0xc02f"`), `cipher_name`, `alpn`, `alert` (`{level, description, name}` or `null`), `leaf_sha256` (hex), `leaf_len`, `leaf_der` (base64, only when ≤ 8 KiB), `chain_len`, `error` (why the flight stopped, when it did) |
 | `attempts` | timeout retries merged into one row |
 | `attempt_states` | per-attempt states |
 | `timing_ms` | `proxy_connect`, `handshake` absent on the direct path |
@@ -126,7 +127,8 @@ No per-probe start event: derivable, and it would double file size.
 - `timeout_ms` is a ceiling; the wait scales off the host's measured connect time.
 
 ```json
-{"banner": {"enabled": true, "sent_bytes": 0, "max_bytes": 1024, "timeout_ms": 500}}
+{"banner": {"enabled": true, "sent_bytes": 0, "max_bytes": 1024, "timeout_ms": 500},
+ "tls": {"enabled": false, "sent_bytes": 0}}
 ```
 
 ### `service_label`

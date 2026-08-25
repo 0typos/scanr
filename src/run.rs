@@ -1007,6 +1007,17 @@ fn config_event(plan: &ScanPlan, facts: &HostFacts) -> serde_json::Value {
                 "timeout_ms": b.timeout().as_millis() as u64,
             }),
         },
+        // The one active probe (D35). `sent_bytes` is the ClientHello's length, so a
+        // record can be audited on the point: zero means nothing was sent.
+        "tls": match &plan.timing.tls {
+            None => json!({ "enabled": false, "sent_bytes": 0 }),
+            Some(t) => json!({
+                "enabled": true,
+                "offered": "1.2",
+                "sent_bytes": crate::tls::client_hello(None).len(),
+                "timeout_ms": t.timeout().as_millis() as u64,
+            }),
+        },
         "output": {
             "dir": plan.output_dir.to_string_lossy(),
             "open_only": plan.open_only,
@@ -1842,6 +1853,7 @@ mod tests {
                 pressure: None,
                 banner: None,
                 via: None,
+                tls: None,
             },
             attempts: 1,
             attempt_states: vec![state],

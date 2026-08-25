@@ -54,3 +54,10 @@ path = "fuzz_targets/http_connect_reply.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "tls_reply"
+path = "fuzz_targets/tls_reply.rs"
+test = false
+doc = false
+bench = false

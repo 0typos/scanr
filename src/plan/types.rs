@@ -29,6 +29,8 @@ pub struct Timing {
     pub retry_delay: Duration,
     /// `None` when banner grabbing is off, which is the default.
     pub banner: Option<Banner>,
+    /// `None` when the TLS ClientHello probe is off, which is the default (D35).
+    pub tls: Option<crate::tls::TlsProbe>,
 }
 
 impl Timing {
@@ -44,6 +46,7 @@ impl Timing {
             retries: 0,
             retry_delay: Duration::ZERO,
             banner: None,
+            tls: None,
         }
     }
 }
@@ -497,6 +500,7 @@ impl ScanPlan {
                 retries: 0,
                 retry_delay: Duration::ZERO,
                 banner: None,
+                tls: None,
             },
             dns_requested: DnsMode::Local,
             dns_effective: DnsMode::Local,

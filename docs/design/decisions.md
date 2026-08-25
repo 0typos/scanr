@@ -242,8 +242,14 @@ accepted 2026-08-25 · alternatives rejected: per-proxy status mapping; Digest/N
 - Response parser is bounded at 8 KiB, deadline-driven against trickling, refuses anything not starting `HTTP/` byte by byte, filters peer text to printable ASCII, and stops at the blank line so a banner behind a `200` is left for the banner reader. Fuzz target `http_connect_reply`.
 - Also found: 3proxy's SOCKS5 answers `0x05` for its *own* connect timeout when that is shorter than scanr's, so its "refused" means "failed"; documented as a caveat in `transports.md`.
 
-### D35 — TLS ClientHello probe
-proposed · `ROADMAP.md` P2 · offers TLS 1.2 only, because a 1.3 handshake needs a TLS stack with C, which D19/D28 exclude
+### D35 — TLS ClientHello probe: active, opt-in, TLS 1.2 only
+accepted 2026-08-25 · alternatives rejected: a full handshake via rustls (C/asm provider, ends the static build; D19, D28); x509 parsing in scanr (D32: a worse `tlsx`) · trigger: a mature pure-Rust rustls provider
+
+- The one thing scanr sends to a service. Off by default (`--tls`, `tls = true`); the record carries `scan_config.tls.sent_bytes` and a per-result `tls` object, so a record can be audited on the point. Runs only on open ports that volunteered no banner — TLS servers never speak first — on the same connection, after the banner wait.
+- 163 fixed bytes: TLS 1.2 ClientHello, fixed client random, twenty common suites, ALPN `h2, http/1.1`, no `supported_versions`, SNI when the transport carries a hostname. `docs/security.md` lists them and a test holds it to the code.
+- Reads ServerHello (version, cipher, ALPN), Certificate (leaf DER ≤ 8 KiB embedded, SHA-256 always, chain length) or Alert, then resets. Verified against `openssl s_server`: `-tls1_2` yields the certificate it was given and `h2`; `-tls1_3` answers `protocol_version` (70). Flight bounded at 64 KiB, deadline-driven, ALPN filtered to printable ASCII; fuzz target `tls_reply`, seeds captured from OpenSSL.
+- SHA-256 and base64 are hand-rolled; no new dependency, musl binary still 0 `NEEDED`.
+- Known limit: on the direct path a locally resolved hostname reaches the probe as an address, so no SNI is sent; through a proxy with transport DNS the name survives and SNI is sent. `sni` in the record says which.
 
 ### D36 — 1.0 gate and stability policy
 accepted 2026-08-25
@@ -258,7 +264,8 @@ The external-consumer gate is withdrawn. 1.0 promises the record, the CLI and th
 |---|---|---|
 | HTTP CONNECT | accepted, shipped | D34 |
 | squid `X-Squid-Error` errno → `full` for squid | deferred | D34 trigger: a second vendor exposing the errno |
-| TLS ClientHello | proposed | D35 |
+| TLS ClientHello | accepted, shipped | D35 |
+| SNI for locally resolved names on the direct path | deferred | needs the hostname carried past resolution; D35 |
 | commercial rotating pool fidelity | open | no access; add during soak if reachable |
 | sustained multi-hour run | open | measure during soak |
 | aarch64 builds | deferred | post-1.0, additive |

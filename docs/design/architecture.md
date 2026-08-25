@@ -38,12 +38,13 @@ src/
     human.rs        stdout/stderr rendering, colour, width-aware padding (D22)
   verify.rs         readers: output events / results / summarize / verify / remainder
   services.rs       layered service labels (D31)
+  tls.rs            the TLS ClientHello probe: hello bytes, bounded flight parser, SHA-256 (D35)
   diag.rs           host facts (sysctl, rlimit), pressure classification, WARNING_CODES
   units.rs          duration parsing and rendering
   timefmt.rs        RFC 3339 from epoch
-  testsupport/      in-process TCP, SOCKS5 and HTTP CONNECT fixtures; feature `testsupport`
+  testsupport/      in-process TCP, SOCKS5, HTTP CONNECT and TLS-responder fixtures; feature `testsupport`
 tests/              integration, cli_spec, spec_conformance, man_pages, differential (nmap; CI only)
-fuzz/               six libFuzzer targets and committed seeds, replayed in CI
+fuzz/               seven libFuzzer targets and committed seeds, replayed in CI
 ```
 
 ## Data flow
@@ -117,7 +118,7 @@ the sysctl remediation, `ECONNREFUSED` to the proxy → "proxy not listening", r
 | `thiserror` | error definitions | boilerplate |
 | `libc` | sysctl, rlimit, signal, getrandom | no std equivalent |
 
-Written directly: SOCKS5, HTTP CONNECT (with base64), the permutation, CIDR/range/port/duration parsing, the token
+Written directly: SOCKS5, HTTP CONNECT (with base64), the TLS ClientHello and flight parser (with SHA-256), the permutation, CIDR/range/port/duration parsing, the token
 bucket, caret rendering, RFC 3339. Rejected: `miette`, `tokio`, `mio`, any SOCKS crate,
 `tracing`/`log`, `uuid`/`ulid`, `chrono`/`time`.
 

@@ -74,6 +74,7 @@ Seven built-ins. Flat and complete, no inheritance. `scanr config show` prints t
 - Default follows the transport: `proxy` for any proxy (socks5, http, chain, pool), else `direct`.
 - `[profiles.proxy]` overrides only the fields set; a new name falls back to the transport-appropriate built-in.
 - See [tuning.md](tuning.md) before changing these.
+- Also profile fields: `banner_bytes` (1024), `banner_timeout` (500ms), `tls_timeout` (1s) — ceilings for the banner read and the TLS probe.
 
 ## Transports
 
@@ -132,6 +133,7 @@ transport = "lab"
 targets = ["lab"]          # names from [targets.*], or literal specs
 ports = ["web"]            # names from [ports.*], or literal specs
 connect_timeout = "8s"     # any profile field, inline for this scan only
+tls = true                 # the TLS ClientHello probe for this scan; off by default
 ```
 
 An unmatched name is a literal spec: `targets = ["10.0.0.0/24"]` needs no set.

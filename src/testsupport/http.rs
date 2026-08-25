@@ -255,6 +255,7 @@ mod tests {
             retries: 0,
             retry_delay: Duration::ZERO,
             banner: None,
+            tls: None,
         }
     }
 
