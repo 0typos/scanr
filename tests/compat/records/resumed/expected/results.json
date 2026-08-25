@@ -1,0 +1,13 @@
+{"collapsed":true,"port":80,"protocol":"tcp","reason":"connection refused","service_label":"http","source":"local_stack","state":"closed","target":"127.0.0.1"}
+{"collapsed":true,"port":9090,"protocol":"tcp","reason":"connection refused","service_label":null,"source":"local_stack","state":"closed","target":"127.0.0.1"}
+{"port":33191,"protocol":"tcp","reason":null,"service_label":null,"source":"local_stack","state":"open","target":"127.0.0.1","timing_ms":{"total":0.07}}
+{"collapsed":true,"port":443,"protocol":"tcp","reason":"connect timed out","service_label":"https","source":"timeout","state":"filtered","target":"192.0.2.1"}
+{"collapsed":true,"port":8080,"protocol":"tcp","reason":"connect timed out","service_label":"http-proxy","source":"timeout","state":"filtered","target":"192.0.2.1"}
+{"collapsed":true,"port":9090,"protocol":"tcp","reason":"connect timed out","service_label":null,"source":"timeout","state":"filtered","target":"192.0.2.1"}
+{"collapsed":true,"port":33191,"protocol":"tcp","reason":"connect timed out","service_label":null,"source":"timeout","state":"filtered","target":"192.0.2.1"}
+{"collapsed":true,"port":44391,"protocol":"tcp","reason":"connect timed out","service_label":null,"source":"timeout","state":"filtered","target":"192.0.2.1"}
+{"collapsed":true,"port":80,"protocol":"tcp","reason":"connect timed out","service_label":"http","source":"timeout","state":"filtered","target":"192.0.2.2"}
+{"collapsed":true,"port":8080,"protocol":"tcp","reason":"connect timed out","service_label":"http-proxy","source":"timeout","state":"filtered","target":"192.0.2.2"}
+{"collapsed":true,"port":9090,"protocol":"tcp","reason":"connect timed out","service_label":null,"source":"timeout","state":"filtered","target":"192.0.2.2"}
+{"collapsed":true,"port":33191,"protocol":"tcp","reason":"connect timed out","service_label":null,"source":"timeout","state":"filtered","target":"192.0.2.2"}
+{"collapsed":true,"port":44391,"protocol":"tcp","reason":"connect timed out","service_label":null,"source":"timeout","state":"filtered","target":"192.0.2.2"}

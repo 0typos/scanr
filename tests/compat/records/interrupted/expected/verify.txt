@@ -1,0 +1,6 @@
+record.jsonl.gz
+  8 events
+  terminal: scan_interrupted
+  5 probe results
+
+ok — record is complete and internally consistent

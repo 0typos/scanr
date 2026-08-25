@@ -332,3 +332,138 @@ fn a_proxied_scan_agrees_with_nmap_direct() {
     let theirs = nmap_states("127.0.0.1", &ports);
     compare("scanr via SOCKS5 vs nmap direct", &proxied, &theirs);
 }
+
+/// Through an HTTP CONNECT proxy the open set must match nmap's direct verdicts, and
+/// nmap's own `--proxies http://` must agree with scanr about it.
+#[test]
+#[ignore = "needs nmap installed; run with --ignored"]
+fn a_scan_through_an_http_proxy_agrees_with_nmap() {
+    if !nmap_available() {
+        eprintln!("nmap not installed; skipping");
+        return;
+    }
+    use scanr::testsupport::http::{Behavior, HttpFixture};
+
+    let fx = Fixture::build(8, 12);
+    let ports = fx.all_ports();
+    let proxy = HttpFixture::start(Behavior::Faithful);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("scanr.toml"),
+        format!(
+            "version = 1\n[transports.corp]\ntype = \"http\"\naddress = \"{}\"\n",
+            proxy.addr()
+        ),
+    )
+    .unwrap();
+    let out = Command::new(BIN)
+        .args([
+            "run",
+            "--transport",
+            "corp",
+            "--targets",
+            "127.0.0.1",
+            "--ports",
+            &ports,
+            "--output-dir",
+            "out",
+            "--all",
+            "-q",
+            "--no-spans",
+        ])
+        .current_dir(dir.path())
+        .env("XDG_CONFIG_HOME", dir.path().join("xdg"))
+        .env("NO_COLOR", "1")
+        .output()
+        .expect("scanr should run");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let file = scanr::testsupport::find_record(&dir.path().join("out")).unwrap();
+    let proxied: BTreeMap<u16, String> = scanr::testsupport::record_text(&file)
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|e| e["type"] == "probe_result")
+        .filter_map(|e| Some((e["port"].as_u64()? as u16, e["state"].as_str()?.to_string())))
+        .collect();
+
+    // HTTP cannot say "refused", so only the open set is comparable: every open port
+    // nmap sees directly must be open through the proxy, and nothing else may be.
+    let direct = nmap_states("127.0.0.1", &ports);
+    let ours_open: Vec<u16> = proxied
+        .iter()
+        .filter(|(_, s)| *s == "open")
+        .map(|(p, _)| *p)
+        .collect();
+    let theirs_open: Vec<u16> = direct
+        .iter()
+        .filter(|(_, s)| *s == "open")
+        .map(|(p, _)| *p)
+        .collect();
+    assert_eq!(
+        ours_open, theirs_open,
+        "open sets differ: scanr via http {ours_open:?}, nmap direct {theirs_open:?}"
+    );
+    for p in &fx.closed {
+        assert_eq!(
+            proxied.get(p).map(String::as_str),
+            Some("error"),
+            "port {p}: a refused destination through HTTP is `error`, never a guessed `closed`"
+        );
+    }
+
+    // nmap through the same proxy, if this nmap supports --proxies for connect scans.
+    let out_path = dir.path().join("proxied.gnmap");
+    let nm = Command::new("nmap")
+        .args([
+            "-sT",
+            "-Pn",
+            "-n",
+            "-T4",
+            "--host-timeout",
+            "60s",
+            "-p",
+            &ports,
+        ])
+        .args([
+            "--proxies",
+            &format!("http://{}", proxy.addr()),
+            "127.0.0.1",
+            "-oG",
+        ])
+        .arg(&out_path)
+        .output()
+        .expect("nmap should run");
+    if !nm.status.success() {
+        eprintln!("nmap --proxies unsupported here; skipping the nmap-side comparison");
+        return;
+    }
+    let text = std::fs::read_to_string(&out_path).unwrap_or_default();
+    let mut nmap_open = Vec::new();
+    for line in text.lines() {
+        let Some((_, rest)) = line.split_once("Ports:") else {
+            continue;
+        };
+        for entry in rest.split("Ignored").next().unwrap_or("").split(',') {
+            let f: Vec<&str> = entry.trim().split('/').collect();
+            if f.len() >= 2
+                && f[1] == "open"
+                && let Ok(p) = f[0].parse::<u16>()
+            {
+                nmap_open.push(p);
+            }
+        }
+    }
+    nmap_open.sort_unstable();
+    assert_eq!(
+        nmap_open, ours_open,
+        "nmap via http and scanr via http disagree on the open set"
+    );
+    eprintln!(
+        "  scanr via http vs nmap: {} open ports agree",
+        ours_open.len()
+    );
+}

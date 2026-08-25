@@ -14,6 +14,30 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
 
 ## [Unreleased]
 
+## [1.0.0-rc.1] - 2026-08-25
+
+### Added
+
+- `docs/stability.md`: what 1.x promises (record, CLI, config), what it does not, and
+  the deprecation rule.
+- `tests/compat/`: eleven scenario records — direct (spans and rows), SOCKS5 full and
+  open-only, HTTP CONNECT, a mixed chain, a pool, banner + TLS, interrupted and resumed,
+  and a schema-1 record written by the 0.2.2 binary — with the exact output of every
+  reader pinned, plus the `config init` template of every release, which must still
+  validate and plan. `tests/compat.rs` holds the build to all of it.
+- `docs/evidence.md` maps every claim in the docs to the test, corpus scenario or
+  measured decision behind it; `tests/evidence.rs` fails if a cited test disappears.
+- The nmap differential now covers HTTP CONNECT, and CI checks the TLS probe against
+  `openssl s_server`.
+
+### Changed
+
+- `output summarize` takes `--format table|json`, the same flag as `output results`.
+
+### Deprecated
+
+- `output summarize --json`: still works, warns on stderr, removed in 2.0.
+
 ## [0.5.0] - 2026-08-25
 
 ### Added

@@ -1,0 +1,8 @@
+127.0.0.1:33191/tcp   open      local_stack
+127.0.0.1:33653/tcp   open      local_stack
+127.0.0.1:44391/tcp   closed    local_stack
+127.0.0.1:46323/tcp   closed    local_stack
+192.0.2.1:33191/tcp   filtered  timeout
+192.0.2.1:33653/tcp   filtered  timeout
+192.0.2.1:44391/tcp   filtered  timeout
+192.0.2.1:46323/tcp   filtered  timeout

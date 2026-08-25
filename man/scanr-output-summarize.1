@@ -4,7 +4,7 @@
 .SH NAME
 scanr\-output\-summarize \- Summarize a scan record: totals, and counts by host, network, and service
 .SH SYNOPSIS
-\fBscanr\-output\-summarize\fR [\fB\-\-by\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIFILE\fR> 
+\fBscanr\-output\-summarize\fR [\fB\-\-by\fR] [\fB\-\-format\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIFILE\fR> 
 .SH DESCRIPTION
 Summarize a scan record: totals, and counts by host, network, and service
 .SH OPTIONS
@@ -12,8 +12,8 @@ Summarize a scan record: totals, and counts by host, network, and service
 \fB\-\-by\fR \fI<FIELD>\fR
 Show only one section: scan, host, network, port, or service
 .TP
-\fB\-\-json\fR
-Emit JSON instead of a table
+\fB\-\-format\fR \fI<FORMAT>\fR [default: table]
+Output shape: table or json
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

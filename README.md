@@ -154,7 +154,9 @@ Methodology and knobs: [docs/tuning.md](docs/tuning.md).
 | [docs/tuning.md](docs/tuning.md) | limits, with numbers |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | keyed to emitted diagnostics |
 | [docs/security.md](docs/security.md) | trust boundaries, credentials, DNS |
-| [ROADMAP.md](ROADMAP.md) | the path to 1.0 and what it promises |
+| [docs/stability.md](docs/stability.md) | what 1.x promises and what it does not |
+| [docs/evidence.md](docs/evidence.md) | every claim, and the test or measurement behind it |
+| [ROADMAP.md](ROADMAP.md) | the path to 1.0 |
 | [docs/design/decisions.md](docs/design/decisions.md) | decision register with measurements |
 
 Man pages in `man/`, generated from the CLI definition.

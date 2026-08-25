@@ -167,8 +167,11 @@ enum OutputCmd {
         /// Show only one section: scan, host, network, port, or service
         #[arg(long, value_name = "FIELD", value_parser = grouping_arg)]
         by: Option<Grouping>,
-        /// Emit JSON instead of a table
-        #[arg(long)]
+        /// Output shape: table or json
+        #[arg(long, value_name = "FORMAT", default_value = "table", value_parser = summary_format_arg)]
+        format: SummaryFormat,
+        /// Deprecated alias for `--format json`, kept so existing scripts keep working
+        #[arg(long, hide = true)]
         json: bool,
     },
     /// Check a scan record for integrity and completeness
@@ -375,6 +378,29 @@ fn format_arg(s: &str) -> Result<ResultFormat, String> {
         "list" => Ok(ResultFormat::List),
         // Built from the list, so the message cannot drift from what is accepted.
         _ => Err(format!("expected one of: {}", ResultFormat::ALL.join(", "))),
+    }
+}
+
+/// `output summarize` shapes. Named the same way as `output results`'s, so the two
+/// commands take the same flag — they did not before 1.0, and a flag is a promise.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum SummaryFormat {
+    Table,
+    Json,
+}
+
+impl SummaryFormat {
+    const ALL: &'static [&'static str] = &["table", "json"];
+}
+
+fn summary_format_arg(s: &str) -> Result<SummaryFormat, String> {
+    match s {
+        "table" => Ok(SummaryFormat::Table),
+        "json" => Ok(SummaryFormat::Json),
+        _ => Err(format!(
+            "expected one of: {}",
+            SummaryFormat::ALL.join(", ")
+        )),
     }
 }
 
@@ -1191,10 +1217,19 @@ fn install_services_best_effort(cli: &Cli) {
 fn cmd_output(cli: &Cli, cmd: &OutputCmd) -> Result<u8, ConfigError> {
     install_services_best_effort(cli);
     match cmd {
-        OutputCmd::Summarize { file, by, json } => {
+        OutputCmd::Summarize {
+            file,
+            by,
+            format,
+            json,
+        } => {
+            if *json {
+                eprintln!("warning: `--json` is deprecated; use `--format json`");
+            }
+            let as_json = *json || *format == SummaryFormat::Json;
             let style = output_style(cli);
             let report =
-                crate::verify::summarize(file, *by, *json, &style).map_err(ConfigError::new)?;
+                crate::verify::summarize(file, *by, as_json, &style).map_err(ConfigError::new)?;
             let _ = write!(std::io::stdout(), "{}", report);
             Ok(EXIT_OK)
         }

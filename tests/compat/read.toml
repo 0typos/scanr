@@ -1,0 +1,6 @@
+# Used by tests/compat.rs when reading corpus records: labels from the binary only,
+# so the pinned output is the same on every machine.
+version = 1
+
+[defaults]
+use_etc_services = false

@@ -1,0 +1,2 @@
+{"port":33191,"protocol":"tcp","reason":null,"service_label":null,"source":"proxy_reply","state":"open","target":"127.0.0.1","timing_ms":{"total":1.52}}
+{"port":44391,"protocol":"tcp","reason":"general SOCKS server failure (proxy reply 0x01) — this proxy does not distinguish closed from filtered","service_label":null,"source":"proxy_reply","state":"error","target":"127.0.0.1","timing_ms":{"total":1.99}}

@@ -197,7 +197,7 @@ target list). `output` streams; peak resident on the 374 MB record:
 |---|---|---|
 | `output verify` | 3.1 MB | counters and the config event |
 | `output events` | negligible | decompressing pipe |
-| `output summarize` | follows scan shape | per-host and per-port counters (/16 × 1,000 ports: 65,536 host + ≤65,535 port entries), open ports at two bytes each; `--json` builds only requested sections (`--by port --json` skips the host array) |
+| `output summarize` | follows scan shape | per-host and per-port counters (/16 × 1,000 ports: 65,536 host + ≤65,535 port entries), open ports at two bytes each; `--format json` builds only requested sections (`--by port --format json` skips the host array) |
 | `output results` | matching rows | unfiltered is the whole scan; `events` streams |
 | `output remainder` | 96 MB | the set of endpoints already probed |
 

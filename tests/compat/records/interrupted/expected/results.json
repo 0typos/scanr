@@ -1,0 +1,5 @@
+{"port":443,"protocol":"tcp","reason":"connection refused","service_label":"https","source":"local_stack","state":"closed","target":"127.0.0.1","timing_ms":{"total":0.05}}
+{"port":8080,"protocol":"tcp","reason":"connection refused","service_label":"webcache","source":"local_stack","state":"closed","target":"127.0.0.1","timing_ms":{"total":0.09}}
+{"port":44391,"protocol":"tcp","reason":"connection refused","service_label":null,"source":"local_stack","state":"closed","target":"127.0.0.1","timing_ms":{"total":0.04}}
+{"port":80,"protocol":"tcp","reason":"connect timed out","service_label":"http","source":"timeout","state":"filtered","target":"192.0.2.1","timing_ms":{"total":2001.06}}
+{"port":443,"protocol":"tcp","reason":"connect timed out","service_label":"https","source":"timeout","state":"filtered","target":"192.0.2.2","timing_ms":{"total":2001.1}}

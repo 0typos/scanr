@@ -1,0 +1,4 @@
+{"port":33191,"protocol":"tcp","reason":null,"service_label":null,"source":"proxy_reply","state":"open","target":"127.0.0.1","timing_ms":{"total":1.22},"via":"b"}
+{"port":33653,"protocol":"tcp","reason":null,"service_label":null,"source":"proxy_reply","state":"open","target":"127.0.0.1","timing_ms":{"total":0.9},"via":"b"}
+{"collapsed":true,"port":44391,"protocol":"tcp","reason":"connection refused (proxy reply 0x05)","service_label":null,"source":"proxy_reply","state":"closed","target":"127.0.0.1","via":"b"}
+{"collapsed":true,"port":46323,"protocol":"tcp","reason":"connection refused (proxy reply 0x05)","service_label":null,"source":"proxy_reply","state":"closed","target":"127.0.0.1","via":"a"}

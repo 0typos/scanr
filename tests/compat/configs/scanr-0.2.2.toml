@@ -1,0 +1,180 @@
+# scanr configuration
+#
+# Discovery, lowest precedence first:
+#   1. ~/.config/scanr/config.toml   (or $XDG_CONFIG_HOME/scanr/config.toml)
+#   2. ./scanr.toml                  (searched upward from the working directory)
+# `--config <path>` replaces both.
+#
+# Resolution order for any single value:
+#   builtin default -> builtin profile -> user config -> project config
+#     -> selected profile -> named scan -> environment (credentials) -> CLI override
+#
+# `scanr plan <scan>` shows the final value of every field and where it came from.
+
+version = 1
+
+
+# ─── Defaults ────────────────────────────────────────────────────────────────
+# Applied when a scan does not specify its own.
+[defaults]
+# Profile to use when a scan does not name one. Leave it unset and scanr follows the
+# transport: `proxy` for a SOCKS5 transport, `direct` otherwise. Set it to pin one.
+#   built-ins: proxy-careful | proxy | direct | direct-fast
+#   default: follows the transport      CLI: --profile
+# profile = "proxy"
+
+# Transport to use when a scan does not name one.
+#   default: "direct"         CLI: --transport
+transport = "direct"
+
+# Where JSONL scan records are written. Created if absent.
+#   default: "./scanr-results"    CLI: --output-dir
+output_dir = "./scanr-results"
+
+# Print only open ports to stdout. The JSONL record always contains every probe
+# outcome regardless of this setting.
+#   default: true             CLI: --open-only / --all
+open_only = true
+
+
+# ─── Profiles ────────────────────────────────────────────────────────────────
+# Timing and concurrency. Flat and complete — profiles do not inherit from each
+# other, so what you read here is exactly what runs.
+#
+# Defining a profile with a built-in name overrides only the fields you set.
+[profiles.lab]
+# In-flight probes. This is also the worker thread count: there is no queue, so
+# concurrency is a hard ceiling rather than a target.
+# Note that higher is not always faster — measured throughput peaked near 512 and
+# declined at 2048.
+#   range: 1-65535            default: profile-dependent    CLI: --concurrency
+concurrency = 512
+
+# Launch rate ceiling in probes/second. 0 disables the limit.
+#
+# Through a *remote* proxy every probe consumes a local ephemeral port, and Linux
+# holds TIME_WAIT for 60s against a default range of 28,232 ports — a hard ceiling
+# near 470/s. scanr closes probe sockets with SO_LINGER{on,0} to avoid TIME_WAIT
+# entirely, which lifts that ceiling substantially, but the limit is still worth
+# setting when you do not own the proxy.
+#   range: 0-1000000          default: profile-dependent    CLI: --rate
+rate = 400
+
+# Time to establish the TCP connection to the proxy itself. Ignored for direct.
+#   default: "3s"             CLI: (none)
+proxy_connect_timeout = "3s"
+
+# Time for the SOCKS5 greeting, authentication, and CONNECT reply. Ignored for direct.
+#   default: "5s"             CLI: (none)
+handshake_timeout = "5s"
+
+# Time for the destination connection to complete. For a proxied scan this covers
+# the proxy's own attempt to reach the destination.
+#   default: profile-dependent    CLI: --connect-timeout
+connect_timeout = "5s"
+
+# Retries for probes that time out. Other outcomes are never retried: a refused
+# connection is a definitive answer, whereas a timeout is ambiguous between a slow
+# proxy and a filtered destination.
+# Each retried probe still produces exactly one result record, carrying `attempts`
+# and `attempt_states`.
+#   range: 0-10               default: 1                    CLI: --retries
+retries = 1
+
+# Delay before a retry.
+#   default: "250ms"          CLI: (none)
+retry_delay = "250ms"
+
+
+# ─── Transports ──────────────────────────────────────────────────────────────
+# How connections are established. One transport per scan.
+
+# The implicit direct transport always exists; redefining it is optional.
+[transports.direct]
+type = "direct"
+
+[transports.lab]
+# "direct" or "socks5". SOCKS4/4a are not supported: they define only four reply
+# codes and cannot distinguish a closed port from a filtered one.
+type = "socks5"
+
+# host:port of the proxy. Required for socks5.
+address = "127.0.0.1:1080"
+
+# Optional SOCKS5 username/password authentication (RFC 1929). Left commented so
+# this file works as generated; uncomment both lines to enable it.
+# Note that this authenticates you to the proxy; it does not encrypt anything.
+#
+# Credentials come from the environment or a file — never inline. An inline
+# `password` key is rejected, because project config is normally committed.
+#   password_file must be mode 0600 or narrower.
+# username     = "scanner"
+# password_env = "SCANR_LAB_PASSWORD"
+# password_file = "~/.config/scanr/lab.password"
+
+# Who resolves hostnames.
+#   auto       transport-side when the transport supports it, local otherwise
+#   transport  hand the hostname to the proxy unresolved (no local DNS leak)
+#   local      resolve here; names with several addresses become several targets
+#   disabled   reject hostname targets outright
+#
+# Under transport-side resolution the SOCKS5 reply carries the proxy's bound
+# address, not the destination's, so results cannot record which IP was probed.
+# That is the tradeoff for not leaking queries and for reaching split-horizon names.
+#   default: "auto"           CLI: --dns
+dns = "auto"
+
+# What this proxy can actually distinguish, as reported by
+# `scanr transport test lab`. Many proxies — ssh -D and most commercial pools —
+# collapse every failure into SOCKS5 reply 0x01, so a closed port and a filtered
+# one are indistinguishable through them.
+#   full       refused connections are reported distinctly (reply 0x05)
+#   open_only  every failure looks the same; non-open results are recorded as
+#              `error` rather than guessed into closed/filtered
+# Leave it unset and scanr warns on every scan that fidelity is unknown.
+#   default: unset            CLI: (none)
+# fidelity = "full"
+
+
+# ─── Target sets ─────────────────────────────────────────────────────────────
+# Named, reusable. Accepts IP literals, CIDR blocks, inclusive a-b ranges, and
+# hostnames. IPv4 CIDRs include their network and broadcast addresses.
+[targets.lab]
+include = [
+  "10.20.30.0/24",
+  "10.20.31.10-10.20.31.20",
+]
+# Applied after expansion. Useful for keeping gateways and monitoring hosts out.
+exclude = [
+  "10.20.30.1",
+  "10.20.30.254",
+]
+
+# A set may instead read a line-delimited file. Blank lines and `#` comments skipped.
+[targets.from-inventory]
+file = "hosts.txt"
+
+
+# ─── Port sets ───────────────────────────────────────────────────────────────
+# Accepts single ports, inclusive ranges, and the keyword "all" (1-65535).
+[ports.web]
+ports = ["80", "443", "8000-8999"]
+
+[ports.common]
+ports = "21,22,23,25,53,80,110,143,443,445,3306,3389,5432,8080"
+
+
+# ─── Scans ───────────────────────────────────────────────────────────────────
+# Named, runnable with `scanr run <name>`.
+[scans.internal-web]
+description = "Internal web services through the lab proxy"
+profile = "proxy"
+transport = "lab"
+
+# Names defined above under [targets.*] and [ports.*]. A value that matches no
+# defined set is parsed as a literal spec, so `targets = ["10.0.0.0/24"]` also works.
+targets = ["lab"]
+ports = ["web"]
+
+# Any profile field may be overridden inline for this scan alone.
+connect_timeout = "8s"

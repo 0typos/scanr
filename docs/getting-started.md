@@ -154,7 +154,7 @@ by host (1 host):
   127.0.0.1             2      1        0      0  8080/http-proxy 8443/https-alt
 ```
 
-`summarize` also breaks down by network, port, service (`--by`, `--json`). `output
+`summarize` also breaks down by network, port, service (`--by`, `--format json`). `output
 results` filters by host, port, state; `--format nmap` / `list` hand on:
 [cli.md](cli.md#handing-results-to-another-tool).
 

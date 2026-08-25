@@ -1,0 +1,27 @@
+record.jsonl.gz
+  scan            (ad-hoc)
+  started         2026-08-25T22:53:43.880Z  (scanr 0.5.0)
+  transport       path via chain (full)
+  scope           1 targets x 2 ports = 2 probes
+  seed            0000000000000004
+  result          scan_completed (natural)
+  duration        0.06s
+  states          1 open, 1 closed, 0 filtered, 0 error
+
+by host (1 host):
+  host               open closed filtered  error  open ports
+  127.0.0.1             1      1        0      0  33191
+
+by network (1 network):
+  network              hosts  with-open   open filtered
+  127.0.0.0/24             1          1      1        0
+
+by port (2 ports):
+  port     service            open closed filtered  error
+  33191    -                     1      0        0      0
+  44391    -                     0      1        0      0
+
+by service (2 services):
+  service            open closed filtered  error  ports
+  (33191)               1      0        0      0  33191
+  (44391)               0      1        0      0  44391
