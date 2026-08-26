@@ -10,7 +10,8 @@ shapes, not guarantees.
 ```
 concurrency     512                                     builtin.proxy
 rate            400/s                                   builtin.proxy
-projection      ~10m39s at 400/s
+projection      ~10m39s at 400/s if every probe answers
+                ~1h25m25s if every probe times out (5s x 2 attempts / 512 in flight)
 host            ephemeral 32768-60999 (28232 ports), tcp_tw_reuse=2 (loopback only), nofile=1048576
 ```
 

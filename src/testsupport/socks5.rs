@@ -294,7 +294,7 @@ fn write_reply(s: &mut TcpStream, code: u8) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testsupport::{closed_port, open_listener};
+    use crate::testsupport::open_listener;
 
     #[test]
     fn fixture_starts_and_binds_loopback() {
@@ -308,7 +308,10 @@ mod tests {
         // Both must agree that an open port is open; they diverge on the failure path,
         // which is exactly the distinction the fidelity model exists to surface.
         let (_g, open) = open_listener();
-        let closed = closed_port();
+        // Port 1 rather than a bound-then-released port: tests run in parallel, and a
+        // released port can be re-bound by another test between here and the probe,
+        // which made this test report an `open` closed port once in a while.
+        let closed: SocketAddr = "127.0.0.1:1".parse().expect("valid literal");
 
         for b in [Behavior::Faithful, Behavior::Collapsing] {
             let fx = Socks5Fixture::start(b.clone());

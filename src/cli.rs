@@ -938,16 +938,28 @@ fn render_plan_footer(s: &mut String, plan: &ScanPlan, facts: &HostFacts, style:
     s.push('\n');
     match plan.projected_duration() {
         Some(d) => s.push_str(&format!(
-            "{:<16}~{} at {}/s\n",
+            "{:<16}~{} at {}/s if every probe answers\n",
             "projection",
             HumanElapsed(d),
             plan.timing.rate
         )),
         None => s.push_str(&format!(
-            "{:<16}unbounded rate; duration depends on how many probes time out\n",
+            "{:<16}unbounded rate; as fast as the transport answers\n",
             "projection"
         )),
     }
+    // The bound `rate` says nothing about, and the one that binds on real networks: a
+    // silent port costs the whole connect budget per attempt, `concurrency` at a time.
+    let t = &plan.timing;
+    s.push_str(&format!(
+        "{:<16}~{} if every probe times out ({} x {} attempt{} / {} in flight)\n",
+        "",
+        HumanElapsed(plan.silent_duration()),
+        render_duration(t.connect_timeout),
+        1 + t.retries,
+        if t.retries == 0 { "" } else { "s" },
+        t.concurrency
+    ));
     s.push_str(&format!("{:<16}{}\n", "host", facts));
 
     if !plan.warnings.is_empty() {

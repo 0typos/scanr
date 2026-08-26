@@ -14,6 +14,12 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
 
 ## [Unreleased]
 
+### Added
+
+- `scanr plan` projects the timeout-bound duration beside the rate-bound one: `~3d21h17m if
+  every probe times out (5s x 2 attempts / 512 in flight)`. The rate cap never binds on a
+  network of silent ports; this is the number that does.
+
 ### Changed
 
 - **Direct scans are 2.5–4× faster.** Workers hand results to the collector in batches
