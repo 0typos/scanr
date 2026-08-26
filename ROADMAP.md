@@ -110,7 +110,7 @@ Fill in. Anything touching a promised surface is "before freeze".
 
 | finding | surface | before freeze? | notes |
 |---|---|---|---|
-| | | | |
+| Reinstall rustup on the dev box | dev environment | no | `~/.cargo/bin/rustup` vanished 2026-08-25, leaving every symlink there dangling; `cargo-deny`, `cargo-fuzz` and `cargo-llvm-cov` went with it. Builds run via `~/.rustup/toolchains/stable-*/bin/cargo` meanwhile, so `cargo deny check` is CI-only until fixed. `rustup-init`, then `cargo install cargo-deny cargo-fuzz cargo-llvm-cov`. |
 
 ## Known gaps accepted for 1.0
 
