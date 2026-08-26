@@ -124,7 +124,8 @@ stays `.partial`; check the terminal event's `error` field if one was written.
 
 ```
 rate            400/s                                   builtin.proxy
-projection      ~10m39s at 400/s
+projection      ~10m39s at 400/s if every probe answers
+                ~1h25m25s if every probe times out (5s x 2 attempts / 512 in flight)
 ```
 
 | cause | note |

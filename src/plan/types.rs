@@ -496,6 +496,22 @@ impl ScanPlan {
         ))
     }
 
+    /// How long the scan takes if every probe times out: the bound that surprises
+    /// people, and the one `rate` says nothing about.
+    ///
+    /// A silent destination costs the full connect budget per attempt, and only
+    /// `concurrency` probes wait at once, so the time is `probes / concurrency` rounds of
+    /// `connect_timeout × attempts` plus the retry delays. Through a proxy the proxy does
+    /// the waiting, but the worker waits on the proxy for the same budget, so the
+    /// arithmetic is the same. A `/24 × 65,535` on the `proxy` profile is 3.8 days here
+    /// against 11.6 hours at its rate cap, which is why both are shown.
+    pub fn silent_duration(&self) -> Duration {
+        let t = &self.timing;
+        let per_probe = t.connect_timeout * (1 + t.retries) + t.retry_delay * t.retries;
+        let rounds = self.probe_count().div_ceil(u64::from(t.concurrency.max(1)));
+        per_probe.saturating_mul(u32::try_from(rounds).unwrap_or(u32::MAX))
+    }
+
     /// A minimal direct-transport plan over `127.0.0.1`, for tests that need to drive
     /// `run::execute` rather than the resolver.
     #[cfg(test)]
@@ -633,6 +649,23 @@ mod tests {
             !pool(vec![socks, direct]).supports_remote_dns(),
             "one member that resolves locally makes the pool resolve locally"
         );
+    }
+
+    /// 16.8M probes at 5 s x 2 attempts, 512 at a time, is days — and the rate cap says
+    /// hours. The plan has to show the one that will actually bind.
+    #[test]
+    fn the_silent_bound_is_timeout_times_attempts_over_concurrency() {
+        let mut p = ScanPlan::for_test((1..=100).collect(), 10);
+        p.timing.connect_timeout = Duration::from_secs(2);
+        p.timing.retries = 1;
+        p.timing.retry_delay = Duration::from_millis(500);
+        // 100 probes / 10 in flight = 10 rounds of (2 s x 2 + 0.5 s) = 45 s.
+        assert_eq!(p.silent_duration(), Duration::from_secs(45));
+        p.timing.retries = 0;
+        assert_eq!(p.silent_duration(), Duration::from_secs(20));
+        // A partial last round still costs a full round.
+        let q = ScanPlan::for_test((1..=101).collect(), 10);
+        assert_eq!(q.silent_duration(), Duration::from_millis(200) * 11);
     }
 
     #[test]

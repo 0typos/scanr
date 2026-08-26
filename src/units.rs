@@ -91,8 +91,17 @@ impl fmt::Display for HumanElapsed {
             write!(f, "{total:.2}s")
         } else {
             let secs = self.0.as_secs();
-            let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
-            if h > 0 {
+            let (d, h, m, s) = (
+                secs / 86_400,
+                (secs % 86_400) / 3600,
+                (secs % 3600) / 60,
+                secs % 60,
+            );
+            // Days, because the timeout-bound projection of a large proxied scan is
+            // measured in them, and `91h12m00s` hides that.
+            if d > 0 {
+                write!(f, "{d}d{h:02}h{m:02}m")
+            } else if h > 0 {
                 write!(f, "{h}h{m:02}m{s:02}s")
             } else {
                 write!(f, "{m}m{s:02}s")

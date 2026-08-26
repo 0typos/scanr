@@ -2247,3 +2247,40 @@ fn the_tls_probe_agrees_with_openssl_s_server() {
     assert_eq!(tls13["tls"]["alert"]["name"], "protocol_version", "{tls13}");
     assert!(tls13["tls"]["leaf_der"].is_null(), "{tls13}");
 }
+
+/// The rate projection is the optimistic bound; the plan must also show what a network of
+/// silent ports costs, since that is the one that binds in practice.
+#[test]
+fn plan_projects_both_the_rate_bound_and_the_timeout_bound() {
+    let d = tempfile::tempdir().unwrap();
+    let out = scanr(
+        d.path(),
+        &[
+            "plan",
+            "--targets",
+            "192.0.2.0/24",
+            "--ports",
+            "1-1000",
+            "--rate",
+            "400",
+            "--connect-timeout",
+            "5s",
+            "--retries",
+            "1",
+            "--concurrency",
+            "512",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let text = stdout(&out);
+    // 256,000 probes at 400/s.
+    assert!(
+        text.contains("~10m40s at 400/s if every probe answers"),
+        "{text}"
+    );
+    // 256,000 / 512 = 500 rounds x (5 s x 2 + 250 ms retry delay) = 5,125 s.
+    assert!(
+        text.contains("~1h25m25s if every probe times out (5s x 2 attempts / 512 in flight)"),
+        "{text}"
+    );
+}
