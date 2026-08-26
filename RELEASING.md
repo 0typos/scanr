@@ -30,6 +30,10 @@ crates.io. GitHub (`origin`) is canonical; the forgejo remote is a mirror.
    git push origin main --follow-tags
    ```
 
+   One tag per push. GitHub does not trigger `push` workflows for a push carrying more
+   than three tags: releasing 0.3.0 through 1.0.0-rc.1 in one `--follow-tags` push ran
+   CI and nothing else, and each tag had to be deleted and re-pushed on its own.
+
 6. **Check the release:** both archives with `.sha256` files, notes from the changelog,
    `scanr --version` inside the archive reporting the tag.
 
