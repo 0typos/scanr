@@ -5,6 +5,7 @@ Start with [getting-started.md](getting-started.md).
 | | |
 |---|---|
 | [getting-started.md](getting-started.md) | install, first scan, verifying the record |
+| [tutorial.md](tutorial.md) | learn it by using it: ten use cases with real output, and where nmap fits |
 | [cli.md](cli.md) | every command and flag, streams, exit codes (test-checked) |
 | [configuration.md](configuration.md) | discovery, precedence, profiles (test-checked), targets, ports, DNS, labels |
 | [transports.md](transports.md) | direct and SOCKS5; what a proxy can tell you; concurrency |

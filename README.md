@@ -150,6 +150,7 @@ network; through a proxy the proxy's cap decides for both. Methodology and knobs
 | | |
 |---|---|
 | [docs/getting-started.md](docs/getting-started.md) | install to verified record |
+| [docs/tutorial.md](docs/tutorial.md) | learn it by using it: ten use cases, real output, and where nmap fits |
 | [docs/cli.md](docs/cli.md) | every command and flag, streams, exit codes |
 | [docs/configuration.md](docs/configuration.md) | precedence, profiles, targets, ports, DNS, labels |
 | [docs/transports.md](docs/transports.md) | proxies, fidelity, concurrency |
