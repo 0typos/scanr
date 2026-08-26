@@ -2103,7 +2103,8 @@ fn the_tls_probe_records_the_leaf_and_verify_accepts_it() {
     assert_eq!(tls["tls"]["cipher_name"], "ECDHE-RSA-AES128-GCM-SHA256");
     assert_eq!(tls["tls"]["chain_len"], 2);
     let der = tls["tls"]["leaf_der"].as_str().unwrap();
-    assert_eq!(der, scanr::transport::http::base64(FIXTURE_CERT_DER));
+    let der_b64 = scanr::transport::http::base64(FIXTURE_CERT_DER);
+    assert_eq!(der, der_b64);
     // The greeting port said something first, so it was never probed.
     let smtp = by_port(greeting.port());
     assert_eq!(smtp["banner"], "220 smtp fixture\r\n");
@@ -2112,6 +2113,28 @@ fn the_tls_probe_records_the_leaf_and_verify_accepts_it() {
     let rec = scanr::testsupport::find_record(&d.path().join("out")).expect("a finalised record");
     let v = scanr(d.path(), &["output", "verify", rec.to_str().unwrap()]);
     assert_eq!(code(&v), 0, "{}", stderr(&v));
+
+    // The reader built for other tools must carry the evidence the record holds.
+    let r = scanr(
+        d.path(),
+        &[
+            "output",
+            "results",
+            "--format",
+            "json",
+            rec.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code(&r), 0, "{}", stderr(&r));
+    let rows: Vec<Value> = stdout(&r)
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let tls_row = rows.iter().find(|r| r["port"] == fx.addr().port()).unwrap();
+    assert_eq!(tls_row["tls"]["alpn"], "h2", "{tls_row}");
+    assert_eq!(tls_row["tls"]["leaf_der"], der_b64, "{tls_row}");
+    let smtp_row = rows.iter().find(|r| r["port"] == greeting.port()).unwrap();
+    assert_eq!(smtp_row["banner"], "220 smtp fixture\r\n", "{smtp_row}");
 }
 
 /// Against real OpenSSL: a TLS 1.2 server yields its certificate, a 1.3-only server
