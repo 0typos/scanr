@@ -172,8 +172,9 @@ cargo clippy --all-targets
 cargo fmt --check
 ```
 
-Tests use in-process fixtures only, including SOCKS5 and HTTP CONNECT proxies with injectable behaviour.
-Nothing reaches the internet.
+Tests use in-process fixtures only, including SOCKS5, HTTP CONNECT and TLS responders with
+injectable behaviour; nothing reaches the internet. Region coverage is 91% (CI floor 85%),
+and `tests/compat/` pins every reader's output on a record from each release.
 
 ## Authorization
 
