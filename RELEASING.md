@@ -50,6 +50,10 @@ The fuzz job replays committed seeds only. Fuzzing itself is manual:
 cargo +nightly fuzz run specs -- -max_total_time=600
 ```
 
+A `cargo-fuzz` installed by `cargo binstall` is a musl build and defaults to the musl
+target, where the sanitizer cannot link; add `--target x86_64-unknown-linux-gnu`, or
+install it from source (`cargo install cargo-fuzz --locked`, as CI does).
+
 `release.yml` on a `v*` tag: builds both targets, checks tag versus `--version` and a
 clean tree, packages README, changelog, licences and completions, writes SHA-256 sums,
 attaches everything to the release. Only the `publish` job has `contents: write`.
