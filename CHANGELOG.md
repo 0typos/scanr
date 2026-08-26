@@ -14,6 +14,12 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
 
 ## [Unreleased]
 
+### Fixed
+
+- `output results --format json` now carries `banner`, `banner_hex`, `banner_bytes` and
+  `tls` when the record has them. The reader built for handing results to other tools
+  dropped exactly the evidence those tools want; `events` always had it.
+
 ### Added
 
 - `scanr plan` projects the timeout-bound duration beside the rate-bound one: `~3d21h17m if

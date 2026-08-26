@@ -1625,6 +1625,10 @@ pub struct Hit {
     /// Reconstructed from a `probe_span`, so it has no per-probe timing or timestamp.
     pub collapsed: bool,
     pub total_ms: Option<f64>,
+    /// What the probe learned beyond the verdict — `banner`/`banner_hex`/`banner_bytes`
+    /// and `tls` — carried through as recorded. `results --format json` dropped these,
+    /// so the one reader built for other tools hid exactly the fields those tools want.
+    pub extras: Option<Value>,
 }
 
 impl Hit {
@@ -1648,7 +1652,27 @@ impl Hit {
         } else {
             v["timing_ms"] = json!({ "total": self.total_ms });
         }
+        if let Some(Value::Object(extras)) = &self.extras {
+            for (k, val) in extras {
+                v[k] = val.clone();
+            }
+        }
         v
+    }
+}
+
+/// The evidence fields of a `probe_result` row, when it has any.
+fn row_extras(e: &Value) -> Option<Value> {
+    let mut out = serde_json::Map::new();
+    for k in ["banner", "banner_hex", "banner_bytes", "tls"] {
+        if let Some(val) = e.get(k) {
+            out.insert(k.into(), val.clone());
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(Value::Object(out))
     }
 }
 
@@ -1677,6 +1701,7 @@ struct ResultRow<'a> {
     via: Option<&'a str>,
     collapsed: bool,
     total_ms: Option<f64>,
+    extras: Option<Value>,
 }
 
 /// The permutation a v2 record's span indices must be run through, if any.
@@ -1755,6 +1780,7 @@ fn walk_results(path: &Path, mut f: impl FnMut(ResultRow<'_>)) -> Result<RecordS
                     via: e["via"].as_str(),
                     collapsed: false,
                     total_ms: e["timing_ms"]["total"].as_f64(),
+                    extras: row_extras(&e),
                 });
             }
             "probe_span" => {
@@ -1803,6 +1829,7 @@ fn walk_results(path: &Path, mut f: impl FnMut(ResultRow<'_>)) -> Result<RecordS
                             via: e["via"].as_str(),
                             collapsed: true,
                             total_ms: None,
+                            extras: None,
                         });
                     }
                 }
@@ -1835,6 +1862,7 @@ pub fn get(path: &Path, q: &Query) -> Result<Vec<Hit>, String> {
                 via: r.via.map(str::to_string),
                 collapsed: r.collapsed,
                 total_ms: r.total_ms,
+                extras: r.extras,
             });
         }
     })?;
@@ -3485,6 +3513,7 @@ mod tests {
             service: None,
             via: None,
             collapsed: false,
+            extras: None,
             total_ms: Some(1.0),
         }
     }
