@@ -259,6 +259,16 @@ accepted 2026-08-25 · alternatives rejected: a lock-free queue; sharding the co
 - Result: 256k probes 0.92 → 0.37 s at c=64, 1.54 → 0.40 s at c=512; 2.56M probes 14.1 → 4.3 s at c=512. The concurrency curve is flat to 512 (D1's non-monotonic finding was this contention). Rows mode (`--no-spans`) 2.37 → 1.70 s; its remaining cost is `serde_json::Value` per row.
 - Amends D1: concurrency is still a tunable, but above ~64 it no longer costs throughput on the direct path; the right value is rate × RTT.
 
+### D38 — No event loop yet: not mio, not tokio, not io_uring-only
+deferred 2026-08-25 · trigger: a real direct-LAN workload where scanr, not the network, is the bottleneck; or a high-latency proxy that tolerates tens of thousands in flight
+
+- **Where the time goes after D37** (loopback `/24 × 10,000`, c=512): ~75% userspace (scanr 42%, libc 30%, vdso 6.5%), ~20–25% kernel; the collector thread holds 47% of samples, each of 512 workers ~0.15%; 24 µs of CPU per probe, of which ~5 µs is kernel. An event loop replaces the kernel-and-scheduling quarter and leaves the serial collector untouched, so alone it moves the ceiling little.
+- **mio, not tokio**, if readiness-based: tokio is mio plus a scheduler and task machinery a scanner does not want. D1 named tokio as the fallback for port cost, not speed. epoll does not cut syscalls per probe (socket, connect, epoll_ctl, epoll_wait, getsockopt, close ≈ the blocking path's seven); its win is threads → cores.
+- **io_uring is the only path that cuts syscalls** — socket/connect/close as SQEs, one `enter` per batch — and it is pure Rust (`io-uring` crate), so the static build survives. It would also remove D1's ~10k in-flight ceiling, the per-read timeout handling, and cancellation latency (`ASYNC_CANCEL`). Expected with a parallelised collector: 1.5–2M probes/s direct on loopback; through a proxy, nothing changes.
+- **Why not io_uring-only:** Docker's default seccomp profile blocks `io_uring_*` (2023), Kubernetes `RuntimeDefault` follows it, hardened hosts set `kernel.io_uring_disabled=2`. A tool that fails to start in a default container on its promised platform is a breaking change, so io_uring-only is a 2.0 with the kernel/container requirement stated, never a 1.x. It also flips D2 and D3: every proxy handshake becomes a completion-driven state machine (~2,500 lines of transport code), macOS goes, and the `unsafe` inventory grows from five thin libc calls to an SQE-heavy engine.
+- **rayon is the wrong tool**: a CPU-bound pool sized to cores would cap in-flight probes at the core count; the hand-rolled pool with `fetch_add` already has no contention; the collector's remaining serial work is a per-worker shard merge, not a parallel reduction.
+- **Order if the trigger fires:** (1) shard the collector's counts and spans per worker, merged at drain — the 47%; (2) `socket2` direct fast path dropping the two blocking-mode `ioctl`s; (3) an `engine = "uring"` direct-only path, with the thread pool kept for proxies (D2 stands there) and as the fallback where io_uring is blocked. 600k probes/s direct already exceeds what a LAN, a firewall's state table or an IDS tolerates, so until a workload asks, this stays deferred.
+
 ### D36 — 1.0 gate and stability policy
 accepted 2026-08-25
 
@@ -276,6 +286,7 @@ The external-consumer gate is withdrawn. 1.0 promises the record, the CLI and th
 | SNI for locally resolved names on the direct path | deferred | needs the hostname carried past resolution; D35 |
 | commercial rotating pool fidelity | open | no access; add during soak if reachable |
 | sustained multi-hour run | open | measure during soak |
+| event loop / io_uring engine | deferred | D38 |
 | aarch64 builds | deferred | post-1.0, additive |
 | Windows | not planned | D3 |
 | SSH-native transport | deferred | `ssh -D` covers it |
