@@ -110,7 +110,7 @@ Fill in. Anything touching a promised surface is "before freeze".
 
 | finding | surface | before freeze? | notes |
 |---|---|---|---|
-| Finish the dev-box toolchain repair | dev environment | no | rustup 1.29 is reinstalled (2026-08-25 19:24), but the default toolchain came back as `nightly-2026-06-17` rather than `stable`, that nightly lacks the musl target, and `cargo-deny`, `cargo-fuzz`, `cargo-llvm-cov` are still missing, so `cargo deny check` and local fuzzing are CI-only. Fix: `rustup default stable`, then `cargo binstall cargo-deny cargo-fuzz cargo-llvm-cov`. `stable` still has both targets. |
+| | | | |
 
 ## Known gaps accepted for 1.0
 
