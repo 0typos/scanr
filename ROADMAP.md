@@ -110,7 +110,7 @@ Fill in. Anything touching a promised surface is "before freeze".
 
 | finding | surface | before freeze? | notes |
 |---|---|---|---|
-| Reinstall rustup on the dev box | dev environment | no | `~/.cargo/bin/rustup` vanished 2026-08-25, leaving every symlink there dangling; `cargo-deny`, `cargo-fuzz` and `cargo-llvm-cov` went with it. Builds run via `~/.rustup/toolchains/stable-*/bin/cargo` meanwhile, so `cargo deny check` is CI-only until fixed. `rustup-init`, then `cargo install cargo-deny cargo-fuzz cargo-llvm-cov`. |
+| Finish the dev-box toolchain repair | dev environment | no | rustup 1.29 is reinstalled (2026-08-25 19:24), but the default toolchain came back as `nightly-2026-06-17` rather than `stable`, that nightly lacks the musl target, and `cargo-deny`, `cargo-fuzz`, `cargo-llvm-cov` are still missing, so `cargo deny check` and local fuzzing are CI-only. Fix: `rustup default stable`, then `cargo binstall cargo-deny cargo-fuzz cargo-llvm-cov`. `stable` still has both targets. |
 
 ## Known gaps accepted for 1.0
 
