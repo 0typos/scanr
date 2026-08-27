@@ -179,6 +179,14 @@ SSLv2 answer, which has its own reader: a two- or three-byte record header, a SE
 whose certificate is taken in the clear (it stands in for the leaf when nothing newer
 answered), cipher kinds named, lengths bounded at 32 KiB.
 
+The survey opens each version's connection in turn and waits out to the same ceiling the
+main probe uses, which scales off the measured connect. A concurrent server answers every
+one; a strictly single-connection server that is slow to service a fresh reconnect can
+time out a version and under-report it (`accepted: null`, `detail: "no reply"`). This is
+visible against `openssl s_server`, which is single-threaded — its answers are still
+verified in the differential test without the survey. Real servers and the concurrent
+in-process fixture survey completely.
+
 What comes back is peer-chosen and treated as such: record and message lengths are
 bounded (64 KiB flight, 8 KiB embedded leaf), the read is deadline-driven, the ALPN
 string is filtered to printable ASCII, and the leaf certificate is stored as base64 DER
