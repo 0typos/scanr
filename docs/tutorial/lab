@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# The tutorial lab, in one command. Run from anywhere; state lives in docs/tutorial/.state.
+#
+#   ./lab up        services (lab.py) + the four proxies in rootless podman, if podman exists
+#   ./lab tunnel    a throwaway sshd on 127.0.0.1:2222 and `ssh -D 127.0.0.1:1088` through it
+#   ./lab check     what is up: services, proxies, tunnel
+#   ./lab down      stop everything this script started
+#
+# Nothing here needs root. The proxies are squid (HTTP CONNECT :3128), tinyproxy (:3129),
+# 3proxy (HTTP :3130, SOCKS5 :1081) and dante (SOCKS5 :1082), listening on loopback only.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STATE="$HERE/.state"
+IMAGE="scanr-tutorial-proxies"
+mkdir -p "$STATE"
+
+listening() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+
+services_up() {
+    if listening 25025 && listening 28080 && listening 28443; then
+        echo "services   already up"
+        return
+    fi
+    setsid nohup python3 "$HERE/lab.py" > "$STATE/lab.log" 2>&1 < /dev/null &
+    echo $! > "$STATE/lab.pid"
+    for _ in $(seq 1 30); do listening 28443 && break; sleep 0.1; done
+    echo "services   $(head -1 "$STATE/lab.log")"
+}
+
+proxies_up() {
+    if ! command -v podman > /dev/null; then
+        echo "proxies    skipped: no podman (use cases 5-7 and 10 need a SOCKS5/HTTP proxy)"
+        return
+    fi
+    if ! podman image exists "$IMAGE"; then
+        echo "proxies    building $IMAGE (fedora-minimal + squid, tinyproxy, 3proxy, dante)..."
+        podman build -q -t "$IMAGE" "$HERE/proxies" > "$STATE/build.log" 2>&1
+    fi
+    podman rm -f tut-squid tut-tinyproxy tut-3proxy tut-dante > /dev/null 2>&1 || true
+    local P="$HERE/proxies"
+    podman run -d --rm --name tut-squid     --network host -v "$P/squid.conf:/etc/squid/squid.conf:Z"         "$IMAGE" squid -N -f /etc/squid/squid.conf > /dev/null
+    podman run -d --rm --name tut-tinyproxy --network host -v "$P/tinyproxy.conf:/etc/tinyproxy/tinyproxy.conf:Z" "$IMAGE" tinyproxy -d -c /etc/tinyproxy/tinyproxy.conf > /dev/null
+    podman run -d --rm --name tut-3proxy    --network host -v "$P/3proxy.cfg:/etc/3proxy/3proxy.cfg:Z"         "$IMAGE" 3proxy /etc/3proxy/3proxy.cfg > /dev/null
+    podman run -d --rm --name tut-dante     --network host -v "$P/sockd.conf:/etc/sockd.conf:Z"                "$IMAGE" sockd -N 1 -f /etc/sockd.conf > /dev/null
+    for _ in $(seq 1 50); do listening 3128 && listening 1082 && break; sleep 0.1; done
+    echo "proxies    squid :3128  tinyproxy :3129  3proxy http :3130 socks5 :1081  dante :1082"
+}
+
+tunnel_up() {
+    local D="$STATE/sshd"
+    mkdir -p "$D" && chmod 700 "$D"
+    [ -f "$D/host_key" ]   || ssh-keygen -q -t ed25519 -N '' -f "$D/host_key"
+    [ -f "$D/client_key" ] || ssh-keygen -q -t ed25519 -N '' -f "$D/client_key"
+    cp "$D/client_key.pub" "$D/authorized_keys"; chmod 600 "$D/authorized_keys" "$D/host_key"
+    cat > "$D/sshd_config" <<EOF
+Port 2222
+ListenAddress 127.0.0.1
+HostKey $D/host_key
+AuthorizedKeysFile $D/authorized_keys
+PasswordAuthentication no
+PubkeyAuthentication yes
+AllowTcpForwarding yes
+PidFile $D/sshd.pid
+StrictModes no
+EOF
+    listening 2222 || /usr/sbin/sshd -f "$D/sshd_config" -E "$D/sshd.log"
+    for _ in $(seq 1 30); do listening 2222 && break; sleep 0.1; done
+    if ! listening 1088; then
+        setsid nohup ssh -N -D 127.0.0.1:1088 -p 2222 -i "$D/client_key" \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile="$D/known_hosts" \
+            -o ExitOnForwardFailure=yes "$USER@127.0.0.1" > "$D/ssh.log" 2>&1 < /dev/null &
+        echo $! > "$D/ssh.pid"
+        for _ in $(seq 1 30); do listening 1088 && break; sleep 0.1; done
+    fi
+    listening 1088 && echo "tunnel     ssh -D 127.0.0.1:1088 via throwaway sshd on :2222" \
+                   || { echo "tunnel     FAILED"; cat "$D/ssh.log"; exit 1; }
+}
+
+check() {
+    python3 "$HERE/lab.py" --check || true
+    for spec in "squid 3128" "tinyproxy 3129" "3proxy-http 3130" "3proxy-socks5 1081" "dante 1082" "ssh-D 1088"; do
+        set -- $spec
+        printf '127.0.0.1:%-6s %s\n' "$2" "$(listening "$2" && echo "$1 up" || echo "$1 down")"
+    done
+}
+
+down() {
+    [ -f "$STATE/lab.pid" ] && kill "$(cat "$STATE/lab.pid")" 2>/dev/null || true
+    [ -f "$STATE/sshd/ssh.pid" ] && kill "$(cat "$STATE/sshd/ssh.pid")" 2>/dev/null || true
+    [ -f "$STATE/sshd/sshd.pid" ] && kill "$(cat "$STATE/sshd/sshd.pid")" 2>/dev/null || true
+    command -v podman > /dev/null && podman rm -f tut-squid tut-tinyproxy tut-3proxy tut-dante > /dev/null 2>&1 || true
+    rm -f "$STATE/lab.pid" "$STATE/sshd/ssh.pid" "$STATE/sshd/sshd.pid"
+    echo "lab down"
+}
+
+case "${1:-}" in
+    up)     services_up; proxies_up ;;
+    tunnel) tunnel_up ;;
+    check)  check ;;
+    down)   down ;;
+    *)      sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

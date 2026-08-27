@@ -47,6 +47,10 @@ pub enum Behavior {
     Trickle(Duration),
     /// Always succeed without attempting a real connection.
     AlwaysOpen,
+    /// Attempts the connection; `0x00` and relay on success, and on *any* failure closes
+    /// the connection with no reply at all. This is OpenSSH's `ssh -D`, measured: its
+    /// client log says why, its SOCKS5 layer cannot.
+    SilentOnFailure,
 }
 
 pub struct Socks5Fixture {
@@ -235,8 +239,12 @@ fn handle(mut s: TcpStream, behavior: Behavior, shutdown: Arc<AtomicBool>) -> st
             }
         }
         Behavior::AlwaysOpen => write_reply(&mut s, REP_SUCCEEDED)?,
-        Behavior::Faithful | Behavior::Collapsing | Behavior::RequireAuth { .. } => {
+        Behavior::Faithful
+        | Behavior::Collapsing
+        | Behavior::SilentOnFailure
+        | Behavior::RequireAuth { .. } => {
             let collapsing = matches!(behavior, Behavior::Collapsing);
+            let silent = matches!(behavior, Behavior::SilentOnFailure);
             let mut upstream = None;
             let code = match dest {
                 None => REP_HOST_UNREACHABLE,
@@ -247,6 +255,7 @@ fn handle(mut s: TcpStream, behavior: Behavior, shutdown: Arc<AtomicBool>) -> st
                             upstream = Some(up);
                             REP_SUCCEEDED
                         }
+                        Err(_) if silent => return Ok(()),
                         Err(e) if collapsing => {
                             let _ = e;
                             REP_GENERAL_FAILURE

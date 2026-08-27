@@ -1,0 +1,42 @@
+# The tutorial's configuration. `cd docs/tutorial` and every command in
+# docs/tutorial.md runs against it. Addresses match `./lab up`; change them to
+# point at proxies of your own.
+version = 1
+
+[transports.dante]
+type = "socks5"
+address = "127.0.0.1:1082"
+fidelity = "full"                # measured in use case 5
+
+[transports.exit-b]
+type = "socks5"
+address = "127.0.0.1:1081"
+fidelity = "full"
+
+[transports.corp]
+type = "http"
+address = "127.0.0.1:3128"
+
+[transports.path]
+type = "chain"
+hops = ["corp", "dante"]
+
+[transports.spread]
+type = "pool"
+members = ["dante", "exit-b"]
+
+[transports.tunnel]
+type = "socks5"
+address = "127.0.0.1:1088"       # ./lab tunnel: ssh -N -D 127.0.0.1:1088
+
+[targets.lab]
+include = ["127.0.0.1"]
+
+[ports.lab]
+ports = "25025,28080,28443,29000,29001"
+
+[scans.lab-audit]
+description = "The lab hosts through the dante proxy"
+transport = "dante"
+targets = ["lab"]
+ports = ["lab"]

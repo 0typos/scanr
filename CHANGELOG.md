@@ -14,6 +14,15 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
 
 ## [Unreleased]
 
+### Added
+
+- `docs/tutorial.md`, a learn-by-using guide with real output, and `docs/tutorial/`, its
+  lab: `./lab up|tunnel|check|down` brings up three loopback services (`lab.py`,
+  standard library), squid/tinyproxy/3proxy/dante in rootless podman, and an `ssh -D`
+  through a throwaway `sshd`. `tests/tutorial.rs` parses every `scanr` command in the
+  document against the CLI and re-runs its use cases — direct ones against the lab,
+  proxied ones against the fixtures — so the guide cannot rot.
+
 ### Fixed
 
 - `output results --format json` now carries `banner`, `banner_hex`, `banner_bytes` and

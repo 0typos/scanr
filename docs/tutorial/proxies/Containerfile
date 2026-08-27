@@ -1,0 +1,2 @@
+FROM registry.fedoraproject.org/fedora-minimal:44
+RUN microdnf install -y --setopt=install_weak_deps=0 squid tinyproxy 3proxy dante-server iproute procps-ng && microdnf clean all
