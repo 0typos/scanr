@@ -1094,7 +1094,9 @@ mod tests {
 
     #[test]
     fn unreachable_proxy_is_an_error_never_a_port_verdict() {
-        let t = ProxyTransport::new("dead".into(), closed_port(), None, None, Fidelity::Unknown);
+        // Port 1, not a bound-then-released one: a parallel test can reuse that.
+        let dead: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let t = ProxyTransport::new("dead".into(), dead, None, None, Fidelity::Unknown);
         let o = t.probe(
             &Destination::Addr("10.0.0.1:80".parse().unwrap()),
             &timing(),

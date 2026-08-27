@@ -94,6 +94,10 @@ enum Command {
         scan: Option<String>,
         #[command(flatten)]
         overrides: OverrideArgs,
+        /// Show banners untruncated as they arrive (still printable ASCII only); the
+        /// default cuts them at 48 characters so each result stays on one line
+        #[arg(long)]
+        full: bool,
     },
     /// Resolve a scan and show the plan without touching the network
     Plan {
@@ -586,7 +590,11 @@ fn colorize_error(s: &str, style: &Style) -> String {
 
 fn run_command(cli: &Cli) -> Result<u8, ConfigError> {
     match &cli.command {
-        Command::Run { scan, overrides } => cmd_run(cli, scan.as_deref(), overrides),
+        Command::Run {
+            scan,
+            overrides,
+            full,
+        } => cmd_run(cli, scan.as_deref(), overrides, *full),
         Command::Plan { scan, overrides } => cmd_plan(cli, scan.as_deref(), overrides),
         Command::Config(c) => cmd_config(cli, c),
         Command::Transport(t) => cmd_transport(cli, t),
@@ -629,7 +637,12 @@ fn build_plan(
 
 // ── run ─────────────────────────────────────────────────────────────────────
 
-fn cmd_run(cli: &Cli, scan: Option<&str>, overrides: &OverrideArgs) -> Result<u8, ConfigError> {
+fn cmd_run(
+    cli: &Cli,
+    scan: Option<&str>,
+    overrides: &OverrideArgs,
+    full: bool,
+) -> Result<u8, ConfigError> {
     let plan = Arc::new(build_plan(cli, scan, overrides)?);
     // Installed here, beside the only thing that reads the counter. Installing it in
     // `main` replaced SIGINT and SIGTERM disposition for every subcommand while nothing
@@ -644,6 +657,7 @@ fn cmd_run(cli: &Cli, scan: Option<&str>, overrides: &OverrideArgs) -> Result<u8
         quiet: cli.quiet,
         no_color: cli.no_color,
         verbose: cli.verbose,
+        full,
     };
 
     match crate::run::execute(plan, cancel, &opts) {
@@ -1531,7 +1545,9 @@ mod tests {
     fn run_works_with_no_scan_name_for_adhoc() {
         let cli = parse(&["scanr", "run", "--targets", "10.0.0.0/24", "--ports", "80"]);
         match cli.command {
-            Command::Run { scan, overrides } => {
+            Command::Run {
+                scan, overrides, ..
+            } => {
                 assert!(scan.is_none());
                 assert_eq!(overrides.targets.unwrap(), ["10.0.0.0/24"]);
                 assert_eq!(overrides.ports.unwrap(), ["80"]);

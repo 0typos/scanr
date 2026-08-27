@@ -82,6 +82,8 @@ pub struct ResultPrinter {
     aligned: bool,
     target_width: usize,
     open_only: bool,
+    /// Characters of banner shown; `usize::MAX` for `--full`.
+    banner_width: usize,
 }
 
 /// A banner rendered safe for a terminal.
@@ -111,7 +113,7 @@ pub(crate) fn safe_banner(bytes: &[u8], width: usize) -> String {
 }
 
 impl ResultPrinter {
-    pub fn new(target_width: usize, open_only: bool, no_color: bool) -> Self {
+    pub fn new(target_width: usize, open_only: bool, no_color: bool, full: bool) -> Self {
         let tty = std::io::stdout().is_terminal();
         Self {
             style: Style::for_stream(tty, no_color),
@@ -119,6 +121,7 @@ impl ResultPrinter {
             aligned: tty,
             target_width: target_width.clamp(8, 48),
             open_only,
+            banner_width: if full { usize::MAX } else { Self::BANNER_W },
         }
     }
 
@@ -137,7 +140,8 @@ impl ResultPrinter {
     const LABEL_W: usize = 14;
     /// `99999.9ms`
     const LATENCY_W: usize = 9;
-    /// Enough to recognise a greeting; the record has all of it.
+    /// Enough to recognise a greeting on one line; the record has all of it, and
+    /// `--full` shows it.
     pub(crate) const BANNER_W: usize = 48;
     const GAP: usize = 2;
 
@@ -161,7 +165,7 @@ impl ResultPrinter {
                 s.pop();
             }
             let mut s = match &outcome.banner {
-                Some(b) => format!("{s} {latency} {}", safe_banner(b, Self::BANNER_W)),
+                Some(b) => format!("{s} {latency} {}", safe_banner(b, self.banner_width)),
                 None => format!("{s} {latency}"),
             };
             if let Some(t) = &outcome.tls {
@@ -192,7 +196,7 @@ impl ResultPrinter {
         // Last, because it is the only field whose length a stranger chooses.
         if let Some(b) = &outcome.banner {
             line.push_str(&pad(Self::GAP));
-            line.push_str(&self.style.dim(&safe_banner(b, Self::BANNER_W)));
+            line.push_str(&self.style.dim(&safe_banner(b, self.banner_width)));
         }
         // Already printable ASCII: `TlsObservation` filters the one peer-chosen string.
         if let Some(t) = &outcome.tls {
@@ -338,6 +342,7 @@ mod tests {
             aligned: false,
             target_width: 15,
             open_only,
+            banner_width: ResultPrinter::BANNER_W,
         }
     }
 
@@ -455,6 +460,7 @@ mod tests {
             aligned: true,
             target_width: 15,
             open_only: false,
+            banner_width: ResultPrinter::BANNER_W,
         }
     }
 

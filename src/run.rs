@@ -106,6 +106,8 @@ pub struct RunOptions {
     pub quiet: bool,
     pub no_color: bool,
     pub verbose: bool,
+    /// Print banners untruncated.
+    pub full: bool,
 }
 
 /// One completed probe on its way from a worker to the writer.
@@ -245,7 +247,12 @@ pub(crate) fn execute_with(
         facts: &facts,
         opts,
         cancel: &cancel,
-        printer: ResultPrinter::new(target_width(&plan), plan.open_only, opts.no_color),
+        printer: ResultPrinter::new(
+            target_width(&plan),
+            plan.open_only,
+            opts.no_color,
+            opts.full,
+        ),
         progress: Progress::new(opts.quiet, opts.no_color),
         // The real bound on drain is the connect timeout, since a blocking connect
         // cannot be interrupted. MAX_DRAIN keeps a very long timeout from feeling hung.
@@ -1419,6 +1426,7 @@ mod tests {
             quiet: true,
             no_color: true,
             verbose: false,
+            full: false,
         }
     }
 
