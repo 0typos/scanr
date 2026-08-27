@@ -53,14 +53,6 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
   through a throwaway `sshd`. `tests/tutorial.rs` parses every `scanr` command in the
   document against the CLI and re-runs its use cases — direct ones against the lab,
   proxied ones against the fixtures — so the guide cannot rot.
-
-### Fixed
-
-- `output results` shows the banner and the TLS summary as a trailing column of its
-  table, exactly as `run` printed them live; replaying a record no longer hides the
-  evidence it was kept for. `--full`, on `run` and on `output results`, shows banners
-  untruncated (the default cuts at 48 characters; the printable-ASCII filter applies
-  either way).
 - The TLS probe reads the leaf certificate. `tls.cert` carries subject, issuer,
   alternative names, validity at probe time (`valid`, `expired`, `not_yet_valid`),
   whether issuer equals subject (`self_signed`) and the key type; result lines and
@@ -91,12 +83,6 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
 - SNI travels on the direct path when the target was given as a name: a locally resolved
   address now keeps its hostname, so a virtual-hosting server answers with its certificate
   instead of an alert. A real 443 answered `internal_error` to the nameless hello.
-- `output results --format json` now carries `banner`, `banner_hex`, `banner_bytes` and
-  `tls` when the record has them. The reader built for handing results to other tools
-  dropped exactly the evidence those tools want; `events` always had it.
-
-### Added
-
 - `scanr plan` projects the timeout-bound duration beside the rate-bound one: `~3d21h17m if
   every probe times out (5s x 2 attempts / 512 in flight)`. The rate cap never binds on a
   network of silent ports; this is the number that does.
@@ -111,6 +97,17 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
   concurrency (166k → 640k probes/s); 2.56M probes 14.1 s → 4.3 s. Throughput no longer
   falls with concurrency (512 was 40% slower than 64; now within 5%). Record contents,
   order and every reader output are unchanged — the compat corpus passes as pinned.
+
+### Fixed
+
+- `output results` shows the banner and the TLS summary as a trailing column of its
+  table, exactly as `run` printed them live; replaying a record no longer hides the
+  evidence it was kept for. `--full`, on `run` and on `output results`, shows banners
+  untruncated (the default cuts at 48 characters; the printable-ASCII filter applies
+  either way).
+- `output results --format json` now carries `banner`, `banner_hex`, `banner_bytes` and
+  `tls` when the record has them. The reader built for handing results to other tools
+  dropped exactly the evidence those tools want; `events` always had it.
 
 ## [1.0.0-rc.1] - 2026-08-25
 
