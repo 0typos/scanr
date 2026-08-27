@@ -177,10 +177,12 @@ pub fn parse(der: &[u8]) -> Result<Leaf, &'static str> {
     let mut version = 1u8;
     if let Some((v, r)) = tlv(rest).ok().filter(|(v, _)| v.tag == TAG_VERSION) {
         rest = r;
-        if let Ok((n, _)) = tlv(v.body) {
-            if n.tag == TAG_INT && n.body.len() == 1 && n.body[0] <= 2 {
-                version = n.body[0] + 1;
-            }
+        if let Some(n) = tlv(v.body)
+            .ok()
+            .map(|(n, _)| n)
+            .filter(|n| n.tag == TAG_INT && n.body.len() == 1 && n.body[0] <= 2)
+        {
+            version = n.body[0] + 1;
         }
     }
     let (serial, r) = expect(rest, TAG_INT, "no serial number")?;
