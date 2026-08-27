@@ -516,6 +516,17 @@ pub fn offered_sigalgs() -> Vec<String> {
         .collect()
 }
 
+/// The cipher suites the survey's hello for `version` offers, named — the same suites
+/// [`survey_hello`] puts on the wire for that era. SSLv2's are its own three-byte kinds.
+pub fn survey_offered_ciphers(version: u16) -> Vec<&'static str> {
+    match version {
+        0x0002 => SSL2_CIPHER_KINDS.iter().map(|(_, n)| *n).collect(),
+        0x0300..=0x0302 => LEGACY_CIPHER_SUITES.iter().map(|(_, n)| *n).collect(),
+        // The 1.2 survey hello drops the leading 1.3 suite; everything else is offered.
+        _ => CIPHER_SUITES[1..].iter().map(|(_, n)| *n).collect(),
+    }
+}
+
 fn push_extension(out: &mut Vec<u8>, kind: u16, body: &[u8]) {
     out.extend_from_slice(&kind.to_be_bytes());
     out.extend_from_slice(&(body.len() as u16).to_be_bytes());
