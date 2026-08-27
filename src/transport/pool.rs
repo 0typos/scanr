@@ -101,6 +101,10 @@ impl Transport for PoolTransport {
         o
     }
 
+    fn connect_again(&self, dest: &Destination, timing: &Timing) -> Option<std::net::TcpStream> {
+        self.members[self.pick(dest)].connect_again(dest, timing)
+    }
+
     /// Only if *every* member does. A pool that resolves names on some hops and not
     /// others would resolve them differently depending on the endpoint, which is a
     /// difference nothing downstream could see.

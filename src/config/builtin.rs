@@ -250,13 +250,20 @@ spans = true
 #   default: true             CLI: --banner / --no-banner
 banner = true
 
-# Send a TLS 1.2 ClientHello to open ports that volunteered no banner, and record the
-# certificate, cipher and ALPN the server answers with. This is the one active probe
-# scanr has — it sends bytes to the service — so it is off unless you turn it on, and
-# the record states `tls.sent_bytes` either way. TLS 1.2 only: a 1.3-only server answers
-# with a `protocol_version` alert, which is recorded as such.
+# Send one ClientHello offering TLS 1.3 and 1.2 to open ports that volunteered no
+# banner, and record the certificate, chain, cipher and ALPN the server answers with —
+# finishing the 1.3 key exchange to read it, taking older servers' answers in the clear.
+# This is the one active probe scanr has — it sends bytes to the service — so it is off
+# unless you turn it on, and the record states `tls.sent_bytes` either way.
 #   default: false            CLI: --tls / --no-tls
 tls = false
+
+# After the hello, ask SSLv2, SSLv3, TLS 1.0, 1.1 and 1.2 for themselves, each on its
+# own connection with a hello of its era, so the record says which versions the server
+# still accepts and `legacy-only` names a server no current client can reach. Needs
+# `tls`; up to five more connections per silent open port.
+#   default: false            CLI: --tls-versions / --no-tls-versions
+tls_versions = false
 
 # A file of `name port/proto` lines to label ports from, consulted ahead of
 # /etc/services and the built-in table. `~` is expanded.
@@ -520,6 +527,7 @@ mod tests {
             spans,
             banner,
             tls,
+            tls_versions,
             services_file,
             use_etc_services,
         } = crate::config::raw::RawDefaults::default();
@@ -532,6 +540,7 @@ mod tests {
             ("spans", spans.is_none()),
             ("banner", banner.is_none()),
             ("tls", tls.is_none()),
+            ("tls_versions", tls_versions.is_none()),
             ("services_file", services_file.is_none()),
             ("use_etc_services", use_etc_services.is_none()),
         ];

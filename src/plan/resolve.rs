@@ -56,6 +56,8 @@ pub struct Overrides {
     pub banner: Option<bool>,
     /// Send the TLS ClientHello probe. Off unless asked for; `--tls` sets this true.
     pub tls: Option<bool>,
+    /// Ask every protocol version for itself after the hello; `--tls-versions`.
+    pub tls_versions: Option<bool>,
     pub allow_large_range: bool,
 }
 
@@ -607,6 +609,21 @@ fn resolve_tls(
         false,
         prov,
     );
+    let versions = resolve_flag(
+        files,
+        scan_name,
+        "tls_versions",
+        ov.tls_versions,
+        |s| s.tls_versions,
+        |c| c.defaults.tls_versions,
+        false,
+        prov,
+    );
+    if versions && !on {
+        return Err(ConfigError::new(
+            "tls_versions = true needs the TLS probe on: add --tls or tls = true",
+        ));
+    }
     if !on {
         return Ok(None);
     }
@@ -619,7 +636,7 @@ fn resolve_tls(
         profile,
     )?;
     crate::tls::TlsProbe::new(timeout)
-        .map(Some)
+        .map(|p| Some(p.with_versions(versions)))
         .map_err(ConfigError::new)
 }
 

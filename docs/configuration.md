@@ -74,7 +74,7 @@ Seven built-ins. Flat and complete, no inheritance. `scanr config show` prints t
 - Default follows the transport: `proxy` for any proxy (socks5, http, chain, pool), else `direct`.
 - `[profiles.proxy]` overrides only the fields set; a new name falls back to the transport-appropriate built-in.
 - See [tuning.md](tuning.md) before changing these.
-- Also profile fields: `banner_bytes` (1024), `banner_timeout` (500ms), `tls_timeout` (1s) — ceilings for the banner read and the TLS probe.
+- Also profile fields: `banner_bytes` (1024), `banner_timeout` (500ms), `tls_timeout` (1s) — ceilings for the banner read and the TLS probe. `[defaults]` and a scan may set `tls` (false) and `tls_versions` (false, needs `tls`).
 
 ## Transports
 

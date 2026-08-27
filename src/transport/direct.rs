@@ -60,11 +60,11 @@ impl Transport for DirectTransport {
                 // a ClientHello can learn something. Same connection; nothing is sent
                 // to a service that already greeted. A locally resolved name travels
                 // beside its address, so SNI can name the target here too.
-                let tls = timing
-                    .tls
-                    .as_ref()
-                    .filter(|_| banner.is_none())
-                    .map(|o| crate::tls::probe(&stream, o, elapsed, dest.sni()));
+                let tls = timing.tls.as_ref().filter(|_| banner.is_none()).map(|o| {
+                    crate::tls::probe_with_survey(&stream, o, elapsed, dest.sni(), &|| {
+                        self.connect_again(dest, timing)
+                    })
+                });
                 close_without_time_wait(&stream);
                 ProbeOutcome::open(phases, Source::LocalStack)
                     .with_banner(banner)
@@ -72,6 +72,16 @@ impl Transport for DirectTransport {
             }
             Err(e) => classify_os_error(&e, phases),
         }
+    }
+
+    fn connect_again(&self, dest: &Destination, timing: &Timing) -> Option<TcpStream> {
+        let addr = match dest {
+            Destination::Addr(a) | Destination::Resolved(a, _) => *a,
+            Destination::Host(..) => return None,
+        };
+        let s = TcpStream::connect_timeout(&addr, timing.connect_timeout).ok()?;
+        close_without_time_wait(&s);
+        Some(s)
     }
 
     fn supports_remote_dns(&self) -> bool {

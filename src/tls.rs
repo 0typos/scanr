@@ -113,6 +113,8 @@ const CLIENT_RANDOM: [u8; 32] = *b"scanr tls probe: not random  v1 ";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TlsProbe {
     timeout: Duration,
+    /// After the main hello, ask each older version for itself on its own connection.
+    versions: bool,
 }
 
 pub const DEFAULT_TLS_TIMEOUT: Duration = Duration::from_millis(1000);
@@ -123,11 +125,23 @@ impl TlsProbe {
         if timeout.is_zero() {
             return Err("tls_timeout must be greater than zero".into());
         }
-        Ok(Self { timeout })
+        Ok(Self {
+            timeout,
+            versions: false,
+        })
+    }
+
+    pub fn with_versions(mut self, on: bool) -> Self {
+        self.versions = on;
+        self
     }
 
     pub fn timeout(&self) -> Duration {
         self.timeout
+    }
+
+    pub fn versions(&self) -> bool {
+        self.versions
     }
 
     /// The flight arrives about one round trip after the hello, plus whatever the server
@@ -182,6 +196,122 @@ pub struct TlsObservation {
     /// A 1.3 server answered HelloRetryRequest, wanting a key share for this group. The
     /// probe carries only x25519, so the flight ends there.
     pub hello_retry: Option<u16>,
+    /// What each protocol version answered when asked for itself (`--tls-versions`).
+    pub versions: Option<VersionSurvey>,
+}
+
+/// Every version the survey can ask for, oldest first.
+pub const SURVEY_VERSIONS: [u16; 6] = [0x0002, 0x0300, 0x0301, 0x0302, 0x0303, 0x0304];
+
+/// One version's answer to a hello made for it, or to the main hello where that settled it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionAnswer {
+    pub version: u16,
+    /// `None`: the server could not be asked or did not answer in time.
+    pub accepted: Option<bool>,
+    /// The cipher it chose, the alert it sent, or why nothing can be said.
+    pub detail: String,
+    /// Bytes of the hello sent for this version; 0 when the main hello settled it.
+    pub sent_bytes: u32,
+}
+
+/// The answers, oldest version first, and what they add up to.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct VersionSurvey {
+    pub answers: Vec<VersionAnswer>,
+    /// Connections opened beyond the main probe's.
+    pub connections: u32,
+    /// The certificate an SSLv2 SERVER-HELLO carried in the clear, if one did.
+    pub ssl2_leaf: Option<Vec<u8>>,
+}
+
+impl VersionSurvey {
+    fn accepted(&self) -> impl Iterator<Item = u16> + '_ {
+        self.answers
+            .iter()
+            .filter(|a| a.accepted == Some(true))
+            .map(|a| a.version)
+    }
+
+    pub fn oldest(&self) -> Option<u16> {
+        self.accepted().min()
+    }
+
+    pub fn newest(&self) -> Option<u16> {
+        self.accepted().max()
+    }
+
+    /// Nothing a current browser or a default OpenSSL will speak: the newest version
+    /// the server accepts is older than TLS 1.2.
+    pub fn legacy_only(&self) -> bool {
+        matches!(self.newest(), Some(v) if v < 0x0303)
+    }
+
+    /// What it takes to talk to this server, when a current client will not.
+    pub fn advice(&self) -> Option<&'static str> {
+        match self.newest()? {
+            0x0002 | 0x0300 => Some(
+                "SSLv3 or older only: current clients cannot connect; use an OpenSSL 1.0.2 \
+                 build with ssl3 (and ssl2) enabled, or sslscan/testssl built against one",
+            ),
+            0x0301 | 0x0302 => Some(
+                "TLS 1.0/1.1 only: browsers refuse it; use openssl s_client -tls1_1 (or \
+                 -tls1) with -cipher DEFAULT:@SECLEVEL=0, or curl --tls-max 1.1",
+            ),
+            _ => None,
+        }
+    }
+
+    /// `versions:ssl3..1.3`, `legacy-only:tls1.0`, or `versions:none`.
+    pub fn summary(&self) -> String {
+        survey_words(self.oldest(), self.newest())
+    }
+
+    /// The record's `tls.versions` object.
+    pub fn to_json(&self) -> serde_json::Value {
+        use serde_json::json;
+        let mut v = json!({
+            "oldest": self.oldest().map(version_name),
+            "newest": self.newest().map(version_name),
+            "legacy_only": self.legacy_only(),
+            "advice": self.advice(),
+            "connections": self.connections,
+        });
+        for a in &self.answers {
+            v[version_name(a.version)] = json!({
+                "accepted": a.accepted,
+                "detail": a.detail,
+                "sent_bytes": a.sent_bytes,
+            });
+        }
+        v
+    }
+}
+
+fn survey_words(oldest: Option<u16>, newest: Option<u16>) -> String {
+    match (oldest, newest) {
+        (Some(_), Some(n)) if n < 0x0303 => {
+            format!("legacy-only:{}", protocol_label(&version_name(n)))
+        }
+        (Some(o), Some(n)) => format!("versions:{}..{}", version_name(o), version_name(n)),
+        _ => "versions:none".into(),
+    }
+}
+
+/// [`VersionSurvey::summary`] from a recorded `tls.versions` object.
+pub fn survey_summary_json(v: &serde_json::Value) -> String {
+    let parse = |s: Option<&str>| -> Option<u16> {
+        match s? {
+            "ssl2" => Some(0x0002),
+            "ssl3" => Some(0x0300),
+            "1.0" => Some(0x0301),
+            "1.1" => Some(0x0302),
+            "1.2" => Some(0x0303),
+            "1.3" => Some(0x0304),
+            _ => None,
+        }
+    };
+    survey_words(parse(v["oldest"].as_str()), parse(v["newest"].as_str()))
 }
 
 /// One certificate after the leaf: hashed always, read when it parses.
@@ -250,7 +380,10 @@ pub fn probe(
 
 /// The bytes sent, for the security documentation and for tests that pin them.
 pub fn client_hello(sni: Option<&str>) -> Vec<u8> {
-    let mut ext = Vec::with_capacity(160);
+    hello_record(0x0301, 0x0303, CIPHER_SUITES, &modern_extensions(sni, true))
+}
+
+fn push_sni(ext: &mut Vec<u8>, sni: Option<&str>) {
     if let Some(name) = sni {
         let name = name.as_bytes();
         let mut list = Vec::with_capacity(name.len() + 3);
@@ -260,8 +393,14 @@ pub fn client_hello(sni: Option<&str>) -> Vec<u8> {
         let mut body = Vec::with_capacity(list.len() + 2);
         body.extend_from_slice(&(list.len() as u16).to_be_bytes());
         body.extend_from_slice(&list);
-        push_extension(&mut ext, EXT_SERVER_NAME, &body);
+        push_extension(ext, EXT_SERVER_NAME, &body);
     }
+}
+
+/// The main hello's extensions; `offer13` adds `supported_versions` and the key share.
+fn modern_extensions(sni: Option<&str>, offer13: bool) -> Vec<u8> {
+    let mut ext = Vec::with_capacity(160);
+    push_sni(&mut ext, sni);
     push_extension(
         &mut ext,
         EXT_SUPPORTED_GROUPS,
@@ -285,29 +424,43 @@ pub fn client_hello(sni: Option<&str>) -> Vec<u8> {
     );
     push_extension(&mut ext, EXT_EXTENDED_MASTER_SECRET, &[]);
     push_extension(&mut ext, EXT_RENEGOTIATION_INFO, &[0x00]);
-    // 1.3 first, 1.2 second: a server picks the highest it has.
-    push_extension(
-        &mut ext,
-        EXT_SUPPORTED_VERSIONS,
-        &[0x04, 0x03, 0x04, 0x03, 0x03],
-    );
-    let mut share = vec![0x00, 0x24];
-    share.extend_from_slice(&GROUP_X25519.to_be_bytes());
-    share.extend_from_slice(&[0x00, 0x20]);
-    share.extend_from_slice(probe_public_key());
-    push_extension(&mut ext, EXT_KEY_SHARE, &share);
+    if offer13 {
+        // 1.3 first, 1.2 second: a server picks the highest it has.
+        push_extension(
+            &mut ext,
+            EXT_SUPPORTED_VERSIONS,
+            &[0x04, 0x03, 0x04, 0x03, 0x03],
+        );
+        let mut share = vec![0x00, 0x24];
+        share.extend_from_slice(&GROUP_X25519.to_be_bytes());
+        share.extend_from_slice(&[0x00, 0x20]);
+        share.extend_from_slice(probe_public_key());
+        push_extension(&mut ext, EXT_KEY_SHARE, &share);
+    }
+    ext
+}
 
-    let mut body = Vec::with_capacity(64 + CIPHER_SUITES.len() * 2 + ext.len());
-    body.extend_from_slice(&[0x03, 0x03]);
+/// One ClientHello record. With no extensions the block is omitted entirely, which is
+/// what SSLv3 and the 1.0 servers of its day expect.
+fn hello_record(
+    record_version: u16,
+    client_version: u16,
+    suites: &[(u16, &str)],
+    ext: &[u8],
+) -> Vec<u8> {
+    let mut body = Vec::with_capacity(64 + suites.len() * 2 + ext.len());
+    body.extend_from_slice(&client_version.to_be_bytes());
     body.extend_from_slice(&CLIENT_RANDOM);
     body.push(0);
-    body.extend_from_slice(&((CIPHER_SUITES.len() * 2) as u16).to_be_bytes());
-    for (id, _) in CIPHER_SUITES {
+    body.extend_from_slice(&((suites.len() * 2) as u16).to_be_bytes());
+    for (id, _) in suites {
         body.extend_from_slice(&id.to_be_bytes());
     }
     body.extend_from_slice(&[0x01, 0x00]);
-    body.extend_from_slice(&(ext.len() as u16).to_be_bytes());
-    body.extend_from_slice(&ext);
+    if !ext.is_empty() {
+        body.extend_from_slice(&(ext.len() as u16).to_be_bytes());
+        body.extend_from_slice(ext);
+    }
 
     let mut hs = Vec::with_capacity(body.len() + 4);
     hs.push(HS_CLIENT_HELLO);
@@ -315,7 +468,8 @@ pub fn client_hello(sni: Option<&str>) -> Vec<u8> {
     hs.extend_from_slice(&body);
 
     let mut rec = Vec::with_capacity(hs.len() + 5);
-    rec.extend_from_slice(&[RECORD_HANDSHAKE, 0x03, 0x01]);
+    rec.push(RECORD_HANDSHAKE);
+    rec.extend_from_slice(&record_version.to_be_bytes());
     rec.extend_from_slice(&(hs.len() as u16).to_be_bytes());
     rec.extend_from_slice(&hs);
     rec
@@ -772,8 +926,317 @@ pub fn alert_name(description: u8) -> &'static str {
 pub fn cipher_name(id: u16) -> Option<&'static str> {
     CIPHER_SUITES
         .iter()
+        .chain(LEGACY_CIPHER_SUITES)
         .find(|(c, _)| *c == id)
         .map(|(_, n)| *n)
+}
+
+/// What the survey offers SSLv3, 1.0 and 1.1: the suites those servers have, weak ones
+/// included, because the question is whether the version is spoken at all.
+const LEGACY_CIPHER_SUITES: &[(u16, &str)] = &[
+    (0xc014, "ECDHE-RSA-AES256-SHA"),
+    (0xc013, "ECDHE-RSA-AES128-SHA"),
+    (0xc00a, "ECDHE-ECDSA-AES256-SHA"),
+    (0xc009, "ECDHE-ECDSA-AES128-SHA"),
+    (0x0039, "DHE-RSA-AES256-SHA"),
+    (0x0033, "DHE-RSA-AES128-SHA"),
+    (0x0035, "AES256-SHA"),
+    (0x002f, "AES128-SHA"),
+    (0x0016, "DHE-RSA-DES-CBC3-SHA"),
+    (0x000a, "DES-CBC3-SHA"),
+    (0x0005, "RC4-SHA"),
+    (0x0004, "RC4-MD5"),
+    (0x0009, "DES-CBC-SHA"),
+    (0x0003, "EXP-RC4-MD5"),
+    (0x0006, "EXP-RC2-CBC-MD5"),
+    (0x0008, "EXP-DES-CBC-SHA"),
+];
+
+/// SSLv2 cipher kinds, three bytes each, from the SSL 2.0 draft.
+const SSL2_CIPHER_KINDS: &[([u8; 3], &str)] = &[
+    ([0x01, 0x00, 0x80], "SSL2-RC4-128-MD5"),
+    ([0x02, 0x00, 0x80], "SSL2-RC4-40-MD5"),
+    ([0x03, 0x00, 0x80], "SSL2-RC2-128-MD5"),
+    ([0x04, 0x00, 0x80], "SSL2-RC2-40-MD5"),
+    ([0x05, 0x00, 0x80], "SSL2-IDEA-128-MD5"),
+    ([0x06, 0x00, 0x40], "SSL2-DES-64-MD5"),
+    ([0x07, 0x00, 0xc0], "SSL2-3DES-192-MD5"),
+];
+
+/// The hello the survey sends for one version. Each is fixed, like the main hello, and
+/// listed in `docs/security.md`. Old servers choke on what they never saw: SSLv3 gets no
+/// extensions at all, 1.0 and 1.1 get SNI and nothing else, and the 1.2 hello is the
+/// main hello without its 1.3 parts.
+pub fn survey_hello(version: u16, sni: Option<&str>) -> Vec<u8> {
+    match version {
+        0x0002 => ssl2_client_hello(),
+        0x0300 => hello_record(0x0300, 0x0300, LEGACY_CIPHER_SUITES, &[]),
+        0x0301 | 0x0302 => {
+            let mut ext = Vec::new();
+            push_sni(&mut ext, sni);
+            hello_record(version, version, LEGACY_CIPHER_SUITES, &ext)
+        }
+        _ => hello_record(
+            0x0301,
+            0x0303,
+            &CIPHER_SUITES[1..],
+            &modern_extensions(sni, false),
+        ),
+    }
+}
+
+/// SSLv2 CLIENT-HELLO: two-byte header, every cipher kind, a fixed challenge.
+fn ssl2_client_hello() -> Vec<u8> {
+    let mut body = vec![0x01, 0x00, 0x02];
+    body.extend_from_slice(&((SSL2_CIPHER_KINDS.len() * 3) as u16).to_be_bytes());
+    body.extend_from_slice(&[0x00, 0x00, 0x00, 0x10]);
+    for (kind, _) in SSL2_CIPHER_KINDS {
+        body.extend_from_slice(kind);
+    }
+    body.extend_from_slice(b"scanr ssl2 probe");
+    let mut out = vec![0x80 | (body.len() >> 8) as u8, body.len() as u8];
+    out.extend_from_slice(&body);
+    out
+}
+
+/// What an SSLv2 server said to CLIENT-HELLO.
+enum Ssl2Answer {
+    /// SERVER-HELLO: the certificate and the cipher kinds it offers.
+    Hello { cert: Vec<u8>, ciphers: Vec<String> },
+    /// ERROR, or a message that is not a SERVER-HELLO.
+    Refused(String),
+    /// A TLS record instead: the server does not speak SSLv2 at all.
+    Tls(String),
+}
+
+/// SSLv2 records have a two-byte header (high bit set, 15-bit length) or a three-byte
+/// one (a padding byte follows a 14-bit length). Generic over the reader for tests.
+fn read_ssl2_reply<R: Read>(s: &mut R, deadline: Option<Instant>) -> std::io::Result<Ssl2Answer> {
+    let mut head = [0u8; 2];
+    read_exact(s, &mut head, deadline)?;
+    if head[0] == RECORD_ALERT || head[0] == RECORD_HANDSHAKE {
+        let mut rest = [0u8; 5];
+        let _ = read_exact(s, &mut rest, deadline);
+        return Ok(Ssl2Answer::Tls(if head[0] == RECORD_ALERT {
+            format!("tls alert {}", alert_name(rest[4]))
+        } else {
+            "tls handshake".into()
+        }));
+    }
+    let len = if head[0] & 0x80 != 0 {
+        (usize::from(head[0] & 0x7f) << 8) | usize::from(head[1])
+    } else {
+        let mut pad = [0u8; 1];
+        read_exact(s, &mut pad, deadline)?;
+        (usize::from(head[0] & 0x3f) << 8) | usize::from(head[1])
+    };
+    if len == 0 || len > 32 * 1024 {
+        return Ok(Ssl2Answer::Refused(format!("ssl2 record of {len} bytes")));
+    }
+    let mut body = vec![0u8; len];
+    read_exact(s, &mut body, deadline)?;
+    match body[0] {
+        // SERVER-HELLO: hit(1) cert_type(1) version(2) cert_len(2) cipher_len(2) conn_id_len(2)
+        4 if body.len() >= 11 => {
+            let cert_len = u16::from_be_bytes([body[5], body[6]]) as usize;
+            let cipher_len = u16::from_be_bytes([body[7], body[8]]) as usize;
+            let cert = body.get(11..11 + cert_len).unwrap_or(&[]).to_vec();
+            let ciphers = body
+                .get(11 + cert_len..11 + cert_len + cipher_len)
+                .unwrap_or(&[])
+                .chunks(3)
+                .map(|k| {
+                    SSL2_CIPHER_KINDS
+                        .iter()
+                        .find(|(kind, _)| kind == k)
+                        .map(|(_, n)| (*n).to_string())
+                        .unwrap_or_else(|| format!("0x{}", hex(k)))
+                })
+                .take(8)
+                .collect();
+            Ok(Ssl2Answer::Hello { cert, ciphers })
+        }
+        0 => Ok(Ssl2Answer::Refused(format!(
+            "ssl2 error {}",
+            body.get(1..3)
+                .map(|e| u16::from_be_bytes([e[0], e[1]]))
+                .unwrap_or(0)
+        ))),
+        other => Ok(Ssl2Answer::Refused(format!("ssl2 message type {other}"))),
+    }
+}
+
+/// Ask each version for itself, on a fresh connection from `reopen`, where the main
+/// hello did not already settle it. At most five connections.
+pub fn survey_versions(
+    reopen: &dyn Fn() -> Option<TcpStream>,
+    opts: &TlsProbe,
+    connect: Duration,
+    sni: Option<&str>,
+    main: &TlsObservation,
+) -> VersionSurvey {
+    let mut survey = VersionSurvey::default();
+    let settled = |v: u16| -> Option<VersionAnswer> {
+        let chosen = main.negotiated?;
+        let answer = |accepted: bool| VersionAnswer {
+            version: v,
+            accepted: Some(accepted),
+            detail: if accepted {
+                main.cipher
+                    .and_then(cipher_name)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "from the main hello".into())
+            } else {
+                format!(
+                    "the main hello was answered with {}",
+                    protocol_label(&version_name(chosen))
+                )
+            },
+            sent_bytes: 0,
+        };
+        match v {
+            // A server that has 1.3 takes it when offered; one that answered lower has not.
+            0x0304 => Some(answer(chosen == 0x0304)),
+            // Offered beside 1.3, so a 1.2-or-lower answer settles 1.2; a 1.3 answer does not.
+            0x0303 if chosen != 0x0304 => Some(answer(chosen == 0x0303)),
+            _ if chosen == v => Some(answer(true)),
+            _ => None,
+        }
+    };
+    for v in SURVEY_VERSIONS {
+        if let Some(a) = settled(v) {
+            survey.answers.push(a);
+            continue;
+        }
+        if v == 0x0304 {
+            // Not settled: the main hello got no TLS answer at all.
+            survey.answers.push(VersionAnswer {
+                version: v,
+                accepted: main
+                    .error
+                    .as_deref()
+                    .filter(|e| e.starts_with("not TLS"))
+                    .map(|_| false),
+                detail: main
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "no answer to the main hello".into()),
+                sent_bytes: 0,
+            });
+            continue;
+        }
+        let hello = survey_hello(v, sni);
+        let mut answer = VersionAnswer {
+            version: v,
+            accepted: None,
+            detail: "no connection".into(),
+            sent_bytes: hello.len() as u32,
+        };
+        if let Some(stream) = reopen() {
+            survey.connections += 1;
+            let wait = opts.wait_for(connect);
+            let deadline = Some(Instant::now() + wait);
+            let usable = stream.set_write_timeout(Some(wait)).is_ok()
+                && stream.set_read_timeout(Some(wait)).is_ok()
+                && (&stream).write_all(&hello).is_ok();
+            if !usable {
+                answer.detail = "could not send the hello".into();
+            } else if v == 0x0002 {
+                match read_ssl2_reply(&mut &stream, deadline) {
+                    Ok(Ssl2Answer::Hello { cert, ciphers }) => {
+                        answer.accepted = Some(true);
+                        answer.detail = ciphers.join(" ");
+                        if !cert.is_empty() {
+                            survey.ssl2_leaf = Some(cert);
+                        }
+                    }
+                    Ok(Ssl2Answer::Refused(d) | Ssl2Answer::Tls(d)) => {
+                        answer.accepted = Some(false);
+                        answer.detail = d;
+                    }
+                    Err(e) if is_timeout(&e) => answer.detail = "no reply".into(),
+                    Err(_) => {
+                        answer.accepted = Some(false);
+                        answer.detail = "closed".into();
+                    }
+                }
+            } else {
+                let mut obs = TlsObservation::default();
+                read_server_flight(&mut &stream, deadline, &mut obs, &hello);
+                match (obs.negotiated, obs.alert, obs.error.as_deref()) {
+                    (Some(chosen), _, _) if chosen == v => {
+                        answer.accepted = Some(true);
+                        answer.detail = obs
+                            .cipher
+                            .and_then(cipher_name)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| "accepted".into());
+                    }
+                    (Some(chosen), _, _) => {
+                        answer.accepted = Some(false);
+                        answer.detail =
+                            format!("server chose {}", protocol_label(&version_name(chosen)));
+                    }
+                    (None, Some((_, d)), _) => {
+                        answer.accepted = Some(false);
+                        answer.detail = format!("alert {}", alert_name(d));
+                    }
+                    (None, None, Some(e)) if e.starts_with("no reply") => {
+                        answer.detail = "no reply".into();
+                    }
+                    (None, None, Some(e)) => {
+                        answer.accepted = Some(false);
+                        answer.detail = if e.starts_with("not TLS") {
+                            "not tls".into()
+                        } else {
+                            "closed".into()
+                        };
+                    }
+                    (None, None, None) => answer.detail = "empty answer".into(),
+                }
+            }
+            crate::transport::close_without_time_wait(&stream);
+        }
+        survey.answers.push(answer);
+    }
+    survey
+}
+
+/// The main probe, then the version survey when it is on. An SSLv2-only server has no
+/// TLS flight to take a certificate from, so the one its SERVER-HELLO carried stands in.
+pub fn probe_with_survey(
+    stream: &TcpStream,
+    opts: &TlsProbe,
+    connect: Duration,
+    sni: Option<&str>,
+    reopen: &dyn Fn() -> Option<TcpStream>,
+) -> TlsObservation {
+    let mut obs = probe(stream, opts, connect, sni);
+    if !opts.versions() {
+        return obs;
+    }
+    let survey = survey_versions(reopen, opts, connect, sni, &obs);
+    if let Some(der) = survey
+        .ssl2_leaf
+        .as_ref()
+        .filter(|_| obs.leaf_sha256.is_none())
+    {
+        obs.leaf_sha256 = Some(sha256(der));
+        obs.leaf_len = Some(der.len() as u32);
+        match crate::x509::parse(der) {
+            Ok(mut c) => {
+                let now = (crate::timefmt::now_epoch_ms() / 1000) as i64;
+                c.validity = Some(c.validity_at(now));
+                obs.cert = Some(c);
+            }
+            Err(e) => obs.cert_error = Some(e),
+        }
+        if der.len() <= MAX_LEAF_DER {
+            obs.leaf_der = Some(der.clone());
+        }
+    }
+    obs.versions = Some(survey);
+    obs
 }
 
 /// The record's `negotiated` value: `1.2`, or `ssl3` for the one pre-TLS version that
@@ -836,6 +1299,7 @@ impl TlsObservation {
             "kx_group": self.kx_group.map(group_name),
             "sig_scheme": self.sig_scheme.map(sig_scheme_name),
             "hello_retry_request": self.hello_retry.map(group_name),
+            "versions": self.versions.as_ref().map(VersionSurvey::to_json),
         });
         if let Some(e) = self.cert_error {
             v["cert_error"] = json!(e);
@@ -849,19 +1313,14 @@ impl TlsObservation {
         v
     }
 
-    /// One short field for a result line: `tls1.2 h2 sha256:ab12cd34`, or what went wrong.
+    /// One short field for a result line: `tls1.2 h2 sha256:ab12cd34`, or what went wrong,
+    /// then whatever the survey added.
     pub fn display(&self) -> String {
-        if let Some((_, d)) = self.alert {
-            return format!("tls alert {}", alert_name(d));
-        }
-        let mut s = match self.negotiated {
-            Some(v) => protocol_label(&version_name(v)),
-            None => {
-                return match &self.error {
-                    Some(e) if e.starts_with("not TLS") => "not tls".into(),
-                    _ => "tls no reply".into(),
-                };
-            }
+        let mut s = match (self.alert, self.negotiated, &self.error) {
+            (Some((_, d)), _, _) => format!("tls alert {}", alert_name(d)),
+            (None, Some(v), _) => protocol_label(&version_name(v)),
+            (None, None, Some(e)) if e.starts_with("not TLS") => "not tls".into(),
+            (None, None, _) => "tls no reply".into(),
         };
         if let Some(a) = &self.alpn {
             s.push(' ');
@@ -881,6 +1340,10 @@ impl TlsObservation {
         if let Some(h) = &self.leaf_sha256 {
             s.push_str(" sha256:");
             s.push_str(&hex(&h[..4]));
+        }
+        if let Some(v) = &self.versions {
+            s.push(' ');
+            s.push_str(&v.summary());
         }
         s
     }
@@ -1013,6 +1476,118 @@ mod tests {
             crate::crypto::x25519_public(&PROBE_X25519_PRIVATE),
             *probe_public_key()
         );
+    }
+
+    #[test]
+    fn the_survey_hellos_are_well_formed_for_their_eras() {
+        let ssl2 = survey_hello(0x0002, Some("ignored"));
+        assert_eq!(ssl2.len(), 48);
+        assert_eq!(&ssl2[..7], &[0x80, 0x2e, 0x01, 0x00, 0x02, 0x00, 0x15]);
+        assert!(ssl2.ends_with(b"scanr ssl2 probe"));
+
+        let ssl3 = survey_hello(0x0300, Some("app.internal"));
+        assert_eq!(&ssl3[..3], &[0x16, 0x03, 0x00]);
+        assert_eq!(&ssl3[9..11], &[0x03, 0x00]);
+        assert!(
+            !ssl3.windows(12).any(|w| w == b"app.internal"),
+            "SSLv3 gets no extensions"
+        );
+        let hs_len = u32::from_be_bytes([0, ssl3[6], ssl3[7], ssl3[8]]) as usize;
+        let body = &ssl3[9..9 + hs_len];
+        let suites = u16::from_be_bytes([body[35], body[36]]) as usize;
+        assert_eq!(body.len(), 39 + suites, "compression, then nothing");
+
+        let t10 = survey_hello(0x0301, Some("app.internal"));
+        assert_eq!(&t10[..3], &[0x16, 0x03, 0x01]);
+        assert_eq!(&t10[9..11], &[0x03, 0x01]);
+        assert!(
+            t10.windows(12).any(|w| w == b"app.internal"),
+            "1.0 gets SNI"
+        );
+        assert!(!t10.windows(2).any(|w| w == [0x00, 0x10]), "and no ALPN");
+        assert_eq!(&survey_hello(0x0302, None)[9..11], &[0x03, 0x02]);
+
+        let t12 = survey_hello(0x0303, None);
+        assert_eq!(&t12[9..11], &[0x03, 0x03]);
+        assert!(!t12.windows(2).any(|w| w == [0x13, 0x01]), "no 1.3 suite");
+        assert!(
+            !t12.windows(4).any(|w| w == [0x00, 0x2b, 0x00, 0x05]),
+            "no supported_versions"
+        );
+        assert_eq!(
+            t12.len(),
+            165,
+            "the rc.1 hello plus ed25519 in signature_algorithms"
+        );
+        for v in SURVEY_VERSIONS {
+            assert_eq!(
+                survey_hello(v, None),
+                survey_hello(v, None),
+                "deterministic"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ssl2_server_hello_yields_its_certificate_and_ciphers() {
+        let bytes = crate::testsupport::tls::ssl2_server_hello();
+        match read_ssl2_reply(&mut std::io::Cursor::new(&bytes), None).unwrap() {
+            Ssl2Answer::Hello { cert, ciphers } => {
+                assert_eq!(cert, crate::testsupport::tls::FIXTURE_CERT_DER);
+                assert_eq!(ciphers, ["SSL2-RC4-128-MD5", "SSL2-3DES-192-MD5"]);
+            }
+            _ => panic!("not a SERVER-HELLO"),
+        }
+        let error = [0x80, 0x03, 0x00, 0x00, 0x01];
+        assert!(matches!(
+            read_ssl2_reply(&mut std::io::Cursor::new(&error), None).unwrap(),
+            Ssl2Answer::Refused(d) if d == "ssl2 error 1"
+        ));
+        let alert = record(RECORD_ALERT, &[2, 70]);
+        assert!(matches!(
+            read_ssl2_reply(&mut std::io::Cursor::new(&alert), None).unwrap(),
+            Ssl2Answer::Tls(d) if d == "tls alert protocol_version"
+        ));
+        // Three-byte header, and hostile lengths, never panic.
+        let padded = [0x00, 0x03, 0x00, 0x00, 0x00, 0x05];
+        let _ = read_ssl2_reply(&mut std::io::Cursor::new(&padded), None);
+        for n in 0..bytes.len() {
+            let _ = read_ssl2_reply(&mut std::io::Cursor::new(&bytes[..n]), None);
+        }
+    }
+
+    #[test]
+    fn the_survey_summary_names_the_range_or_the_problem() {
+        let mut s = VersionSurvey::default();
+        assert_eq!(s.summary(), "versions:none");
+        let a = |v: u16, ok: bool| VersionAnswer {
+            version: v,
+            accepted: Some(ok),
+            detail: String::new(),
+            sent_bytes: 0,
+        };
+        s.answers = vec![
+            a(0x0002, false),
+            a(0x0300, true),
+            a(0x0301, true),
+            a(0x0303, true),
+            a(0x0304, true),
+        ];
+        assert_eq!(s.summary(), "versions:ssl3..1.3");
+        assert!(!s.legacy_only());
+        assert_eq!(s.advice(), None);
+        s.answers = vec![a(0x0002, true), a(0x0300, true), a(0x0301, false)];
+        assert_eq!(s.summary(), "legacy-only:ssl3");
+        assert!(s.legacy_only());
+        assert!(s.advice().unwrap().contains("OpenSSL 1.0.2"));
+        s.answers = vec![a(0x0301, true), a(0x0302, true), a(0x0303, false)];
+        assert_eq!(s.summary(), "legacy-only:tls1.1");
+        assert!(s.advice().unwrap().contains("SECLEVEL=0"));
+        let j = s.to_json();
+        assert_eq!(j["newest"], "1.1");
+        assert_eq!(j["legacy_only"], true);
+        assert_eq!(j["1.2"]["accepted"], false);
+        assert_eq!(survey_summary_json(&j), s.summary());
     }
 
     #[test]
@@ -1350,6 +1925,103 @@ mod fixture_tests {
         DirectTransport::new("d".into()).probe(&Destination::Addr(fx.addr()), &timing(tls))
     }
 
+    fn surveyed(fx: &TlsFixture) -> super::TlsObservation {
+        let mut t = timing(true);
+        t.tls = t.tls.map(|p| p.with_versions(true));
+        *DirectTransport::new("d".into())
+            .probe(&Destination::Addr(fx.addr()), &t)
+            .tls
+            .expect("the probe ran")
+    }
+
+    #[test]
+    fn a_server_of_2003_is_named_legacy_only_with_its_certificate_from_sslv2() {
+        let fx = TlsFixture::start(Behavior::Legacy {
+            floor: 0x0002,
+            ceiling: 0x0301,
+        });
+        let t = surveyed(&fx);
+        assert_eq!(
+            t.negotiated,
+            Some(0x0301),
+            "the main hello stepped down to 1.0"
+        );
+        let v = t.versions.as_ref().unwrap();
+        let accepted: Vec<(u16, Option<bool>)> =
+            v.answers.iter().map(|a| (a.version, a.accepted)).collect();
+        assert_eq!(
+            accepted,
+            [
+                (0x0002, Some(true)),
+                (0x0300, Some(true)),
+                (0x0301, Some(true)),
+                (0x0302, Some(false)),
+                (0x0303, Some(false)),
+                (0x0304, Some(false)),
+            ],
+            "{v:?}"
+        );
+        assert_eq!(
+            v.connections, 3,
+            "ssl2, ssl3, 1.1; 1.0, 1.2 and 1.3 were settled by the main hello"
+        );
+        assert_eq!(v.summary(), "legacy-only:tls1.0");
+        assert!(v.answers[0].detail.contains("SSL2-RC4-128-MD5"), "{v:?}");
+        assert!(
+            t.display().ends_with(" legacy-only:tls1.0"),
+            "{}",
+            t.display()
+        );
+        assert_eq!(t.to_json()["versions"]["newest"], "1.0");
+    }
+
+    #[test]
+    fn an_sslv2_only_server_still_yields_its_certificate() {
+        let fx = TlsFixture::start(Behavior::Legacy {
+            floor: 0x0002,
+            ceiling: 0x0002,
+        });
+        let t = surveyed(&fx);
+        assert_eq!(t.negotiated, None);
+        let v = t.versions.as_ref().unwrap();
+        assert_eq!(v.summary(), "legacy-only:ssl2");
+        assert_eq!(
+            t.cert.as_ref().map(|c| c.subject.as_str()),
+            Some("CN=fixture.scanr.invalid")
+        );
+        assert!(
+            t.display().contains("cn=fixture.scanr.invalid"),
+            "{}",
+            t.display()
+        );
+        assert!(v.advice().unwrap().contains("ssl2"), "{v:?}");
+    }
+
+    #[test]
+    fn a_modern_server_is_surveyed_in_two_more_connections_at_most() {
+        let fx = TlsFixture::start(Behavior::Tls13 { alpn: Some("h2") });
+        let t = surveyed(&fx);
+        assert_eq!(t.negotiated, Some(0x0304));
+        let v = t.versions.as_ref().unwrap();
+        assert_eq!(v.summary(), "versions:1.3..1.3", "{v:?}");
+        assert_eq!(
+            v.connections, 5,
+            "ssl2, ssl3, 1.0, 1.1 and a 1.2-only hello"
+        );
+        assert!(!v.legacy_only());
+        let fx12 = TlsFixture::start(Behavior::Legacy {
+            floor: 0x0300,
+            ceiling: 0x0303,
+        });
+        let t = surveyed(&fx12);
+        assert_eq!(t.versions.as_ref().unwrap().summary(), "versions:ssl3..1.2");
+        assert_eq!(
+            t.versions.as_ref().unwrap().connections,
+            4,
+            "ssl2, ssl3, 1.0, 1.1"
+        );
+    }
+
     #[test]
     fn a_tls12_server_yields_cipher_alpn_and_the_leaf_on_the_direct_path() {
         let fx = TlsFixture::start(Behavior::Tls12 { alpn: Some("h2") });
@@ -1527,14 +2199,25 @@ mod doc_tests {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/security.md"),
         )
         .expect("security.md is readable");
-        let hello = super::client_hello(None);
-        let hex: String = hello.iter().map(|b| format!("{b:02x}")).collect();
         // Wrapped in the document for width; compare with whitespace removed.
         let flat: String = doc.chars().filter(|c| !c.is_whitespace()).collect();
+        let mut hellos = vec![("main", super::client_hello(None))];
+        for v in &super::SURVEY_VERSIONS[..5] {
+            hellos.push((
+                super::version_name(*v).leak(),
+                super::survey_hello(*v, None),
+            ));
+        }
+        let mut missing = String::new();
+        for (name, hello) in hellos {
+            let hex: String = hello.iter().map(|b| format!("{b:02x}")).collect();
+            if !flat.contains(&hex) {
+                missing += &format!("{name} ({} bytes):\n{hex}\n", hello.len());
+            }
+        }
         assert!(
-            flat.contains(&hex),
-            "docs/security.md must contain the ClientHello bytes ({} bytes):\n{hex}",
-            hello.len()
+            missing.is_empty(),
+            "docs/security.md must contain every hello's bytes; missing:\n{missing}"
         );
     }
 }

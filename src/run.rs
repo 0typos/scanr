@@ -1120,6 +1120,15 @@ fn config_event(plan: &ScanPlan, facts: &HostFacts) -> serde_json::Value {
                 "offered": crate::tls::OFFERED,
                 "sent_bytes": crate::tls::client_hello(None).len(),
                 "timeout_ms": t.timeout().as_millis() as u64,
+                "versions": t.versions(),
+                "version_hellos": if t.versions() {
+                    crate::tls::SURVEY_VERSIONS[..5]
+                        .iter()
+                        .map(|v| crate::tls::survey_hello(*v, None).len())
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                },
             }),
         },
         "output": {
