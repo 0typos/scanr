@@ -9,6 +9,8 @@
 //! only: macOS is not a promised platform (`docs/stability.md`), and its CI job exists
 //! to prove the binary builds and its own suite passes there, not the tutorial's lab.
 
+#![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
+
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
