@@ -16,7 +16,7 @@ spot.
 
 ## The lab
 
-Three loopback services, two closed ports, one unroutable network, and two proxies.
+Three loopback services, two closed ports, one unroutable network, and four proxies.
 
 ```console
 # a service that greets, a silent service, and a TLS 1.2 server
@@ -40,8 +40,9 @@ openssl s_server -accept 127.0.0.1:28443 -tls1_2 -alpn h2,http/1.1 -key key.pem 
 
 Ports 29000 and 29001 have nothing listening. `192.0.2.0/24` (TEST-NET-1) is never routed,
 so probes to it time out. The proxies are dante (SOCKS5, `127.0.0.1:1082`), 3proxy
-(SOCKS5, `:1081`) and squid (HTTP CONNECT, `:3128`); any SOCKS5 and HTTP proxy you have
-will do — change the addresses in the config below.
+(SOCKS5, `:1081`), squid (HTTP CONNECT, `:3128`) and an OpenSSH dynamic forward
+(`ssh -N -D 127.0.0.1:1088 bastion`, to a throwaway `sshd` here); any SOCKS5 and HTTP
+proxy you have will do — change the addresses in the config below.
 
 ```toml
 # scanr.toml
