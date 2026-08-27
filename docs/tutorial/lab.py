@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """The lab for docs/tutorial.md: three loopback services with known behaviour.
 
-    python3 docs/tutorial/lab.py            # run until Ctrl-C
-    python3 docs/tutorial/lab.py --check    # connect to each service once and exit
+    python3 docs/tutorial/lab.py                     # run until Ctrl-C
+    python3 docs/tutorial/lab.py --check             # connect to each service once and exit
+    python3 docs/tutorial/lab.py --exit-with-parent  # for tests: leave when the parent does
 
   25025  greets on connect, like SMTP    -> a banner, never probed for TLS
   28080  accepts and says nothing        -> a silent open port
@@ -23,6 +24,7 @@ import ssl
 import subprocess
 import sys
 import threading
+import time
 
 HOST = "127.0.0.1"
 GREET_PORT = 25025
@@ -59,17 +61,17 @@ def serve_plain(port: int, greeting: bytes) -> None:
 
 
 def ensure_certificate() -> None:
+    """A self-signed P-256 certificate. Two commands rather than `req -newkey ec -pkeyopt`,
+    which LibreSSL (macOS) does not accept; both of these it does."""
     if os.path.exists(CERT) and os.path.exists(KEY):
         return
     subprocess.run(
-        [
-            "openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt",
-            "ec_paramgen_curve:prime256v1", "-nodes", "-keyout", KEY, "-out", CERT,
-            "-days", "30", "-subj", "/CN=lab.internal",
-        ],
+        ["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", KEY],
         check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    )
+    subprocess.run(
+        ["openssl", "req", "-x509", "-key", KEY, "-out", CERT, "-days", "30", "-subj", "/CN=lab.internal"],
+        check=True,
     )
 
 
@@ -137,9 +139,23 @@ def check() -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--check", action="store_true", help="probe a running lab and exit")
+    ap.add_argument(
+        "--exit-with-parent",
+        action="store_true",
+        help="exit when the parent process does (a test spawned us and will not clean up)",
+    )
     args = ap.parse_args()
     if args.check:
         return check()
+    if args.exit_with_parent:
+        parent = os.getppid()
+
+        def watch() -> None:
+            while os.getppid() == parent:
+                time.sleep(0.5)
+            os._exit(0)
+
+        threading.Thread(target=watch, daemon=True).start()
 
     for port in CLOSED_PORTS:
         try:
