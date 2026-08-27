@@ -60,8 +60,10 @@ The only command-line settings; all else is config, so a run is reproducible fro
 --config <path>
 --verbose / -v              --quiet / -q
 --no-color                  --allow-large-range
+--full
 ```
 
+- `--full`: banners untruncated as they arrive (default cuts at 48 characters); display only, not recorded.
 - `--seed`: replay a randomized scan; order is randomized by default and the seed recorded.
 - `--pairs`: exact `host:port` endpoints, not target × port. `output remainder … | run --pairs -` resumes without re-probing.
 - `--resumed-from`: scan being continued. `remainder` emits `# resumed-from:`; `run` reads it from the pipe.

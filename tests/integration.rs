@@ -2166,6 +2166,32 @@ fn results_full_shows_the_whole_banner_still_filtered() {
         ],
     );
     assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let live = stdout(&out);
+    assert!(
+        live.contains("220 a.very.long.greeting.example ESMTP Postfix (…"),
+        "{live}"
+    );
+
+    let out = scanr(
+        d.path(),
+        &[
+            "run",
+            "--full",
+            "--no-spans",
+            "--targets",
+            "127.0.0.1",
+            "--ports",
+            &port,
+            "--output-dir",
+            "out-full",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let live = stdout(&out);
+    assert!(
+        live.contains("ready .[2J at your service..") && !live.contains('…'),
+        "{live}"
+    );
     let rec = scanr::testsupport::find_record(&d.path().join("out")).unwrap();
     let file = rec.to_str().unwrap();
 
