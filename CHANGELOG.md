@@ -17,13 +17,16 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
 ### Changed
 
 - Record filenames are `scan-<name>-<UTC time>-<id>.jsonl.gz`, e.g.
-  `scan-internal-web-2026_08_27-16_45_46Z-fafcc832.jsonl.gz`
+  `scan-internal_web-2026_08_27T16_45_46Z-fafcc832.jsonl.gz`
   (`scan-adhoc-…` for an ad-hoc run). Was `scan-<epoch-ms>-<id>`. The scan name (from
-  config, slugified; `adhoc` when none) makes a directory of records self-describing, and
-  the epoch is now a readable `YYYY_MM_DD-hh_mm_ssZ` UTC stamp that still sorts
-  chronologically. The `scan-` prefix stays, so `scan-*` globs and `find_record` are
-  unaffected; the record's own `scan_name`/`scan_id`/`started_at_epoch_ms` remain the
-  authority. Filenames are not a promised surface.
+  config; `adhoc` when none) makes a directory of records self-describing, and the epoch
+  is now a readable `YYYY_MM_DDThh_mm_ssZ` UTC stamp that still sorts chronologically.
+  `-` is the sole field separator and appears in no field: a hyphen in the scan name is
+  slugified to `_` (`internal-web` → `internal_web`) and the stamp splits date from time
+  with `T`, so `basename.split('-')` yields exactly `[scan, name, stamp, id]`. The
+  `scan-` prefix stays, so `scan-*` globs and `find_record` are unaffected; the record's
+  own `scan_name`/`scan_id`/`started_at_epoch_ms` remain the authority. Filenames are not
+  a promised surface.
 - `RELEASING.md` records the release cadence: batch small non-surface changes into
   `[Unreleased]` rather than cutting a release candidate for each; tag when a promised
   surface moves or a batch is worth a build.

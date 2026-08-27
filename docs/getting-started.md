@@ -114,19 +114,21 @@ Warns on unmeasured fidelity, rate above the ephemeral-port budget, concurrency 
 ```console
 $ scanr run internal-web --all
 scanr 0.3.0 — internal-web via socks5 127.0.0.1:1080 — 3 probes (1 targets x 3 ports)
-  scan 0e1a180b  seed 950f58a8b869db32  concurrency 512  -> ./scanr-results/scan-adhoc-2026_07_30-23_50_11Z-0e1a180b.jsonl.gz.partial
+  scan 0e1a180b  seed 950f58a8b869db32  concurrency 512  -> ./scanr-results/scan-adhoc-2026_07_30T23_50_11Z-0e1a180b.jsonl.gz.partial
 127.0.0.1:8080/tcp open http-proxy 0.6ms
 127.0.0.1:8443/tcp open https-alt 0.5ms
 127.0.0.1:9999/tcp closed 0.4ms
 
 completed in 0.01s — 2 open, 1 closed, 0 filtered, 0 error (3 of 3 probed)
-  record: ./scanr-results/scan-adhoc-2026_07_30-23_50_11Z-0e1a180b.jsonl.gz
+  record: ./scanr-results/scan-adhoc-2026_07_30T23_50_11Z-0e1a180b.jsonl.gz
 ```
 
 The record is named `scan-<scan>-<UTC time>-<id>.jsonl.gz`: the scan name (`adhoc` for an
 ad-hoc run, the config name otherwise) so a directory of records is self-describing, a
-`YYYY_MM_DD-hh_mm_ssZ` timestamp that sorts chronologically, and the record's `scan_id`
-to break ties and join back to the file's contents. `scan-*` still matches them all.
+`YYYY_MM_DDThh_mm_ssZ` timestamp that sorts chronologically, and the record's `scan_id`
+to break ties and join back to the file's contents. `-` separates the four fields and
+appears in none of them — a hyphen in the name becomes `_`, and `T` splits the date from
+the time — so the name never runs into the delimiters. `scan-*` still matches them all.
 
 Without `--all` only open ports print; the record keeps every outcome. stdout is results
 only: `scanr run internal-web | awk '{print $1}' > open-ports.txt`. Ctrl-C drains
@@ -135,8 +137,8 @@ in-flight probes and writes a complete record marked interrupted.
 ## 5. Check the record
 
 ```console
-$ scanr output verify scanr-results/scan-adhoc-2026_07_30-23_50_11Z-0e1a180b.jsonl.gz
-scanr-results/scan-adhoc-2026_07_30-23_50_11Z-0e1a180b.jsonl.gz
+$ scanr output verify scanr-results/scan-adhoc-2026_07_30T23_50_11Z-0e1a180b.jsonl.gz
+scanr-results/scan-adhoc-2026_07_30T23_50_11Z-0e1a180b.jsonl.gz
   6 events
   terminal: scan_completed
   3 probe results

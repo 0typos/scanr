@@ -358,22 +358,23 @@ impl Counts {
 /// UUID and ULID were both considered and rejected (D18) — sortability is already
 /// provided by the epoch prefix in the filename, and 32 bits is ample against
 /// same-millisecond collision on a single host.
-/// A scan name reduced to a filename-safe slug: alphanumerics and `.-_` kept, runs of
-/// anything else collapsed to one `_`, trimmed and capped at 40 characters. The ad-hoc
-/// sentinel becomes `adhoc`; an empty or all-unsafe name becomes `scan`.
+/// A scan name reduced to a filename-safe slug: alphanumerics, `.` and `_` kept; a `-`
+/// or a run of any other character collapses to one `_`, so the slug never contains the
+/// `-` that separates the filename's fields. Trimmed and capped at 40 characters. The
+/// ad-hoc sentinel becomes `adhoc`; an empty or all-unsafe name becomes `scan`.
 fn slug_scan_name(name: &str) -> String {
     if name == crate::plan::resolve::ADHOC_SCAN_NAME {
         return "adhoc".to_string();
     }
     let mut out = String::new();
     for c in name.chars() {
-        if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+        if c.is_ascii_alphanumeric() || matches!(c, '.' | '_') {
             out.push(c);
         } else if !out.is_empty() && !out.ends_with('_') {
             out.push('_');
         }
     }
-    let trimmed = out.trim_matches(|c: char| matches!(c, '_' | '.' | '-'));
+    let trimmed = out.trim_matches(|c: char| matches!(c, '_' | '.'));
     let capped: String = trimmed.chars().take(40).collect();
     if capped.is_empty() {
         "scan".to_string()
@@ -540,9 +541,14 @@ mod tests {
         let epoch = 1_785_294_704_201;
         let w = JsonlWriter::create(dir.path(), "internal-web", "a3f19c02", epoch, false).unwrap();
         let stamp = crate::timefmt::filename_stamp(epoch);
+        // The name's hyphen becomes `_`, so `-` stays the sole field separator.
         assert_eq!(
             w.final_path().file_name().unwrap().to_string_lossy(),
-            format!("scan-internal-web-{stamp}-a3f19c02.jsonl"),
+            format!("scan-internal_web-{stamp}-a3f19c02.jsonl"),
+        );
+        assert!(
+            !stamp.contains('-'),
+            "the stamp must not contain the field separator"
         );
         // A gz record and the ad-hoc sentinel.
         let w = JsonlWriter::create(
@@ -561,7 +567,7 @@ mod tests {
 
     #[test]
     fn scan_names_are_slugged_for_the_filename() {
-        assert_eq!(slug_scan_name("internal-web"), "internal-web");
+        assert_eq!(slug_scan_name("internal-web"), "internal_web");
         assert_eq!(slug_scan_name("(ad-hoc)"), "adhoc");
         assert_eq!(slug_scan_name("My Server"), "My_Server");
         assert_eq!(slug_scan_name("web/prod:2"), "web_prod_2");

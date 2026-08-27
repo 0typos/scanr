@@ -98,7 +98,7 @@ ports = ["lab"]
 ```console
 $ scanr run --targets 127.0.0.1 --ports 25025,28080,28443,29000,29001 --all --output-dir results
 scanr 1.0.0-rc.1 — (ad-hoc) via direct — 5 probes (1 targets x 5 ports)
-  scan 5d2875ea  seed bf052d2f27c67ba1  concurrency 512  -> results/scan-adhoc-2026_08_26-01_53_14Z-5d2875ea.jsonl.gz.partial
+  scan 5d2875ea  seed bf052d2f27c67ba1  concurrency 512  -> results/scan-adhoc-2026_08_26T01_53_14Z-5d2875ea.jsonl.gz.partial
 127.0.0.1:29000/tcp closed saltd-licensing 0.2ms
 127.0.0.1:25025/tcp open 0.1ms 220 mail.lab.internal ESMTP ready..
 127.0.0.1:29001/tcp closed 0.2ms
@@ -106,7 +106,7 @@ scanr 1.0.0-rc.1 — (ad-hoc) via direct — 5 probes (1 targets x 5 ports)
 127.0.0.1:28443/tcp open 0.1ms
 
 completed in 0.05s — 3 open, 2 closed, 0 filtered, 0 error (5 of 5 probed)
-  record: results/scan-adhoc-2026_08_26-01_53_14Z-5d2875ea.jsonl.gz
+  record: results/scan-adhoc-2026_08_26T01_53_14Z-5d2875ea.jsonl.gz
 ```
 
 What to notice:
@@ -141,8 +141,8 @@ record does, unconditionally, which is the rest of this guide.
 ## 2. Reading the record
 
 ```console
-$ scanr output verify results/scan-adhoc-2026_08_26-01_53_14Z-5d2875ea.jsonl.gz
-results/scan-adhoc-2026_08_26-01_53_14Z-5d2875ea.jsonl.gz
+$ scanr output verify results/scan-adhoc-2026_08_26T01_53_14Z-5d2875ea.jsonl.gz
+results/scan-adhoc-2026_08_26T01_53_14Z-5d2875ea.jsonl.gz
   7 events
   terminal: scan_completed
   3 probe results
@@ -183,8 +183,8 @@ record that has lost a result cannot pass as complete. Run `verify` on any recor
 someone hands you. Exit `2` means the record is bad, `1` means it could not be read.
 
 ```console
-$ scanr output summarize results/scan-adhoc-2026_08_26-01_53_14Z-5d2875ea.jsonl.gz
-results/scan-adhoc-2026_08_26-01_53_14Z-5d2875ea.jsonl.gz
+$ scanr output summarize results/scan-adhoc-2026_08_26T01_53_14Z-5d2875ea.jsonl.gz
+results/scan-adhoc-2026_08_26T01_53_14Z-5d2875ea.jsonl.gz
   scan            (ad-hoc)
   started         2026-08-26T01:53:14.715Z  (scanr 1.0.0-rc.1)
   transport       direct via direct (full)
@@ -293,9 +293,9 @@ resolved configuration, so "what exactly did we run in March" is answered by the
 not by shell history.
 
 A named scan also names its record: `scanr run internal-web` writes
-`scan-internal-web-2026_08_26-01_53_14Z-4a96aca3.jsonl.gz`, where an ad-hoc `run
+`scan-internal_web-2026_08_26T01_53_14Z-4a96aca3.jsonl.gz`, where an ad-hoc `run
 --targets …` would write `scan-adhoc-…`. The scan name identifies the file at a glance,
-the `YYYY_MM_DD-hh_mm_ssZ` stamp sorts it, and the `scan_id` breaks ties — `scan-*` still
+the `YYYY_MM_DDThh_mm_ssZ` stamp sorts it, and the `scan_id` breaks ties — `scan-*` still
 globs them all, and the file's contents remain the authority.
 
 The seed is the other half. Probe order is a seeded permutation of the target × port
@@ -497,7 +497,7 @@ interrupt: no new probes will start; draining in-flight work (interrupt again to
 interrupted in 2.00s — 0 open, 3 closed, 2 filtered, 0 error (5 of 18 probed)
   2 probes were started but abandoned mid-flight
   11 probes were never started
-  record: results-int/scan-adhoc-2026_08_26-02_04_48Z-d65f8c99.jsonl.gz
+  record: results-int/scan-adhoc-2026_08_26T02_04_48Z-d65f8c99.jsonl.gz
 $ echo $?
 130
 ```
@@ -516,7 +516,7 @@ $ scanr output remainder results-int/scan-*.jsonl.gz
 192.0.2.1:443
 ...
 13 of 18 endpoints were not probed; re-run exactly those with:
-  scanr output remainder results-int/scan-adhoc-2026_08_26-02_04_48Z-d65f8c99.jsonl.gz | scanr run --pairs -
+  scanr output remainder results-int/scan-adhoc-2026_08_26T02_04_48Z-d65f8c99.jsonl.gz | scanr run --pairs -
 
 $ scanr output remainder results-int/scan-*.jsonl.gz | scanr run --pairs - --all --connect-timeout 1s
 scanr 1.0.0-rc.1 — (ad-hoc) via direct — 13 probes (3 targets x 6 ports)
