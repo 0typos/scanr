@@ -54,6 +54,8 @@ const OID_P384: &[u8] = &[0x2b, 0x81, 0x04, 0x00, 0x22];
 const OID_P521: &[u8] = &[0x2b, 0x81, 0x04, 0x00, 0x23];
 const OID_ED25519: &[u8] = &[0x2b, 0x65, 0x70];
 const OID_ED448: &[u8] = &[0x2b, 0x65, 0x71];
+/// Longest serial kept, in bytes: RFC 5280 allows 20.
+const MAX_SERIAL: usize = 20;
 
 /// Where the probe's clock fell against the certificate's validity window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +93,12 @@ pub struct Leaf {
     pub san_count: u32,
     /// `rsa-2048`, `ec-p256`, `ed25519`, … or `unknown`.
     pub key: String,
+    /// X.509 version: 1, 2 or 3.
+    pub version: u8,
+    /// Serial number, hex, at most 20 bytes of it.
+    pub serial: String,
+    /// `rsa-sha256`, `ecdsa-sha256`, `rsa-pss`, `ed25519`, `rsa-sha1`, … or `oid:…`.
+    pub sig_alg: String,
     /// Set by the probe from its own clock; absent when read back from DER alone.
     pub validity: Option<Validity>,
 }
@@ -166,15 +174,17 @@ pub fn parse(der: &[u8]) -> Result<Leaf, &'static str> {
     let (cert, _) = expect(der, TAG_SEQ, "not a certificate")?;
     let (tbs, _) = expect(cert.body, TAG_SEQ, "no tbsCertificate")?;
     let mut rest = tbs.body;
-    if let Some(r) = tlv(rest)
-        .ok()
-        .filter(|(v, _)| v.tag == TAG_VERSION)
-        .map(|(_, r)| r)
-    {
+    let mut version = 1u8;
+    if let Some((v, r)) = tlv(rest).ok().filter(|(v, _)| v.tag == TAG_VERSION) {
         rest = r;
+        if let Ok((n, _)) = tlv(v.body) {
+            if n.tag == TAG_INT && n.body.len() == 1 && n.body[0] <= 2 {
+                version = n.body[0] + 1;
+            }
+        }
     }
-    let (_, r) = expect(rest, TAG_INT, "no serial number")?;
-    let (_, r) = expect(r, TAG_SEQ, "no signature algorithm")?;
+    let (serial, r) = expect(rest, TAG_INT, "no serial number")?;
+    let (sig, r) = expect(r, TAG_SEQ, "no signature algorithm")?;
     let (issuer, r) = expect(r, TAG_SEQ, "no issuer")?;
     let (validity, r) = expect(r, TAG_SEQ, "no validity")?;
     let (subject, r) = expect(r, TAG_SEQ, "no subject")?;
@@ -188,6 +198,9 @@ pub fn parse(der: &[u8]) -> Result<Leaf, &'static str> {
         not_after: time(&not_after)?,
         self_signed: issuer.raw == subject.raw,
         key: key(spki.body),
+        version,
+        serial: serial_hex(serial.body),
+        sig_alg: sig_alg_name(sig.body),
         ..Default::default()
     };
     (leaf.subject, leaf.subject_cn) = name(subject.body);
@@ -297,6 +310,59 @@ fn time(t: &Tlv<'_>) -> Result<i64, &'static str> {
         + hour * 3_600
         + minute * 60
         + second)
+}
+
+/// A positive INTEGER's bytes as hex, without the sign byte DER adds.
+fn serial_hex(body: &[u8]) -> String {
+    let body = match body {
+        [0, rest @ ..] if !rest.is_empty() && rest[0] & 0x80 != 0 => rest,
+        b => b,
+    };
+    body.iter()
+        .take(MAX_SERIAL)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// `AlgorithmIdentifier ::= SEQUENCE { OID, parameters }`, named the short way.
+fn sig_alg_name(body: &[u8]) -> String {
+    let Ok((oid, _)) = tlv(body) else {
+        return "unknown".into();
+    };
+    if oid.tag != TAG_OID {
+        return "unknown".into();
+    }
+    match oid.body {
+        [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, last] => match last {
+            0x02 => "rsa-md2",
+            0x04 => "rsa-md5",
+            0x05 => "rsa-sha1",
+            0x0a => "rsa-pss",
+            0x0b => "rsa-sha256",
+            0x0c => "rsa-sha384",
+            0x0d => "rsa-sha512",
+            _ => "rsa",
+        }
+        .into(),
+        [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x01] => "ecdsa-sha1".into(),
+        [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, last] => match last {
+            0x02 => "ecdsa-sha256",
+            0x03 => "ecdsa-sha384",
+            0x04 => "ecdsa-sha512",
+            _ => "ecdsa",
+        }
+        .into(),
+        OID_ED25519 => "ed25519".into(),
+        OID_ED448 => "ed448".into(),
+        other => format!(
+            "oid:{}",
+            other
+                .iter()
+                .take(16)
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        ),
+    }
 }
 
 /// `SubjectPublicKeyInfo`: the algorithm, and for RSA the modulus size.
@@ -421,7 +487,19 @@ fn clip(name: &str) -> String {
     s
 }
 
-fn summary_parts(name: Option<(&str, &str)>, self_signed: bool, validity: Option<&str>) -> String {
+/// `rsa-sha1` → `sha1`: the hashes a signature should no longer use.
+fn weak_hash(sig_alg: &str) -> Option<&'static str> {
+    ["sha1", "md5", "md2"]
+        .into_iter()
+        .find(|h| sig_alg.ends_with(&format!("-{h}")))
+}
+
+fn summary_parts(
+    name: Option<(&str, &str)>,
+    self_signed: bool,
+    validity: Option<&str>,
+    sig_alg: Option<&str>,
+) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some((key, value)) = name {
         parts.push(format!("{key}={}", clip(&printable(value.as_bytes()))));
@@ -433,6 +511,9 @@ fn summary_parts(name: Option<(&str, &str)>, self_signed: bool, validity: Option
         Some("expired") => parts.push("expired".into()),
         Some("not_yet_valid") => parts.push("not-yet-valid".into()),
         _ => {}
+    }
+    if let Some(h) = sig_alg.and_then(weak_hash) {
+        parts.push(format!("{h}-signed"));
     }
     parts.join(" ")
 }
@@ -464,6 +545,7 @@ impl Leaf {
             self.shown_name(),
             self.self_signed,
             self.validity.map(Validity::name),
+            Some(&self.sig_alg),
         )
     }
 
@@ -480,6 +562,9 @@ impl Leaf {
             "san": self.san,
             "san_count": self.san_count,
             "key": self.key,
+            "version": self.version,
+            "serial": self.serial,
+            "sig_alg": self.sig_alg,
         })
     }
 }
@@ -496,6 +581,7 @@ pub fn summary_json(cert: &serde_json::Value) -> String {
         name,
         cert["self_signed"].as_bool().unwrap_or(false),
         cert["validity"].as_str(),
+        cert["sig_alg"].as_str(),
     )
 }
 
@@ -517,6 +603,9 @@ mod tests {
         assert_eq!(leaf.san_count, 0);
         assert_eq!(leaf.key, "ec-p256");
         assert_eq!(leaf.validity, None);
+        assert_eq!(leaf.version, 3);
+        assert_eq!(leaf.serial, "33fa2a29649685df458ba05b4b1ceb0f77db2b16");
+        assert_eq!(leaf.sig_alg, "ecdsa-sha256");
         assert_eq!(leaf.summary(), "cn=fixture.scanr.invalid self-signed");
     }
 
@@ -545,6 +634,7 @@ mod tests {
         let mut leaf = parse(EXPIRED_CERT_DER).unwrap();
         assert_eq!(leaf.subject, "CN=expired.scanr.invalid, O=Old Corp, OU=Ops");
         assert_eq!(leaf.key, "rsa-2048");
+        assert_eq!(leaf.sig_alg, "rsa-sha256");
         assert_eq!(rfc3339(leaf.not_after), "2021-01-01T00:00:00Z");
         let day = 86_400;
         assert_eq!(
@@ -572,6 +662,10 @@ mod tests {
         let hostile = serde_json::json!({"subject_cn": "a\x1b[2Jb", "self_signed": true});
         assert_eq!(summary_json(&hostile), "cn=a.[2Jb self-signed");
         assert_eq!(summary_json(&serde_json::json!({})), "");
+        let old = serde_json::json!({"subject_cn": "legacy", "sig_alg": "rsa-sha1"});
+        assert_eq!(summary_json(&old), "cn=legacy sha1-signed");
+        assert_eq!(weak_hash("rsa-md5"), Some("md5"));
+        assert_eq!(weak_hash("rsa-sha256"), None);
     }
 
     #[test]
@@ -627,7 +721,7 @@ mod tests {
     #[test]
     fn long_names_are_clipped_on_screen_only() {
         let long = "x".repeat(80);
-        let s = summary_parts(Some(("cn", &long)), false, None);
+        let s = summary_parts(Some(("cn", &long)), false, None, None);
         assert_eq!(s, format!("cn={}…", "x".repeat(DISPLAY_NAME_W)));
     }
 }
