@@ -446,7 +446,13 @@ fn the_direct_use_cases_hold_against_the_lab() {
     let rec = record_in(&d.path().join("results-ver"));
     let rows: Vec<Value> = out(&scanr(
         d.path(),
-        &["output", "results", "--format", "json", rec.to_str().unwrap()],
+        &[
+            "output",
+            "results",
+            "--format",
+            "json",
+            rec.to_str().unwrap(),
+        ],
     ))
     .lines()
     .map(|l| serde_json::from_str(l).unwrap())
