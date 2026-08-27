@@ -14,6 +14,14 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
 
 ## [Unreleased]
 
+### Changed
+
+- `plan`'s `dns` row names the effective mode's resolver, not just the mode:
+  `auto -> local (names resolved on this host)`, `transport (names handed to the proxy
+  to resolve)`, `disabled (hostname targets rejected)`. A pinned mode shows only itself;
+  `auto` shows both the request and what it resolved to, so it never leaves the reader
+  guessing which resolver a scan used.
+
 ## [1.0.0-rc.3] - 2026-08-27
 
 ### Added

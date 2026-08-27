@@ -776,11 +776,7 @@ pub fn render_plan(plan: &ScanPlan, facts: &HostFacts, no_color: bool) -> String
             },
         );
     }
-    row(
-        "dns",
-        format!("{} -> {}", plan.dns_requested, plan.dns_effective),
-        &plan.provenance.render("dns"),
-    );
+    row("dns", dns_summary(plan), &plan.provenance.render("dns"));
     // A pair scan is an explicit endpoint list, not a matrix, and describing it as one
     // reads as nonsense: the old rendering produced `targets 2 (3 explicit host:port
     // pairs)` and `ports 3 ((explicit pairs))`. `plan` is the "look before you scan"
@@ -848,6 +844,24 @@ pub fn render_plan(plan: &ScanPlan, facts: &HostFacts, no_color: bool) -> String
 ///
 /// Free rather than a closure so the plan can be rendered in sections without each one
 /// re-deriving the layout.
+/// The `dns` plan row: the effective mode and who actually resolves the names, so
+/// `auto` never leaves the reader guessing which resolver it landed on. When `auto`
+/// chose the mode, both are shown (`auto -> local`); a pinned mode shows just itself.
+fn dns_summary(plan: &ScanPlan) -> String {
+    let effective = match plan.dns_effective {
+        DnsMode::Local => "local (names resolved on this host)",
+        DnsMode::Transport => "transport (names handed to the proxy to resolve)",
+        DnsMode::Disabled => "disabled (hostname targets rejected)",
+        // `auto` is a request, never an effective mode.
+        DnsMode::Auto => "auto",
+    };
+    if plan.dns_requested == DnsMode::Auto && plan.dns_effective != DnsMode::Auto {
+        format!("auto -> {effective}")
+    } else {
+        effective.to_string()
+    }
+}
+
 fn plan_row(s: &mut String, style: &Style, k: &str, v: String, src: &str) {
     // Only pad the value column when there is a provenance column to align to,
     // otherwise every row without one carries trailing whitespace.
