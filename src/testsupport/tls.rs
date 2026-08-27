@@ -51,8 +51,14 @@ pub enum Behavior {
     /// A server of 2005: TLS 1.0, `AES128-SHA`, no extensions at all, and it stops
     /// talking as soon as it has sent its certificate.
     Tls10,
-    /// A 1.3-only server, which answers a 1.2 offer with `protocol_version`.
-    Tls13Only,
+    /// A TLS 1.3 server: ServerHello with an x25519 share, ChangeCipherSpec for the
+    /// middleboxes, then one encrypted record holding EncryptedExtensions (the given
+    /// ALPN), Certificate (the fixture leaf and a copy), CertificateVerify
+    /// (`ecdsa_secp256r1_sha256`, bytes only) and Finished. Real keys, derived from the
+    /// probe's key share exactly as the probe derives them.
+    Tls13 { alpn: Option<&'static str> },
+    /// A server that wants a version the hello does not offer: `protocol_version`.
+    RejectsVersion,
     /// Any alert.
     Alert { level: u8, description: u8 },
     /// Speaks first: an SSH-style greeting, so the probe should never run.
@@ -187,24 +193,127 @@ fn record(kind: u8, payload: &[u8]) -> Vec<u8> {
     r
 }
 
-/// Consume the client's hello: a TLS record header and its body.
-fn read_hello(s: &mut TcpStream) -> std::io::Result<()> {
+/// Consume the client's hello: a TLS record header and its body, which is returned.
+fn read_hello(s: &mut TcpStream) -> std::io::Result<Vec<u8>> {
     let mut head = [0u8; 5];
     s.read_exact(&mut head)?;
     let len = u16::from_be_bytes([head[3], head[4]]) as usize;
     let mut body = vec![0u8; len.min(16_384)];
-    s.read_exact(&mut body)
+    s.read_exact(&mut body)?;
+    Ok(body)
+}
+
+/// The x25519 point in a ClientHello handshake message's key_share extension.
+fn client_key_share(hello: &[u8]) -> Option<[u8; 32]> {
+    // type(1) len(3) version(2) random(32) sid<1> ciphers<2> compression<1> ext<2>
+    let mut p = 4 + 2 + 32;
+    p += 1 + *hello.get(p)? as usize;
+    p += 2 + u16::from_be_bytes([*hello.get(p)?, *hello.get(p + 1)?]) as usize;
+    p += 1 + *hello.get(p)? as usize;
+    let ext_len = u16::from_be_bytes([*hello.get(p)?, *hello.get(p + 1)?]) as usize;
+    p += 2;
+    let end = p + ext_len;
+    while p + 4 <= end {
+        let kind = u16::from_be_bytes([hello[p], hello[p + 1]]);
+        let len = u16::from_be_bytes([hello[p + 2], hello[p + 3]]) as usize;
+        p += 4;
+        if kind == 0x0033 {
+            let shares = hello.get(p + 2..p + len)?;
+            if shares.len() >= 36 && shares[..4] == [0x00, 0x1d, 0x00, 0x20] {
+                return shares[4..36].try_into().ok();
+            }
+        }
+        p += len;
+    }
+    None
+}
+
+fn handshake(kind: u8, body: &[u8]) -> Vec<u8> {
+    let mut hs = vec![kind];
+    hs.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+    hs.extend_from_slice(body);
+    hs
+}
+
+/// A TLS 1.3 server's first flight for the given ClientHello handshake message: plain
+/// ServerHello, ChangeCipherSpec, one encrypted record. Keys come from a fixed server
+/// key and the client's share, so the probe can decrypt it and nothing else can.
+pub fn tls13_flight(client_hello: &[u8], alpn: Option<&str>) -> Vec<u8> {
+    use crate::crypto::{
+        Aes128Gcm, tls13_nonce, tls13_server_handshake_keys, x25519, x25519_public,
+    };
+    let client_pub = client_key_share(client_hello).expect("the hello carries an x25519 share");
+    let server_priv = [0x5au8; 32];
+    let server_pub = x25519_public(&server_priv);
+    let shared = x25519(&server_priv, &client_pub);
+
+    let mut sh = vec![0x03, 0x03];
+    sh.extend_from_slice(&[0x42u8; 32]);
+    sh.push(0);
+    sh.extend_from_slice(&[0x13, 0x01, 0x00]);
+    let mut ext = vec![
+        0x00, 0x2b, 0x00, 0x02, 0x03, 0x04, 0x00, 0x33, 0x00, 0x24, 0x00, 0x1d, 0x00, 0x20,
+    ];
+    ext.extend_from_slice(&server_pub);
+    sh.extend_from_slice(&(ext.len() as u16).to_be_bytes());
+    sh.extend_from_slice(&ext);
+    let sh_msg = handshake(2, &sh);
+
+    let mut transcript = client_hello.to_vec();
+    transcript.extend_from_slice(&sh_msg);
+    let (key, iv) = tls13_server_handshake_keys(&shared, &crate::tls::sha256(&transcript));
+
+    let mut ee_ext = Vec::new();
+    if let Some(a) = alpn {
+        let mut list = vec![0, (a.len() + 1) as u8, a.len() as u8];
+        list.extend_from_slice(a.as_bytes());
+        ee_ext.extend_from_slice(&[0x00, 0x10]);
+        ee_ext.extend_from_slice(&(list.len() as u16).to_be_bytes());
+        ee_ext.extend_from_slice(&list);
+    }
+    let mut ee = (ee_ext.len() as u16).to_be_bytes().to_vec();
+    ee.extend_from_slice(&ee_ext);
+
+    let mut entries = Vec::new();
+    for der in [FIXTURE_CERT_DER, FIXTURE_CERT_DER] {
+        entries.extend_from_slice(&(der.len() as u32).to_be_bytes()[1..]);
+        entries.extend_from_slice(der);
+        entries.extend_from_slice(&[0x00, 0x00]);
+    }
+    let mut cert = vec![0x00];
+    cert.extend_from_slice(&(entries.len() as u32).to_be_bytes()[1..]);
+    cert.extend_from_slice(&entries);
+
+    let mut cv = vec![0x04, 0x03, 0x00, 0x40];
+    cv.extend_from_slice(&[0x22u8; 64]);
+
+    let mut inner = handshake(8, &ee);
+    inner.extend_from_slice(&handshake(11, &cert));
+    inner.extend_from_slice(&handshake(15, &cv));
+    inner.extend_from_slice(&handshake(20, &[0x33u8; 32]));
+    inner.push(0x16);
+
+    let mut head = vec![0x17, 0x03, 0x03];
+    head.extend_from_slice(&((inner.len() + 16) as u16).to_be_bytes());
+    let sealed = Aes128Gcm::new(&key).seal(&tls13_nonce(&iv, 0), &head, &inner);
+
+    let mut out = record(0x16, &sh_msg);
+    out.extend_from_slice(&[0x14, 0x03, 0x03, 0x00, 0x01, 0x01]);
+    out.extend_from_slice(&head);
+    out.extend_from_slice(&sealed);
+    out
 }
 
 fn handle(mut s: TcpStream, behavior: Behavior, shutdown: Arc<AtomicBool>) -> std::io::Result<()> {
     if behavior == Behavior::Greets {
         return s.write_all(b"SSH-2.0-fixture\r\n");
     }
-    read_hello(&mut s)?;
+    let hello = read_hello(&mut s)?;
     match behavior {
         Behavior::Tls12 { alpn } => s.write_all(&tls12_flight(alpn)),
         Behavior::Tls10 => s.write_all(&tls10_flight()),
-        Behavior::Tls13Only => s.write_all(&record(0x15, &[2, 70])),
+        Behavior::Tls13 { alpn } => s.write_all(&tls13_flight(&hello, alpn)),
+        Behavior::RejectsVersion => s.write_all(&record(0x15, &[2, 70])),
         Behavior::Alert { level, description } => s.write_all(&record(0x15, &[level, description])),
         Behavior::Greets => unreachable!("handled above"),
         Behavior::NotTls => s.write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"),

@@ -8,11 +8,12 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use scanr::tls::{MAX_LEAF_DER, TlsObservation, read_server_flight};
+use scanr::tls::{MAX_LEAF_DER, TlsObservation, client_hello, read_server_flight};
 
 fuzz_target!(|data: &[u8]| {
+    let hello = client_hello(None);
     let mut obs = TlsObservation::default();
-    read_server_flight(&mut std::io::Cursor::new(data), None, &mut obs);
+    read_server_flight(&mut std::io::Cursor::new(data), None, &mut obs, &hello);
     if let Some(der) = &obs.leaf_der {
         assert!(der.len() <= MAX_LEAF_DER);
         assert_eq!(obs.leaf_sha256, Some(scanr::tls::sha256(der)));
@@ -27,6 +28,6 @@ fuzz_target!(|data: &[u8]| {
 
     // No hidden state: the same bytes give the same observation.
     let mut again = TlsObservation::default();
-    read_server_flight(&mut std::io::Cursor::new(data), None, &mut again);
+    read_server_flight(&mut std::io::Cursor::new(data), None, &mut again, &hello);
     assert_eq!(obs, again);
 });

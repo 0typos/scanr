@@ -85,29 +85,41 @@ the effective mode and warns.
 ## The one active probe
 
 Everything else scanr does is connect and listen. `--tls` (or `tls = true`) sends one
-thing: a fixed TLS 1.2 ClientHello, to open ports that volunteered no banner, on the
-connection the scan already made. It addresses the service rather than observing it,
+thing: a fixed ClientHello offering TLS 1.3 and 1.2, to open ports that volunteered no
+banner, on the connection the scan already made. It addresses the service rather than observing it,
 which is why it is **off by default** and why the record states `tls.sent_bytes` — `0`
 when it never ran.
 
-What is sent, byte for byte (163 bytes; an SNI extension is added when the target was
+What is sent, byte for byte (218 bytes; an SNI extension is added when the target was
 given as a name, whether scanr resolved it or the proxy will):
 
 ```
-160301009e0100009a03037363616e7220746c732070726f62653a206e6f7420
-72616e646f6d2020763120000028c02cc02bc030c02fcca9cca8c024c023c028
-c027c00ac009c014c013009d009c003d003c0035002f01000049000a00080006
-001d00170018000b00020100000d001800160403050306030804080508060401
-05010601020302010010000e000c02683208687474702f312e3100170000ff01
-000100
+16030100d5010000d103037363616e7220746c732070726f62653a206e6f7420
+72616e646f6d202076312000002a1301c02cc02bc030c02fcca9cca8c024c023
+c028c027c00ac009c014c013009d009c003d003c0035002f0100007e000a0008
+0006001d00170018000b00020100000d001a0018040305030603080408050806
+0807040105010601020302010010000e000c02683208687474702f312e310017
+0000ff01000100002b00050403040303003300260024001d00207759e0be15bc
+4d8af57fb9dcf4a14d73dcc56bf9a1ebc75dce3fbe0297cfd736
 ```
 
-Client random is a fixed string, cipher suites are twenty common TLS 1.2 suites, ALPN
-offers `h2` and `http/1.1`, and there is no `supported_versions` extension, so nothing
-newer than 1.2 is ever negotiated. The server's first flight is read — ServerHello,
-Certificate, ServerKeyExchange, ServerHelloDone, or an Alert — and the socket is reset.
-No key exchange, no verification, no bytes after the flight. A test holds this document
-to the bytes the code sends.
+Client random is a fixed string; the cipher suites are `TLS_AES_128_GCM_SHA256` — the
+one every 1.3 server must implement — and twenty common 1.2 suites; ALPN offers `h2`
+and `http/1.1`; `supported_versions` names 1.3 then 1.2; `key_share` carries one x25519
+point, computed from the private key published in `src/tls.rs`
+(`PROBE_X25519_PRIVATE`). A test holds this document to the bytes the code sends.
+
+A server that picks 1.2 or older sends its first flight in the clear — ServerHello,
+Certificate, ServerKeyExchange, ServerHelloDone, or an Alert — and it is read. A server
+that picks 1.3 encrypts everything after its ServerHello, so scanr finishes the key
+exchange (X25519 with that published key, the RFC 8446 schedule, AES-128-GCM, all in
+`src/crypto.rs` with an RFC or NIST vector for each) and decrypts the flight up to
+Finished. Nothing is sent after the hello: the server's Finished is not answered, no
+application data ever exists, and the socket is reset. A published private key means
+anyone holding a capture can read the same flight — which is the point; nothing in it
+was ever secret. A server that wants a different key-share group answers
+HelloRetryRequest, which is recorded as such and not pursued. No verification of the
+certificate or the signature, in 1.3 or 1.2.
 
 What comes back is peer-chosen and treated as such: record and message lengths are
 bounded (64 KiB flight, 8 KiB embedded leaf), the read is deadline-driven, the ALPN
@@ -134,7 +146,7 @@ response, and every length in a TLS server flight and its certificate. Eight fuz
 | `socks5_handshake` | greeting, method selection, RFC 1929 auth; the proxy picks the method and status byte |
 | `socks5_reply` | CONNECT reply parser, including the address length |
 | `http_connect_reply` | HTTP CONNECT response parser: status line, header block bound, printable filtering |
-| `tls_reply` | TLS server flight: record, handshake and certificate lengths; ALPN filtering; leaf bound |
+| `tls_reply` | TLS server flight, 1.2 in the clear and 1.3 through the key exchange: record, handshake and certificate lengths; ALPN filtering; leaf bound; a record that does not decrypt |
 | `x509_leaf` | the leaf certificate: DER tags and lengths, names, times, alternative names; strings printable; the same answer twice |
 | `config` | loading, validation, the caret renderer's byte-offset slicing |
 | `specs` | target, port and duration parsing |

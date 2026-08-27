@@ -42,6 +42,13 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
   ECDHE `kx_group` and `sig_scheme` from ServerKeyExchange, `compression`, and the
   ServerHello's `server_extensions` with `secure_renegotiation`, `extended_master_secret`
   and `session_ticket` derived from it. `negotiated` says `ssl3` for an SSLv3 answer.
+- The TLS probe reads TLS 1.3 servers. The hello (now 218 bytes) offers 1.3 and 1.2;
+  when a server takes 1.3 the probe finishes the key exchange with a published X25519
+  key and decrypts the flight — certificate, chain, ALPN, signature scheme — instead of
+  recording a `protocol_version` alert. `offered` says `"1.3,1.2"`; a HelloRetryRequest
+  is recorded as `hello_retry_request` and not pursued. X25519, HKDF and AES-128-GCM are
+  hand-rolled in `src/crypto.rs`, each held to an RFC or NIST vector; nothing is sent
+  after the hello.
 - SNI travels on the direct path when the target was given as a name: a locally resolved
   address now keeps its hostname, so a virtual-hosting server answers with its certificate
   instead of an alert. A real 443 answered `internal_error` to the nameless hello.
