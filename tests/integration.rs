@@ -2393,8 +2393,20 @@ fn the_tls_probe_agrees_with_openssl_s_server() {
         "the leaf must be the certificate s_server was given"
     );
     let tls13 = by_port(p13);
-    assert_eq!(tls13["tls"]["alert"]["name"], "protocol_version", "{tls13}");
-    assert!(tls13["tls"]["leaf_der"].is_null(), "{tls13}");
+    assert_eq!(tls13["tls"]["negotiated"], "1.3", "{tls13}");
+    assert_eq!(
+        tls13["tls"]["cipher_name"], "TLS_AES_128_GCM_SHA256",
+        "{tls13}"
+    );
+    assert_eq!(tls13["tls"]["kx_group"], "x25519", "{tls13}");
+    assert!(tls13["tls"]["sig_scheme"].is_string(), "{tls13}");
+    assert_eq!(tls13["tls"]["chain_len"], 1, "{tls13}");
+    assert_eq!(
+        tls13["tls"]["leaf_der"].as_str().unwrap(),
+        scanr::transport::http::base64(&der),
+        "the 1.3 leaf, decrypted, must be the certificate s_server was given"
+    );
+    assert!(tls13["tls"]["error"].is_null(), "{tls13}");
 }
 
 /// The rate projection is the optimistic bound; the plan must also show what a network of

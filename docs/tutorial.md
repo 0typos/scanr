@@ -564,8 +564,8 @@ verified: the line says `self-signed`, not `untrusted`, because trust is a polic
 scanr does not have. A TLS 1.3-only
 server answers with a `protocol_version` alert, recorded as such.
 
-The scan's config event says `"tls": {"enabled": true, "offered": "1.2", "sent_bytes": 163}`;
-with `--tls` off it says `"sent_bytes": 0`. The exact 163 bytes are listed in
+The scan's config event says `"tls": {"enabled": true, "offered": "1.3,1.2", "sent_bytes": 218}`;
+with `--tls` off it says `"sent_bytes": 0`. The exact 218 bytes are listed in
 [security.md](security.md).
 
 nmap `-sV` does far more here — and that is where use case 2's `--format nmap` sends the

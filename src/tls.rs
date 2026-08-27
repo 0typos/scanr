@@ -1,18 +1,19 @@
 //! The TLS ClientHello probe: the one active probe scanr sends (D35).
 //!
 //! Off by default. On an open port that volunteered no banner — TLS servers never speak
-//! first — a fixed TLS 1.2 ClientHello is written on the same connection and the
-//! server's first flight is read: ServerHello (version, cipher, ALPN), Certificate (the
-//! leaf, hashed and kept), or an Alert. Then the socket is reset as every probe socket
-//! is. No key exchange, no verification. The leaf's names, validity and key are read by
-//! [`crate::x509`] — bounded and unverified — and the DER itself is kept for `tlsx`,
-//! `openssl x509` and `nmap -sV`.
+//! first — a fixed ClientHello offering TLS 1.3 and 1.2 is written on the same
+//! connection and the server's first flight is read: ServerHello (version, cipher),
+//! Certificate (the leaf, hashed and kept, the chain after it), key exchange, ALPN, or
+//! an Alert. Then the socket is reset as every probe socket is. No verification. The
+//! leaf's names, validity and key are read by [`crate::x509`] — bounded and unverified —
+//! and the DER itself is kept for `tlsx`, `openssl x509` and `nmap -sV`.
 //!
-//! TLS 1.2 only, on purpose. In 1.3 the Certificate and the ALPN answer are encrypted,
-//! and reading them means a full handshake — a real TLS stack, which means C or assembly
-//! in the tree and the end of the fully static musl build (D19, D28). Offering 1.2 gets
-//! ServerHello and Certificate in the clear from every server that still permits it; a
-//! 1.3-only server answers a `protocol_version` alert, which is itself evidence.
+//! A 1.2 server sends all of that in the clear. A 1.3 server encrypts everything after
+//! the ServerHello, so the probe finishes the key exchange — X25519 from a published
+//! private key, the RFC 8446 schedule, AES-128-GCM, all in [`crate::crypto`] — and
+//! decrypts the flight up to Finished. Nothing is sent after the hello; the server's
+//! Finished is not answered, and the socket is reset like any other. Older servers step
+//! down to 1.2, 1.1, 1.0 or SSLv3 and are read as they always were.
 //!
 //! Everything read here is peer-chosen: record lengths, handshake lengths, certificate
 //! lengths, the ALPN string. The parser is bounded in bytes and in time, and the fuzz
@@ -36,11 +37,31 @@ const MAX_RECORD: usize = 16_384;
 
 const RECORD_HANDSHAKE: u8 = 0x16;
 const RECORD_ALERT: u8 = 0x15;
+const RECORD_CHANGE_CIPHER_SPEC: u8 = 0x14;
+const RECORD_APPLICATION_DATA: u8 = 0x17;
 const HS_CLIENT_HELLO: u8 = 1;
 const HS_SERVER_HELLO: u8 = 2;
+const HS_ENCRYPTED_EXTENSIONS: u8 = 8;
 const HS_CERTIFICATE: u8 = 11;
 const HS_SERVER_KEY_EXCHANGE: u8 = 12;
 const HS_SERVER_HELLO_DONE: u8 = 14;
+const HS_CERTIFICATE_VERIFY: u8 = 15;
+const HS_FINISHED: u8 = 20;
+const GROUP_X25519: u16 = 0x001d;
+/// A ServerHello whose random is this is a HelloRetryRequest (RFC 8446 §4.1.3).
+const HELLO_RETRY_REQUEST_RANDOM: [u8; 32] = [
+    0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11, 0xbe, 0x1d, 0x8c, 0x02, 0x1e, 0x65, 0xb8, 0x91,
+    0xc2, 0xa2, 0x11, 0x16, 0x7a, 0xbb, 0x8c, 0x5e, 0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c,
+];
+/// The probe's X25519 private key. Published, like the client random: the session carries
+/// nothing secret, and a fixed key keeps the hello byte-for-byte reproducible.
+pub const PROBE_X25519_PRIVATE: [u8; 32] = *b"scanr tls probe x25519 key    v1";
+
+/// The key share the hello carries, computed once.
+pub fn probe_public_key() -> &'static [u8; 32] {
+    static KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    KEY.get_or_init(|| crate::crypto::x25519_public(&PROBE_X25519_PRIVATE))
+}
 /// Certificates after the leaf whose fields are kept; the rest are counted.
 pub const MAX_CHAIN_KEPT: usize = 8;
 /// Server extensions recorded; nothing real sends more.
@@ -52,12 +73,15 @@ const EXT_SIGNATURE_ALGORITHMS: u16 = 0x000d;
 const EXT_ALPN: u16 = 0x0010;
 const EXT_EXTENDED_MASTER_SECRET: u16 = 0x0017;
 const EXT_SESSION_TICKET: u16 = 0x0023;
+const EXT_SUPPORTED_VERSIONS: u16 = 0x002b;
+const EXT_KEY_SHARE: u16 = 0x0033;
 const EXT_RENEGOTIATION_INFO: u16 = 0xff01;
 
 /// The cipher suites offered, strongest first. Wide enough that a server with any
 /// modern or legacy TLS 1.2 configuration finds one it accepts, so a `handshake_failure`
-/// means something.
+/// means something. One 1.3 suite: the one every 1.3 server must implement.
 const CIPHER_SUITES: &[(u16, &str)] = &[
+    (0x1301, "TLS_AES_128_GCM_SHA256"),
     (0xc02c, "ECDHE-ECDSA-AES256-GCM-SHA384"),
     (0xc02b, "ECDHE-ECDSA-AES128-GCM-SHA256"),
     (0xc030, "ECDHE-RSA-AES256-GCM-SHA384"),
@@ -114,6 +138,9 @@ impl TlsProbe {
     }
 }
 
+/// The record's `offered`: the versions the hello names.
+pub const OFFERED: &str = "1.3,1.2";
+
 /// What the server's first flight said. Every field is optional because the flight can
 /// stop anywhere; `error` says where, when it did.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -152,6 +179,9 @@ pub struct TlsObservation {
     pub kx_group: Option<u16>,
     /// The signature scheme the server signed its key exchange with (TLS 1.2 and 1.3).
     pub sig_scheme: Option<u16>,
+    /// A 1.3 server answered HelloRetryRequest, wanting a key share for this group. The
+    /// probe carries only x25519, so the flight ends there.
+    pub hello_retry: Option<u16>,
 }
 
 /// One certificate after the leaf: hashed always, read when it parses.
@@ -210,7 +240,7 @@ pub fn probe(
         obs.error = Some(format!("sending ClientHello: {e}"));
         return obs;
     }
-    read_server_flight(&mut &*stream, Some(deadline), &mut obs);
+    read_server_flight(&mut &*stream, Some(deadline), &mut obs, &hello);
     if let Some(c) = &mut obs.cert {
         let now = (crate::timefmt::now_epoch_ms() / 1000) as i64;
         c.validity = Some(c.validity_at(now));
@@ -242,8 +272,8 @@ pub fn client_hello(sni: Option<&str>) -> Vec<u8> {
         &mut ext,
         EXT_SIGNATURE_ALGORITHMS,
         &[
-            0x00, 0x16, 0x04, 0x03, 0x05, 0x03, 0x06, 0x03, 0x08, 0x04, 0x08, 0x05, 0x08, 0x06,
-            0x04, 0x01, 0x05, 0x01, 0x06, 0x01, 0x02, 0x03, 0x02, 0x01,
+            0x00, 0x18, 0x04, 0x03, 0x05, 0x03, 0x06, 0x03, 0x08, 0x04, 0x08, 0x05, 0x08, 0x06,
+            0x08, 0x07, 0x04, 0x01, 0x05, 0x01, 0x06, 0x01, 0x02, 0x03, 0x02, 0x01,
         ],
     );
     push_extension(
@@ -255,6 +285,17 @@ pub fn client_hello(sni: Option<&str>) -> Vec<u8> {
     );
     push_extension(&mut ext, EXT_EXTENDED_MASTER_SECRET, &[]);
     push_extension(&mut ext, EXT_RENEGOTIATION_INFO, &[0x00]);
+    // 1.3 first, 1.2 second: a server picks the highest it has.
+    push_extension(
+        &mut ext,
+        EXT_SUPPORTED_VERSIONS,
+        &[0x04, 0x03, 0x04, 0x03, 0x03],
+    );
+    let mut share = vec![0x00, 0x24];
+    share.extend_from_slice(&GROUP_X25519.to_be_bytes());
+    share.extend_from_slice(&[0x00, 0x20]);
+    share.extend_from_slice(probe_public_key());
+    push_extension(&mut ext, EXT_KEY_SHARE, &share);
 
     let mut body = Vec::with_capacity(64 + CIPHER_SUITES.len() * 2 + ext.len());
     body.extend_from_slice(&[0x03, 0x03]);
@@ -291,9 +332,18 @@ fn push_extension(out: &mut Vec<u8>, kind: u16, body: &[u8]) {
 ///
 /// Generic over the reader so the fuzz harness can drive it. Fills `obs` as it goes, so
 /// a flight that stops halfway still leaves what was learned.
-pub fn read_server_flight<R: Read>(s: &mut R, deadline: Option<Instant>, obs: &mut TlsObservation) {
+pub fn read_server_flight<R: Read>(
+    s: &mut R,
+    deadline: Option<Instant>,
+    obs: &mut TlsObservation,
+    client_hello: &[u8],
+) {
     let mut handshake: Vec<u8> = Vec::new();
     let mut total = 0usize;
+    let mut tls13 = Flight13 {
+        client_hello: client_hello.get(5..).unwrap_or(&[]),
+        aead: None,
+    };
     loop {
         let mut head = [0u8; 5];
         if let Err(e) = read_exact(s, &mut head, deadline) {
@@ -349,9 +399,43 @@ pub fn read_server_flight<R: Read>(s: &mut R, deadline: Option<Instant>, obs: &m
             }
             RECORD_HANDSHAKE => {
                 handshake.extend_from_slice(&body);
-                match drain_handshake(&mut handshake, obs) {
+                match drain_handshake(&mut handshake, obs, &mut tls13) {
                     Flight::Continue => {}
                     Flight::Done => return,
+                }
+            }
+            // 1.3 servers send one for middleboxes' sake; it carries nothing.
+            RECORD_CHANGE_CIPHER_SPEC => {}
+            RECORD_APPLICATION_DATA => {
+                let Some((aead, iv, seq)) = tls13.aead.as_mut() else {
+                    obs.error = Some("encrypted record before a TLS 1.3 ServerHello".into());
+                    return;
+                };
+                let nonce = crate::crypto::tls13_nonce(iv, *seq);
+                *seq += 1;
+                let Some(mut plain) = aead.open(&nonce, &head, &body) else {
+                    obs.error = Some("TLS 1.3 record did not decrypt".into());
+                    return;
+                };
+                // Padding is zeros after the content-type byte (RFC 8446 §5.4).
+                while plain.last() == Some(&0) {
+                    plain.pop();
+                }
+                match plain.pop() {
+                    Some(RECORD_HANDSHAKE) => {
+                        handshake.extend_from_slice(&plain);
+                        match drain_handshake(&mut handshake, obs, &mut tls13) {
+                            Flight::Continue => {}
+                            Flight::Done => return,
+                        }
+                    }
+                    Some(RECORD_ALERT) => {
+                        if plain.len() >= 2 {
+                            obs.alert = Some((plain[0], plain[1]));
+                        }
+                        return;
+                    }
+                    _ => {}
                 }
             }
             other => {
@@ -367,8 +451,19 @@ enum Flight {
     Done,
 }
 
+/// What a 1.3 handshake needs across records: the hello we sent, for the transcript,
+/// and the server's handshake keys once its share is in.
+struct Flight13<'a> {
+    client_hello: &'a [u8],
+    aead: Option<(crate::crypto::Aes128Gcm, [u8; 12], u64)>,
+}
+
 /// Parse every complete handshake message buffered so far.
-fn drain_handshake(buf: &mut Vec<u8>, obs: &mut TlsObservation) -> Flight {
+fn drain_handshake(
+    buf: &mut Vec<u8>,
+    obs: &mut TlsObservation,
+    tls13: &mut Flight13<'_>,
+) -> Flight {
     loop {
         if buf.len() < 4 {
             return Flight::Continue;
@@ -382,25 +477,68 @@ fn drain_handshake(buf: &mut Vec<u8>, obs: &mut TlsObservation) -> Flight {
         if buf.len() < 4 + len {
             return Flight::Continue;
         }
-        let msg: Vec<u8> = buf.drain(..4 + len).skip(4).collect();
+        let raw: Vec<u8> = buf.drain(..4 + len).collect();
+        let msg = &raw[4..];
         match kind {
             HS_SERVER_HELLO => {
-                if let Err(e) = parse_server_hello(&msg, obs) {
-                    obs.error = Some(e);
-                    return Flight::Done;
+                let extras = match parse_server_hello(msg, obs) {
+                    Ok(x) => x,
+                    Err(e) => {
+                        obs.error = Some(e);
+                        return Flight::Done;
+                    }
+                };
+                if obs.negotiated == Some(0x0304) {
+                    if extras.hello_retry {
+                        obs.hello_retry = Some(extras.key_share_group.unwrap_or(0));
+                        obs.error = Some(format!(
+                            "HelloRetryRequest: the server wants a key share for {}",
+                            group_name(obs.hello_retry.unwrap_or(0))
+                        ));
+                        return Flight::Done;
+                    }
+                    let Some(server_key) = extras
+                        .key_share
+                        .filter(|k| k.len() == 32 && extras.key_share_group == Some(GROUP_X25519))
+                    else {
+                        obs.error = Some("TLS 1.3 ServerHello without an x25519 key share".into());
+                        return Flight::Done;
+                    };
+                    let server_key: [u8; 32] = server_key.try_into().unwrap();
+                    let shared = crate::crypto::x25519(&PROBE_X25519_PRIVATE, &server_key);
+                    let mut transcript = tls13.client_hello.to_vec();
+                    transcript.extend_from_slice(&raw);
+                    let (key, iv) =
+                        crate::crypto::tls13_server_handshake_keys(&shared, &sha256(&transcript));
+                    tls13.aead = Some((crate::crypto::Aes128Gcm::new(&key), iv, 0));
                 }
             }
+            HS_ENCRYPTED_EXTENSIONS => parse_extensions(msg, obs),
             HS_CERTIFICATE => {
-                if let Err(e) = parse_certificate(&msg, obs) {
+                if let Err(e) = parse_certificate(msg, obs, obs.negotiated == Some(0x0304)) {
                     obs.error = Some(e);
                     return Flight::Done;
                 }
             }
-            HS_SERVER_KEY_EXCHANGE => parse_server_key_exchange(&msg, obs),
-            HS_SERVER_HELLO_DONE => return Flight::Done,
+            HS_SERVER_KEY_EXCHANGE => parse_server_key_exchange(msg, obs),
+            HS_CERTIFICATE_VERIFY => {
+                if let Some(s) = msg.get(..2) {
+                    obs.sig_scheme = Some(u16::from_be_bytes([s[0], s[1]]));
+                }
+            }
+            HS_SERVER_HELLO_DONE | HS_FINISHED => return Flight::Done,
             _ => {}
         }
     }
+}
+
+/// What a ServerHello says beyond the observation: whether it is a HelloRetryRequest
+/// and the key share it carries.
+#[derive(Default)]
+struct ServerHelloExtras {
+    hello_retry: bool,
+    key_share_group: Option<u16>,
+    key_share: Option<Vec<u8>>,
 }
 
 /// On Linux an expired `SO_RCVTIMEO` surfaces as `WouldBlock`, not `TimedOut`.
@@ -411,7 +549,7 @@ fn is_timeout(e: &std::io::Error) -> bool {
     )
 }
 
-fn parse_server_hello(m: &[u8], obs: &mut TlsObservation) -> Result<(), String> {
+fn parse_server_hello(m: &[u8], obs: &mut TlsObservation) -> Result<ServerHelloExtras, String> {
     // version(2) random(32) session_id<0..32> cipher(2) compression(1) [extensions]
     let sid_len = *m.get(34).ok_or("ServerHello too short")? as usize;
     let at = 35 + sid_len;
@@ -419,45 +557,96 @@ fn parse_server_hello(m: &[u8], obs: &mut TlsObservation) -> Result<(), String> 
     obs.negotiated = Some(u16::from_be_bytes([m[0], m[1]]));
     obs.cipher = Some(u16::from_be_bytes([cipher[0], cipher[1]]));
     obs.compression = m.get(at + 2).copied();
-    let mut p = at + 3;
-    if p + 2 > m.len() {
-        return Ok(()); // no extensions
-    }
-    let ext_len = u16::from_be_bytes([m[p], m[p + 1]]) as usize;
-    p += 2;
-    let end = (p + ext_len).min(m.len());
-    while p + 4 <= end {
-        let kind = u16::from_be_bytes([m[p], m[p + 1]]);
-        let len = u16::from_be_bytes([m[p + 2], m[p + 3]]) as usize;
-        p += 4;
-        let body = m.get(p..(p + len).min(end)).unwrap_or(&[]);
+    let mut extras = ServerHelloExtras {
+        hello_retry: m[2..34] == HELLO_RETRY_REQUEST_RANDOM,
+        ..Default::default()
+    };
+    let Some(ext) = m.get(at + 3..) else {
+        return Ok(extras); // no extensions
+    };
+    for (kind, body) in extensions(ext) {
         if obs.server_extensions.len() < MAX_SERVER_EXTENSIONS {
             obs.server_extensions.push(kind);
         }
-        if kind == EXT_ALPN && body.len() >= 3 {
-            let n = body[2] as usize;
-            if let Some(proto) = body.get(3..3 + n) {
-                obs.alpn = Some(
-                    proto
-                        .iter()
-                        .map(|&b| {
-                            if (b' '..=b'~').contains(&b) {
-                                b as char
-                            } else {
-                                '.'
-                            }
-                        })
-                        .collect(),
-                );
+        match kind {
+            EXT_ALPN => obs.alpn = alpn_from(body),
+            // The real version: the fixed field says 1.2 for a 1.3 server.
+            EXT_SUPPORTED_VERSIONS if body == [0x03, 0x04] => obs.negotiated = Some(0x0304),
+            EXT_KEY_SHARE if body.len() >= 2 => {
+                let group = u16::from_be_bytes([body[0], body[1]]);
+                extras.key_share_group = Some(group);
+                obs.kx_group = Some(group);
+                if !extras.hello_retry && body.len() >= 4 {
+                    let n = u16::from_be_bytes([body[2], body[3]]) as usize;
+                    extras.key_share = body.get(4..4 + n).map(<[u8]>::to_vec);
+                }
             }
+            _ => {}
         }
-        p += len;
     }
-    Ok(())
+    Ok(extras)
 }
 
-fn parse_certificate(m: &[u8], obs: &mut TlsObservation) -> Result<(), String> {
-    // certificate_list<0..2^24-1>: each entry length(3) + DER.
+/// `extensions<0..2^16-1>`: `(type, body)` pairs, stopping at the first malformed one.
+fn extensions(m: &[u8]) -> Vec<(u16, &[u8])> {
+    let mut out = Vec::new();
+    if m.len() < 2 {
+        return out;
+    }
+    let ext_len = u16::from_be_bytes([m[0], m[1]]) as usize;
+    let end = (2 + ext_len).min(m.len());
+    let mut p = 2;
+    while p + 4 <= end && out.len() < MAX_SERVER_EXTENSIONS {
+        let kind = u16::from_be_bytes([m[p], m[p + 1]]);
+        let len = u16::from_be_bytes([m[p + 2], m[p + 3]]) as usize;
+        p += 4;
+        let Some(body) = m.get(p..p + len).filter(|_| p + len <= end) else {
+            break;
+        };
+        out.push((kind, body));
+        p += len;
+    }
+    out
+}
+
+fn alpn_from(body: &[u8]) -> Option<String> {
+    let n = *body.get(2)? as usize;
+    let proto = body.get(3..3 + n)?;
+    Some(
+        proto
+            .iter()
+            .map(|&b| {
+                if (b' '..=b'~').contains(&b) {
+                    b as char
+                } else {
+                    '.'
+                }
+            })
+            .collect(),
+    )
+}
+
+/// EncryptedExtensions: where a 1.3 server puts ALPN.
+fn parse_extensions(m: &[u8], obs: &mut TlsObservation) {
+    for (kind, body) in extensions(m) {
+        if obs.server_extensions.len() < MAX_SERVER_EXTENSIONS {
+            obs.server_extensions.push(kind);
+        }
+        if kind == EXT_ALPN {
+            obs.alpn = alpn_from(body);
+        }
+    }
+}
+
+/// `certificate_list<0..2^24-1>`: entries of `length(3) + DER`, each followed in 1.3 by
+/// its own `extensions<0..2^16-1>`, the list preceded in 1.3 by a request context.
+fn parse_certificate(m: &[u8], obs: &mut TlsObservation, tls13: bool) -> Result<(), String> {
+    let start = if tls13 {
+        1 + *m.first().ok_or("Certificate message too short")? as usize
+    } else {
+        0
+    };
+    let m = m.get(start..).ok_or("Certificate message too short")?;
     if m.len() < 3 {
         return Err("Certificate message too short".into());
     }
@@ -495,6 +684,12 @@ fn parse_certificate(m: &[u8], obs: &mut TlsObservation) -> Result<(), String> {
         }
         count += 1;
         p += len;
+        if tls13 {
+            let Some(e) = list.get(p..p + 2) else {
+                break;
+            };
+            p += 2 + u16::from_be_bytes([e[0], e[1]]) as usize;
+        }
     }
     obs.chain_len = Some(count);
     if count == 0 {
@@ -619,7 +814,7 @@ impl TlsObservation {
     pub fn to_json(&self) -> serde_json::Value {
         use serde_json::json;
         let mut v = json!({
-            "offered": "1.2",
+            "offered": OFFERED,
             "sent_bytes": self.sent_bytes,
             "read_bytes": self.read_bytes,
             "sni": self.sni,
@@ -640,6 +835,7 @@ impl TlsObservation {
             "session_ticket": self.server_extensions.contains(&EXT_SESSION_TICKET),
             "kx_group": self.kx_group.map(group_name),
             "sig_scheme": self.sig_scheme.map(sig_scheme_name),
+            "hello_retry_request": self.hello_retry.map(group_name),
         });
         if let Some(e) = self.cert_error {
             v["cert_error"] = json!(e);
@@ -670,6 +866,10 @@ impl TlsObservation {
         if let Some(a) = &self.alpn {
             s.push(' ');
             s.push_str(a);
+        }
+        if let Some(g) = self.hello_retry {
+            s.push_str(" hrr:");
+            s.push_str(&group_name(g));
         }
         if let Some(c) = &self.cert {
             let words = c.summary();
@@ -785,7 +985,7 @@ mod tests {
     }
 
     #[test]
-    fn the_client_hello_is_a_well_formed_tls12_record() {
+    fn the_client_hello_is_a_well_formed_record_offering_13_and_12() {
         let h = client_hello(None);
         assert_eq!(
             &h[..3],
@@ -797,13 +997,96 @@ mod tests {
         assert_eq!(h[5], HS_CLIENT_HELLO);
         let hs_len = u32::from_be_bytes([0, h[6], h[7], h[8]]) as usize;
         assert_eq!(hs_len + 9, h.len());
-        assert_eq!(&h[9..11], &[0x03, 0x03], "offers TLS 1.2 and nothing newer");
+        assert_eq!(&h[9..11], &[0x03, 0x03], "legacy version field says 1.2");
         assert_eq!(&h[11..43], &CLIENT_RANDOM);
         assert_eq!(h[43], 0, "no session id");
         let suites = u16::from_be_bytes([h[44], h[45]]) as usize;
         assert_eq!(suites, CIPHER_SUITES.len() * 2);
-        // No supported_versions extension (0x002b): that is what would invite 1.3.
-        assert!(!h.windows(2).any(|w| w == [0x00, 0x2b]));
+        assert_eq!(&h[46..48], &[0x13, 0x01], "the 1.3 suite leads");
+        // supported_versions names 1.3 then 1.2; key_share carries the x25519 point.
+        let sv = [0x00, 0x2b, 0x00, 0x05, 0x04, 0x03, 0x04, 0x03, 0x03];
+        assert!(h.windows(sv.len()).any(|w| w == sv));
+        let mut ks = vec![0x00, 0x33, 0x00, 0x26, 0x00, 0x24, 0x00, 0x1d, 0x00, 0x20];
+        ks.extend_from_slice(probe_public_key());
+        assert!(h.windows(ks.len()).any(|w| w == ks));
+        assert_eq!(
+            crate::crypto::x25519_public(&PROBE_X25519_PRIVATE),
+            *probe_public_key()
+        );
+    }
+
+    #[test]
+    fn a_hello_retry_request_names_the_group_and_ends_the_flight() {
+        let mut body = vec![0x03, 0x03];
+        body.extend_from_slice(&HELLO_RETRY_REQUEST_RANDOM);
+        body.push(0);
+        body.extend_from_slice(&[0x13, 0x01, 0x00]);
+        let mut ext = Vec::new();
+        push_extension(&mut ext, EXT_SUPPORTED_VERSIONS, &[0x03, 0x04]);
+        push_extension(&mut ext, EXT_KEY_SHARE, &[0x00, 0x17]);
+        body.extend_from_slice(&(ext.len() as u16).to_be_bytes());
+        body.extend_from_slice(&ext);
+        let mut hs = vec![HS_SERVER_HELLO];
+        hs.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+        hs.extend_from_slice(&body);
+        let obs = flight(&record(RECORD_HANDSHAKE, &hs));
+        assert_eq!(obs.negotiated, Some(0x0304));
+        assert_eq!(obs.hello_retry, Some(0x0017));
+        assert!(
+            obs.error.as_deref().unwrap().contains("secp256r1"),
+            "{obs:?}"
+        );
+        assert_eq!(obs.display(), "tls1.3 hrr:secp256r1");
+        assert_eq!(obs.to_json()["hello_retry_request"], "secp256r1");
+    }
+
+    #[test]
+    fn an_encrypted_record_before_a_13_hello_is_an_error_not_a_panic() {
+        let obs = flight(&record(RECORD_APPLICATION_DATA, &[0u8; 40]));
+        assert!(obs.error.as_deref().unwrap().contains("before"), "{obs:?}");
+        let mut bytes = crate::testsupport::tls::tls13_flight(&client_hello(None)[5..], Some("h2"));
+        let n = bytes.len();
+        bytes[n - 1] ^= 0xff;
+        let obs = flight(&bytes);
+        assert_eq!(obs.negotiated, Some(0x0304));
+        assert!(
+            obs.error.as_deref().unwrap().contains("did not decrypt"),
+            "{obs:?}"
+        );
+    }
+
+    #[test]
+    fn a_13_flight_is_decrypted_to_certificate_alpn_and_signature() {
+        let hello = client_hello(Some("fixture.scanr.invalid"));
+        let bytes = crate::testsupport::tls::tls13_flight(&hello[5..], Some("h2"));
+        let mut obs = TlsObservation::default();
+        read_server_flight(&mut std::io::Cursor::new(&bytes), None, &mut obs, &hello);
+        assert_eq!(obs.error, None, "{obs:?}");
+        assert_eq!(obs.negotiated, Some(0x0304));
+        assert_eq!(obs.cipher, Some(0x1301));
+        assert_eq!(obs.kx_group, Some(GROUP_X25519));
+        assert_eq!(obs.alpn.as_deref(), Some("h2"));
+        assert_eq!(obs.sig_scheme, Some(0x0403));
+        assert_eq!(obs.chain_len, Some(2));
+        assert_eq!(
+            obs.leaf_der.as_deref(),
+            Some(crate::testsupport::tls::FIXTURE_CERT_DER)
+        );
+        assert_eq!(
+            obs.cert.as_ref().unwrap().subject,
+            "CN=fixture.scanr.invalid"
+        );
+        assert!(obs.server_extensions.contains(&EXT_ALPN));
+        let j = obs.to_json();
+        assert_eq!(j["negotiated"], "1.3");
+        assert_eq!(j["cipher_name"], "TLS_AES_128_GCM_SHA256");
+        assert_eq!(j["offered"], "1.3,1.2");
+        assert!(
+            obs.display()
+                .starts_with("tls1.3 h2 cn=fixture.scanr.invalid self-signed sha256:"),
+            "{}",
+            obs.display()
+        );
     }
 
     #[test]
@@ -820,7 +1103,12 @@ mod tests {
 
     fn flight(bytes: &[u8]) -> TlsObservation {
         let mut obs = TlsObservation::default();
-        read_server_flight(&mut std::io::Cursor::new(bytes), None, &mut obs);
+        read_server_flight(
+            &mut std::io::Cursor::new(bytes),
+            None,
+            &mut obs,
+            &client_hello(None),
+        );
         obs
     }
 
@@ -1136,8 +1424,29 @@ mod fixture_tests {
     }
 
     #[test]
-    fn a_tls13_only_server_is_recorded_as_a_protocol_version_alert() {
-        let fx = TlsFixture::start(Behavior::Tls13Only);
+    fn a_tls13_server_is_read_after_finishing_the_key_exchange() {
+        let fx = TlsFixture::start(Behavior::Tls13 { alpn: Some("h2") });
+        let o = direct(&fx, true);
+        let t = o.tls.expect("the probe ran");
+        assert_eq!(t.error, None, "{t:?}");
+        assert_eq!(t.negotiated, Some(0x0304));
+        assert_eq!(t.alpn.as_deref(), Some("h2"));
+        assert_eq!(
+            t.cert.as_ref().map(|c| c.subject_cn.as_deref()),
+            Some(Some("fixture.scanr.invalid"))
+        );
+        assert_eq!(t.chain.len(), 1);
+        assert!(
+            t.display()
+                .starts_with("tls1.3 h2 cn=fixture.scanr.invalid"),
+            "{}",
+            t.display()
+        );
+    }
+
+    #[test]
+    fn a_server_that_rejects_the_offer_is_recorded_as_a_protocol_version_alert() {
+        let fx = TlsFixture::start(Behavior::RejectsVersion);
         let t = direct(&fx, true).tls.unwrap();
         assert_eq!(t.alert, Some((2, 70)));
         assert_eq!(t.display(), "tls alert protocol_version");
