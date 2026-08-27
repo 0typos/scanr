@@ -129,9 +129,14 @@ pub struct RawDefaults {
     /// it off. Nothing is ever sent — only services that greet first say anything — so it
     /// adds no traffic to the target beyond the connection the scan already made.
     pub banner: Option<bool>,
-    /// Send a TLS 1.2 ClientHello to open ports that volunteered no banner and record
-    /// what comes back. **Off by default**: it is the one active probe scanr has (D35).
+    /// Send a ClientHello offering TLS 1.3 and 1.2 to open ports that volunteered no
+    /// banner and record what comes back. **Off by default**: it is the one active probe
+    /// scanr has (D35).
     pub tls: Option<bool>,
+    /// After the hello, ask SSLv2, SSLv3, TLS 1.0, 1.1 and 1.2 for themselves on their
+    /// own connections, so a server that only speaks something old is named as such.
+    /// Needs `tls`; up to five more connections per silent open port.
+    pub tls_versions: Option<bool>,
     /// A file of `name port/proto` lines to label ports from, ahead of `/etc/services`
     /// and the builtin table. `~` is expanded.
     pub services_file: Option<String>,
@@ -217,6 +222,7 @@ pub struct RawScan {
     pub spans: Option<bool>,
     pub banner: Option<bool>,
     pub tls: Option<bool>,
+    pub tls_versions: Option<bool>,
     pub dns: Option<String>,
     pub output_dir: Option<String>,
     /// Inline timing overrides, same shape as a profile.

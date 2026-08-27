@@ -129,6 +129,14 @@ pub struct DetailedOutcome {
     pub reply: Option<Reply>,
 }
 
+/// A tunnel to the destination, with what the exit hop said about it.
+struct Established {
+    s: TcpStream,
+    outcome: ProbeOutcome,
+    reply: Reply,
+    connect_elapsed: Duration,
+}
+
 /// What the last hop said to the CONNECT that named the destination.
 enum Answer {
     Socks5(u8),
@@ -189,7 +197,11 @@ impl ProxyTransport {
         }
     }
 
-    pub fn probe_detailed(&self, dest: &Destination, timing: &Timing) -> DetailedOutcome {
+    fn establish(
+        &self,
+        dest: &Destination,
+        timing: &Timing,
+    ) -> Result<Established, DetailedOutcome> {
         let started = Instant::now();
         let first = self.hops[0].address;
 
@@ -203,7 +215,7 @@ impl ProxyTransport {
                     connect: None,
                     total: started.elapsed(),
                 };
-                return detailed(proxy_unreachable(&e, first, phases), None);
+                return Err(detailed(proxy_unreachable(&e, first, phases), None));
             }
         };
         let proxy_connect = started.elapsed();
@@ -230,7 +242,7 @@ impl ProxyTransport {
         let last = self.hops.len() - 1;
         for (i, hop) in self.hops.iter().enumerate() {
             if let Err(o) = set_timeouts(&s, timing.handshake_timeout) {
-                return detailed(o, None);
+                return Err(detailed(o, None));
             }
             // Each phase gets its own wall-clock deadline, so a peer cannot extend the
             // budget by trickling. HTTP has no greeting to negotiate: its credentials
@@ -238,7 +250,7 @@ impl ProxyTransport {
             if hop.kind == HopKind::Socks5 {
                 let hs_deadline = Some(Instant::now() + timing.handshake_timeout);
                 if let Err(o) = self.negotiate(&mut s, hop, &mut phases, started, hs_deadline) {
-                    return detailed(self.blame_hop(o, i), None);
+                    return Err(detailed(self.blame_hop(o, i), None));
                 }
             }
             if i == last {
@@ -249,11 +261,11 @@ impl ProxyTransport {
             // handshake budget is for a local exchange with a proxy already connected to,
             // and a chain across a WAN link exceeds it routinely.
             if let Err(o) = set_timeouts(&s, timing.connect_timeout) {
-                return detailed(o, None);
+                return Err(detailed(o, None));
             }
             let next = Destination::Addr(self.hops[i + 1].address);
             if let Err(o) = self.open_tunnel(&mut s, &next, &mut phases, started, i, timing) {
-                return detailed(o, None);
+                return Err(detailed(o, None));
             }
         }
         phases.handshake = Some(handshake_start.elapsed());
@@ -262,13 +274,16 @@ impl ProxyTransport {
         // The reply waits on the proxy's own connection to the destination, so this
         // phase gets the destination budget rather than the handshake budget.
         if let Err(o) = set_timeouts(&s, timing.connect_timeout) {
-            return detailed(o, None);
+            return Err(detailed(o, None));
         }
         let connect_start = Instant::now();
         let exit = &self.hops[last];
         if let Err(e) = s.write_all(&connect_request(exit, dest)) {
             phases.total = started.elapsed();
-            return detailed(io_failure(&e, "sending CONNECT request", phases), None);
+            return Err(detailed(
+                io_failure(&e, "sending CONNECT request", phases),
+                None,
+            ));
         }
 
         let deadline = Some(connect_start + timing.connect_timeout);
@@ -286,7 +301,30 @@ impl ProxyTransport {
                 http::classify(&r, exit.username.is_some(), phases),
                 Reply::Http(r.status),
             ),
-            Err(e) => return detailed(io_failure(&e, "reading CONNECT reply", phases), None),
+            Err(e) => {
+                return Err(detailed(
+                    io_failure(&e, "reading CONNECT reply", phases),
+                    None,
+                ));
+            }
+        };
+        Ok(Established {
+            s,
+            outcome,
+            reply,
+            connect_elapsed,
+        })
+    }
+
+    pub fn probe_detailed(&self, dest: &Destination, timing: &Timing) -> DetailedOutcome {
+        let Established {
+            s,
+            outcome,
+            reply,
+            connect_elapsed,
+        } = match self.establish(dest, timing) {
+            Ok(e) => e,
+            Err(d) => return d,
         };
         // Through a proxy the tunnel *is* the connection to the destination, so reading
         // a greeting off it works exactly as it does directly. Banner grabbing is one of
@@ -302,11 +340,24 @@ impl ProxyTransport {
             .tls
             .as_ref()
             .filter(|_| outcome.state == State::Open && banner.is_none())
-            .map(|o| crate::tls::probe(&s, o, connect_elapsed, sni));
+            .map(|o| {
+                crate::tls::probe_with_survey(&s, o, connect_elapsed, sni, &|| {
+                    self.connect_again(dest, timing)
+                })
+            });
         DetailedOutcome {
             outcome: outcome.with_banner(banner).with_tls(tls),
             reply: Some(reply),
         }
+    }
+
+    /// The path walked again to the same destination, handed over only when the exit
+    /// hop said the port is open.
+    pub fn connect_again(&self, dest: &Destination, timing: &Timing) -> Option<TcpStream> {
+        self.establish(dest, timing)
+            .ok()
+            .filter(|e| e.outcome.state == State::Open)
+            .map(|e| e.s)
     }
 
     /// CONNECT from one hop to the next, failing the whole path if it will not.
@@ -545,6 +596,10 @@ impl ProxyTransport {
 }
 
 impl Transport for ProxyTransport {
+    fn connect_again(&self, dest: &Destination, timing: &Timing) -> Option<TcpStream> {
+        ProxyTransport::connect_again(self, dest, timing)
+    }
+
     fn probe(&self, dest: &Destination, timing: &Timing) -> ProbeOutcome {
         self.probe_detailed(dest, timing).outcome
     }

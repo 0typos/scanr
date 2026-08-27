@@ -322,15 +322,25 @@ struct OverrideArgs {
     #[arg(long)]
     no_banner: bool,
 
-    /// Send a TLS 1.2 ClientHello to open ports that volunteered no banner and record
-    /// the certificate, cipher and ALPN that come back. The one active probe scanr has;
-    /// off by default.
+    /// Send a ClientHello offering TLS 1.3 and 1.2 to open ports that volunteered no
+    /// banner and record the certificate, cipher and ALPN that come back. The one active
+    /// probe scanr has; off by default.
     #[arg(long, conflicts_with = "no_tls")]
     tls: bool,
 
     /// Do not send the TLS probe (default)
     #[arg(long)]
     no_tls: bool,
+
+    /// After the hello, ask SSLv2, SSLv3, TLS 1.0, 1.1 and 1.2 for themselves on their
+    /// own connections, and say when only something old is spoken. Needs --tls; up to
+    /// five more connections per silent open port.
+    #[arg(long, conflicts_with = "no_tls_versions")]
+    tls_versions: bool,
+
+    /// Do not survey protocol versions (default)
+    #[arg(long)]
+    no_tls_versions: bool,
 
     /// Permit target sets larger than 4,000,000 addresses
     #[arg(long)]
@@ -448,6 +458,7 @@ impl OverrideArgs {
             spans: flag(self.spans, self.no_spans),
             banner: flag(self.banner, self.no_banner),
             tls: flag(self.tls, self.no_tls),
+            tls_versions: flag(self.tls_versions, self.no_tls_versions),
             open_only: flag(self.open_only, self.all),
             allow_large_range: self.allow_large_range,
         }
@@ -907,6 +918,10 @@ fn render_plan_timing(s: &mut String, plan: &ScanPlan, style: &Style) {
         "tls probe",
         match &plan.timing.tls {
             None => "off".to_string(),
+            Some(t) if t.versions() => format!(
+                "ClientHello to silent open ports, {} max wait; then SSLv2, SSLv3, TLS 1.0, 1.1 (and 1.2) asked for on their own connections",
+                render_duration(t.timeout())
+            ),
             Some(t) => format!(
                 "ClientHello to silent open ports, {} max wait",
                 render_duration(t.timeout())
@@ -1482,47 +1497,46 @@ fn evidence_column(h: &crate::verify::Hit, banner_width: usize) -> String {
 /// `tls1.2 h2 sha256:ab12cd34`, `tls alert protocol_version`, `not tls`, `tls no reply`
 /// — the same words `run` prints, derived from the recorded object.
 fn tls_summary(t: &serde_json::Value) -> String {
-    if let Some(name) = t["alert"]["name"].as_str() {
-        return format!("tls alert {name}");
+    let printable = |a: &str| -> String { a.chars().filter(|c| (' '..='~').contains(c)).collect() };
+    let mut s = match (
+        t["alert"]["name"].as_str(),
+        t["negotiated"].as_str(),
+        t["error"].as_str(),
+    ) {
+        (Some(name), _, _) => format!("tls alert {}", printable(name)),
+        (None, Some(v), _) => crate::tls::protocol_label(&printable(v)),
+        (None, None, Some(e)) if e.starts_with("not TLS") => "not tls".into(),
+        (None, None, _) => "tls no reply".into(),
+    };
+    if let Some(a) = t["alpn"].as_str() {
+        s.push(' ');
+        s.push_str(&printable(a));
     }
-    match t["negotiated"].as_str() {
-        Some(v) => {
-            let mut s = crate::tls::protocol_label(v);
-            if let Some(a) = t["alpn"].as_str() {
-                s.push(' ');
-                s.push_str(
-                    &a.chars()
-                        .filter(|c| (' '..='~').contains(c))
-                        .collect::<String>(),
-                );
-            }
-            // Records written before the reader existed carry the DER but no `cert`.
-            let cert = match t.get("cert") {
-                Some(c) if c.is_object() => Some(c.clone()),
-                _ => t["leaf_der"]
-                    .as_str()
-                    .and_then(crate::transport::http::unbase64)
-                    .and_then(|der| crate::x509::parse(&der).ok())
-                    .map(|leaf| leaf.to_json()),
-            };
-            if let Some(c) = cert {
-                let words = crate::x509::summary_json(&c);
-                if !words.is_empty() {
-                    s.push(' ');
-                    s.push_str(&words);
-                }
-            }
-            if let Some(h) = t["leaf_sha256"].as_str() {
-                s.push_str(" sha256:");
-                s.push_str(&h[..h.len().min(8)]);
-            }
-            s
+    // Records written before the reader existed carry the DER but no `cert`.
+    let cert = match t.get("cert") {
+        Some(c) if c.is_object() => Some(c.clone()),
+        _ => t["leaf_der"]
+            .as_str()
+            .and_then(crate::transport::http::unbase64)
+            .and_then(|der| crate::x509::parse(&der).ok())
+            .map(|leaf| leaf.to_json()),
+    };
+    if let Some(c) = cert {
+        let words = crate::x509::summary_json(&c);
+        if !words.is_empty() {
+            s.push(' ');
+            s.push_str(&words);
         }
-        None => match t["error"].as_str() {
-            Some(e) if e.starts_with("not TLS") => "not tls".into(),
-            _ => "tls no reply".into(),
-        },
     }
+    if let Some(h) = t["leaf_sha256"].as_str() {
+        s.push_str(" sha256:");
+        s.push_str(&printable(&h[..h.len().min(8)]));
+    }
+    if t["versions"].is_object() {
+        s.push(' ');
+        s.push_str(&crate::tls::survey_summary_json(&t["versions"]));
+    }
+    s
 }
 
 /// Map a scan termination to a process exit code.

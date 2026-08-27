@@ -4,7 +4,7 @@
 .SH NAME
 scanr\-run \- Execute a scan
 .SH SYNOPSIS
-\fBscanr\-run\fR [\fB\-\-profile\fR] [\fB\-\-transport\fR] [\fB\-\-targets\fR] [\fB\-\-ports\fR] [\fB\-\-pairs\fR] [\fB\-\-resumed\-from\fR] [\fB\-\-exclude\fR] [\fB\-\-concurrency\fR] [\fB\-\-rate\fR] [\fB\-\-connect\-timeout\fR] [\fB\-\-retries\fR] [\fB\-\-dns\fR] [\fB\-\-output\-dir\fR] [\fB\-\-seed\fR] [\fB\-\-open\-only\fR] [\fB\-\-all\fR] [\fB\-\-compress\fR] [\fB\-\-no\-compress\fR] [\fB\-\-spans\fR] [\fB\-\-no\-spans\fR] [\fB\-\-banner\fR] [\fB\-\-no\-banner\fR] [\fB\-\-tls\fR] [\fB\-\-no\-tls\fR] [\fB\-\-allow\-large\-range\fR] [\fB\-\-full\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fISCAN\fR] 
+\fBscanr\-run\fR [\fB\-\-profile\fR] [\fB\-\-transport\fR] [\fB\-\-targets\fR] [\fB\-\-ports\fR] [\fB\-\-pairs\fR] [\fB\-\-resumed\-from\fR] [\fB\-\-exclude\fR] [\fB\-\-concurrency\fR] [\fB\-\-rate\fR] [\fB\-\-connect\-timeout\fR] [\fB\-\-retries\fR] [\fB\-\-dns\fR] [\fB\-\-output\-dir\fR] [\fB\-\-seed\fR] [\fB\-\-open\-only\fR] [\fB\-\-all\fR] [\fB\-\-compress\fR] [\fB\-\-no\-compress\fR] [\fB\-\-spans\fR] [\fB\-\-no\-spans\fR] [\fB\-\-banner\fR] [\fB\-\-no\-banner\fR] [\fB\-\-tls\fR] [\fB\-\-no\-tls\fR] [\fB\-\-tls\-versions\fR] [\fB\-\-no\-tls\-versions\fR] [\fB\-\-allow\-large\-range\fR] [\fB\-\-full\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fISCAN\fR] 
 .SH DESCRIPTION
 Execute a scan
 .SH OPTIONS
@@ -76,10 +76,16 @@ Read what open services volunteer on connect, without sending anything (default)
 Do not read banners
 .TP
 \fB\-\-tls\fR
-Send a TLS 1.2 ClientHello to open ports that volunteered no banner and record the certificate, cipher and ALPN that come back. The one active probe scanr has; off by default
+Send a ClientHello offering TLS 1.3 and 1.2 to open ports that volunteered no banner and record the certificate, cipher and ALPN that come back. The one active probe scanr has; off by default
 .TP
 \fB\-\-no\-tls\fR
 Do not send the TLS probe (default)
+.TP
+\fB\-\-tls\-versions\fR
+After the hello, ask SSLv2, SSLv3, TLS 1.0, 1.1 and 1.2 for themselves on their own connections, and say when only something old is spoken. Needs \-\-tls; up to five more connections per silent open port
+.TP
+\fB\-\-no\-tls\-versions\fR
+Do not survey protocol versions (default)
 .TP
 \fB\-\-allow\-large\-range\fR
 Permit target sets larger than 4,000,000 addresses

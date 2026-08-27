@@ -2196,6 +2196,99 @@ fn a_hostname_target_carries_sni_on_the_direct_path() {
     );
 }
 
+/// `--tls-versions` asks each version for itself, so a server only an old client can
+/// reach is named as such on the line, in the record, and again from the record.
+#[test]
+fn the_version_survey_names_a_legacy_only_server() {
+    use scanr::testsupport::tls::{Behavior, TlsFixture};
+    let d = tempfile::tempdir().unwrap();
+    let fx = TlsFixture::start(Behavior::Legacy {
+        floor: 0x0300,
+        ceiling: 0x0301,
+    });
+    let port = fx.addr().port().to_string();
+
+    let refused = scanr(
+        d.path(),
+        &[
+            "run",
+            "--tls-versions",
+            "--targets",
+            "127.0.0.1",
+            "--ports",
+            &port,
+        ],
+    );
+    assert_ne!(code(&refused), 0, "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("needs the TLS probe on"),
+        "{}",
+        stderr(&refused)
+    );
+
+    let plan = scanr(
+        d.path(),
+        &[
+            "plan",
+            "--tls",
+            "--tls-versions",
+            "--targets",
+            "127.0.0.1",
+            "--ports",
+            &port,
+        ],
+    );
+    assert!(stdout(&plan).contains("SSLv2, SSLv3"), "{}", stdout(&plan));
+
+    let out = scanr(
+        d.path(),
+        &[
+            "run",
+            "--tls",
+            "--tls-versions",
+            "--no-spans",
+            "--targets",
+            "127.0.0.1",
+            "--ports",
+            &port,
+            "--output-dir",
+            "out",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let shown = stdout(&out);
+    assert!(
+        shown.contains("tls1.0 cn=fixture.scanr.invalid self-signed sha256:"),
+        "{shown}"
+    );
+    assert!(shown.contains(" legacy-only:tls1.0"), "{shown}");
+
+    let events = read_events(d.path());
+    let config = events.iter().find(|e| e["type"] == "scan_config").unwrap();
+    assert_eq!(config["tls"]["versions"], true, "{config}");
+    assert_eq!(config["tls"]["version_hellos"].as_array().unwrap().len(), 5);
+    let row = events
+        .iter()
+        .find(|e| e["type"] == "probe_result" && e["state"] == "open")
+        .unwrap();
+    let v = &row["tls"]["versions"];
+    assert_eq!(v["oldest"], "ssl3", "{v}");
+    assert_eq!(v["newest"], "1.0", "{v}");
+    assert_eq!(v["legacy_only"], true);
+    assert_eq!(v["ssl2"]["accepted"], false);
+    assert_eq!(v["ssl3"]["accepted"], true);
+    assert_eq!(v["1.1"]["accepted"], false);
+    assert_eq!(v["1.3"]["accepted"], false);
+    assert!(v["advice"].as_str().unwrap().contains("SECLEVEL=0"), "{v}");
+
+    let rec = scanr::testsupport::find_record(&d.path().join("out")).unwrap();
+    let table = stdout(&scanr(
+        d.path(),
+        &["output", "results", rec.to_str().unwrap()],
+    ));
+    assert!(table.contains(" legacy-only:tls1.0"), "{table}");
+}
+
 /// The table cuts banners at 48 characters; `--full` shows them whole, and the
 /// printable-ASCII boundary holds either way.
 #[test]

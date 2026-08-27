@@ -124,6 +124,11 @@ impl fmt::Display for Destination {
 
 pub trait Transport: Send + Sync {
     fn probe(&self, dest: &Destination, timing: &Timing) -> ProbeOutcome;
+    /// A second connection to the same destination, for the TLS version survey; `None`
+    /// when the path will not open again. The stream is already set to reset on close.
+    fn connect_again(&self, _dest: &Destination, _timing: &Timing) -> Option<TcpStream> {
+        None
+    }
     fn supports_remote_dns(&self) -> bool;
     fn name(&self) -> &str;
     fn type_name(&self) -> &'static str;

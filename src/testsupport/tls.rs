@@ -59,6 +59,12 @@ pub enum Behavior {
     Tls13 { alpn: Option<&'static str> },
     /// A server that wants a version the hello does not offer: `protocol_version`.
     RejectsVersion,
+    /// A server of its era: it speaks every version from `floor` to `ceiling` (`0x0002`
+    /// SSLv2, `0x0300` SSLv3, `0x0301`–`0x0303`) and answers a hello with the highest it
+    /// shares, `AES128-SHA`, the fixture leaf; below the floor, `protocol_version`. An
+    /// SSLv2 CLIENT-HELLO gets a SERVER-HELLO carrying the leaf when the floor is SSLv2,
+    /// and a closed connection otherwise.
+    Legacy { floor: u16, ceiling: u16 },
     /// Any alert.
     Alert { level: u8, description: u8 },
     /// Speaks first: an SSH-style greeting, so the probe should never run.
@@ -193,14 +199,77 @@ fn record(kind: u8, payload: &[u8]) -> Vec<u8> {
     r
 }
 
-/// Consume the client's hello: a TLS record header and its body, which is returned.
-fn read_hello(s: &mut TcpStream) -> std::io::Result<Vec<u8>> {
-    let mut head = [0u8; 5];
-    s.read_exact(&mut head)?;
-    let len = u16::from_be_bytes([head[3], head[4]]) as usize;
+/// What the client sent first.
+enum Hello {
+    /// A TLS record's body: the ClientHello handshake message.
+    Tls(Vec<u8>),
+    /// An SSLv2 CLIENT-HELLO.
+    Ssl2,
+}
+
+impl Hello {
+    /// The `client_version` field; SSLv2 counts as `0x0002`.
+    fn client_version(&self) -> u16 {
+        match self {
+            Hello::Tls(b) if b.len() >= 6 => u16::from_be_bytes([b[4], b[5]]),
+            Hello::Tls(_) => 0,
+            Hello::Ssl2 => 0x0002,
+        }
+    }
+}
+
+/// Consume the client's hello, TLS or SSLv2.
+fn read_hello(s: &mut TcpStream) -> std::io::Result<Hello> {
+    let mut first = [0u8; 2];
+    s.read_exact(&mut first)?;
+    if first[0] & 0x80 != 0 {
+        let len = (usize::from(first[0] & 0x7f) << 8) | usize::from(first[1]);
+        let mut body = vec![0u8; len.min(16_384)];
+        s.read_exact(&mut body)?;
+        return Ok(Hello::Ssl2);
+    }
+    let mut rest = [0u8; 3];
+    s.read_exact(&mut rest)?;
+    let len = u16::from_be_bytes([rest[1], rest[2]]) as usize;
     let mut body = vec![0u8; len.min(16_384)];
     s.read_exact(&mut body)?;
-    Ok(body)
+    Ok(Hello::Tls(body))
+}
+
+/// A first flight at any version up to 1.2: ServerHello without extensions,
+/// `AES128-SHA`, the fixture leaf, ServerHelloDone, in records of that version.
+pub fn legacy_flight(version: u16) -> Vec<u8> {
+    let mut hello = version.to_be_bytes().to_vec();
+    hello.extend_from_slice(&[0x42u8; 32]);
+    hello.push(0);
+    hello.extend_from_slice(&[0x00, 0x2f, 0x00]);
+    let mut cert_body = ((FIXTURE_CERT_DER.len() + 3) as u32).to_be_bytes()[1..].to_vec();
+    cert_body.extend_from_slice(&(FIXTURE_CERT_DER.len() as u32).to_be_bytes()[1..]);
+    cert_body.extend_from_slice(FIXTURE_CERT_DER);
+    let mut hs = handshake(2, &hello);
+    hs.extend_from_slice(&handshake(11, &cert_body));
+    hs.extend_from_slice(&handshake(14, &[]));
+    let mut r = vec![0x16];
+    r.extend_from_slice(&version.to_be_bytes());
+    r.extend_from_slice(&(hs.len() as u16).to_be_bytes());
+    r.extend_from_slice(&hs);
+    r
+}
+
+/// An SSLv2 SERVER-HELLO: no session hit, an X.509 certificate, two cipher kinds.
+pub fn ssl2_server_hello() -> Vec<u8> {
+    let ciphers = [0x01, 0x00, 0x80, 0x07, 0x00, 0xc0];
+    let conn_id = [0x77u8; 16];
+    let mut body = vec![0x04, 0x00, 0x01, 0x00, 0x02];
+    body.extend_from_slice(&(FIXTURE_CERT_DER.len() as u16).to_be_bytes());
+    body.extend_from_slice(&(ciphers.len() as u16).to_be_bytes());
+    body.extend_from_slice(&(conn_id.len() as u16).to_be_bytes());
+    body.extend_from_slice(FIXTURE_CERT_DER);
+    body.extend_from_slice(&ciphers);
+    body.extend_from_slice(&conn_id);
+    let mut out = vec![0x80 | (body.len() >> 8) as u8, body.len() as u8];
+    out.extend_from_slice(&body);
+    out
 }
 
 /// The x25519 point in a ClientHello handshake message's key_share extension.
@@ -309,11 +378,38 @@ fn handle(mut s: TcpStream, behavior: Behavior, shutdown: Arc<AtomicBool>) -> st
         return s.write_all(b"SSH-2.0-fixture\r\n");
     }
     let hello = read_hello(&mut s)?;
+    let version = hello.client_version();
+    let alert_70 = record(0x15, &[2, 70]);
     match behavior {
+        // The modern fixtures are servers with a floor of 1.2: a survey hello for
+        // anything older gets `protocol_version`, and an SSLv2 hello gets nothing.
+        Behavior::Tls12 { .. } | Behavior::Tls13 { .. } if version == 0x0002 => Ok(()),
+        Behavior::Tls12 { .. } | Behavior::Tls13 { .. } if version < 0x0303 => {
+            s.write_all(&alert_70)
+        }
         Behavior::Tls12 { alpn } => s.write_all(&tls12_flight(alpn)),
+        Behavior::Tls10 if version < 0x0301 => s.write_all(&alert_70),
         Behavior::Tls10 => s.write_all(&tls10_flight()),
-        Behavior::Tls13 { alpn } => s.write_all(&tls13_flight(&hello, alpn)),
-        Behavior::RejectsVersion => s.write_all(&record(0x15, &[2, 70])),
+        Behavior::Tls13 { alpn } => match hello {
+            Hello::Tls(h) => s.write_all(&tls13_flight(&h, alpn)),
+            Hello::Ssl2 => Ok(()),
+        },
+        Behavior::RejectsVersion => s.write_all(&alert_70),
+        Behavior::Legacy { floor, ceiling } => {
+            if version == 0x0002 {
+                return if floor == 0x0002 {
+                    s.write_all(&ssl2_server_hello())
+                } else {
+                    Ok(())
+                };
+            }
+            let chosen = version.min(ceiling);
+            if chosen < floor.max(0x0300) {
+                s.write_all(&alert_70)
+            } else {
+                s.write_all(&legacy_flight(chosen))
+            }
+        }
         Behavior::Alert { level, description } => s.write_all(&record(0x15, &[level, description])),
         Behavior::Greets => unreachable!("handled above"),
         Behavior::NotTls => s.write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"),

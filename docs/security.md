@@ -121,6 +121,64 @@ was ever secret. A server that wants a different key-share group answers
 HelloRetryRequest, which is recorded as such and not pursued. No verification of the
 certificate or the signature, in 1.3 or 1.2.
 
+### The version survey
+
+A server answers a hello with the highest version it shares, never with the lowest it
+still accepts, so one hello cannot say whether SSLv3 is still spoken. `--tls-versions`
+(`tls_versions = true`, needs `tls`) asks: after the main hello, each of SSLv2, SSLv3,
+TLS 1.0 and 1.1 — and 1.2, when the server took 1.3 — is offered on its own connection
+with a hello of its era, and the answer is recorded per version. Up to five more
+connections per silent open port, each counted in `tls.versions.connections`; the
+record's `legacy_only` and `advice` say when no current client can reach the server and
+what can. The hellos, byte for byte (SNI is added to the 1.0, 1.1 and 1.2 hellos when
+the target was given as a name; SSLv3 and SSLv2 get none, as their servers expect):
+
+SSLv2 CLIENT-HELLO (48 bytes; every cipher kind, a fixed challenge):
+
+```
+802e0100020015000000100100800200800300800400800500800600400700c0
+7363616e722073736c322070726f6265
+```
+
+SSLv3 (80 bytes; sixteen suites of the era, no extensions block at all):
+
+```
+160300004b0100004703007363616e7220746c732070726f62653a206e6f7420
+72616e646f6d2020763120000020c014c013c00ac009003900330035002f0016
+000a0005000400090003000600080100
+```
+
+TLS 1.0 and 1.1 (80 bytes each; the SSLv3 hello with the version fields changed):
+
+```
+160301004b0100004703017363616e7220746c732070726f62653a206e6f7420
+72616e646f6d2020763120000020c014c013c00ac009003900330035002f0016
+000a0005000400090003000600080100
+```
+
+```
+160302004b0100004703027363616e7220746c732070726f62653a206e6f7420
+72616e646f6d2020763120000020c014c013c00ac009003900330035002f0016
+000a0005000400090003000600080100
+```
+
+TLS 1.2 (165 bytes; the main hello without its 1.3 suite, `supported_versions` and key
+share — sent only when the main hello was answered with 1.3):
+
+```
+16030100a00100009c03037363616e7220746c732070726f62653a206e6f7420
+72616e646f6d2020763120000028c02cc02bc030c02fcca9cca8c024c023c028
+c027c00ac009c014c013009d009c003d003c0035002f0100004b000a00080006
+001d00170018000b00020100000d001a00180403050306030804080508060807
+040105010601020302010010000e000c02683208687474702f312e3100170000
+ff01000100
+```
+
+What comes back is read by the same bounded flight reader as the main hello, except the
+SSLv2 answer, which has its own reader: a two- or three-byte record header, a SERVER-HELLO
+whose certificate is taken in the clear (it stands in for the leaf when nothing newer
+answered), cipher kinds named, lengths bounded at 32 KiB.
+
 What comes back is peer-chosen and treated as such: record and message lengths are
 bounded (64 KiB flight, 8 KiB embedded leaf), the read is deadline-driven, the ALPN
 string is filtered to printable ASCII, and the leaf certificate is stored as base64 DER

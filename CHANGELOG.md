@@ -49,6 +49,14 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
   is recorded as `hello_retry_request` and not pursued. X25519, HKDF and AES-128-GCM are
   hand-rolled in `src/crypto.rs`, each held to an RFC or NIST vector; nothing is sent
   after the hello.
+- `--tls-versions` (`tls_versions = true`, needs `tls`): after the hello, ask SSLv2,
+  SSLv3, TLS 1.0, 1.1 and — when the server took 1.3 — 1.2 for themselves, each on its
+  own connection with a hello of its era. The record's `tls.versions` says which are
+  accepted, `legacy_only` when the newest is older than 1.2, and `advice` naming a client
+  that can still reach it; the result line ends `versions:ssl3..1.3` or
+  `legacy-only:tls1.0`. An SSLv2-only server's certificate is taken from its
+  SERVER-HELLO. Up to five more connections per silent open port; `scan_config.tls`
+  lists the hellos' sizes and `docs/security.md` their bytes.
 - SNI travels on the direct path when the target was given as a name: a locally resolved
   address now keeps its hostname, so a virtual-hosting server answers with its certificate
   instead of an alert. A real 443 answered `internal_error` to the nameless hello.

@@ -57,6 +57,7 @@ The only command-line settings; all else is config, so a run is reproducible fro
 --spans / --no-spans
 --banner / --no-banner
 --tls / --no-tls
+--tls-versions / --no-tls-versions
 --config <path>
 --verbose / -v              --quiet / -q
 --no-color                  --allow-large-range
@@ -69,6 +70,7 @@ The only command-line settings; all else is config, so a run is reproducible fro
 - `--resumed-from`: scan being continued. `remainder` emits `# resumed-from:`; `run` reads it from the pipe.
 - `--banner` (default on): read what an open service volunteers, sending nothing. Only SSH, SMTP, FTP, POP3, IMAP, MySQL greet first; HTTP and TLS do not, so empty means "said nothing unprompted". `banner_timeout` (500ms) is a ceiling; the wait scales off measured connect time. A worker waiting on a silent port issues no probes.
 - `--tls` (default off): send one ClientHello offering TLS 1.3 and 1.2 to open ports that volunteered no banner, on the same connection — finishing the 1.3 key exchange to read the encrypted flight, taking older servers' flights in the clear — and record the certificate (leaf DER, SHA-256, and what it says: subject, issuer, alternative names, validity, key type — read, not verified), cipher and ALPN the server answers with; SNI is sent when the target was given as a name; a server wanting a version or key-share group the hello lacks answers an alert or HelloRetryRequest, recorded as such. The one active probe scanr has — `scan_config.tls.sent_bytes` states what was sent. `tls_timeout` (1s) is the ceiling on the wait.
+- `--tls-versions` (default off, needs `--tls`): after the hello, ask SSLv2, SSLv3, TLS 1.0, 1.1 and — when the server took 1.3 — 1.2 for themselves, each on its own connection with a hello of its era, and record which the server accepts. The line ends `versions:ssl3..1.3`, or `legacy-only:tls1.0` when nothing a current client speaks is accepted; the record's `tls.versions.advice` says what will reach it. Up to five more connections per silent open port.
 
 ### Flags on the other commands
 
