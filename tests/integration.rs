@@ -2135,6 +2135,12 @@ fn the_tls_probe_records_the_leaf_and_verify_accepts_it() {
     assert_eq!(tls_row["tls"]["leaf_der"], der_b64, "{tls_row}");
     let smtp_row = rows.iter().find(|r| r["port"] == greeting.port()).unwrap();
     assert_eq!(smtp_row["banner"], "220 smtp fixture\r\n", "{smtp_row}");
+
+    // And the human table replays what the live run showed, as a trailing column.
+    let t = scanr(d.path(), &["output", "results", rec.to_str().unwrap()]);
+    let table = stdout(&t);
+    assert!(table.contains("tls1.2 h2 sha256:"), "{table}");
+    assert!(table.contains("220 smtp fixture.."), "{table}");
 }
 
 /// Against real OpenSSL: a TLS 1.2 server yields its certificate, a 1.3-only server

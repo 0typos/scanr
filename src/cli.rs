@@ -1402,7 +1402,19 @@ fn cmd_output_results(
                 Some(st) => style.paint_state(st, &padded),
                 None => padded,
             };
-            let tail = format!("{:<12} {}", h.source, h.service.as_deref().unwrap_or(""));
+            // What the service said, as the live run showed it: a trailing column, so
+            // the replay of a record carries the evidence the record was kept for.
+            let evidence = evidence_column(h);
+            let tail = if evidence.is_empty() {
+                format!("{:<12} {}", h.source, h.service.as_deref().unwrap_or(""))
+            } else {
+                format!(
+                    "{:<12} {:<16} {}",
+                    h.source,
+                    h.service.as_deref().unwrap_or(""),
+                    style.dim(&evidence)
+                )
+            };
             let line = format!("{endpoint:<width$}  {state} {}", tail.trim_end());
             let _ = writeln!(out, "{}", line.trim_end());
         }
@@ -1410,6 +1422,66 @@ fn cmd_output_results(
     // Counted on stderr so stdout stays pipe-clean.
     let _ = writeln!(std::io::stderr(), "{} result(s)", commas(hits.len() as u64));
     Ok(EXIT_OK)
+}
+
+/// The banner and TLS summary of a result, rendered exactly as `run` prints them:
+/// printable ASCII only, because the bytes are the scanned host's.
+fn evidence_column(h: &crate::verify::Hit) -> String {
+    use crate::output::human::safe_banner;
+    let Some(extras) = &h.extras else {
+        return String::new();
+    };
+    let mut parts: Vec<String> = Vec::new();
+    let bytes: Option<Vec<u8>> = match (extras.get("banner"), extras.get("banner_hex")) {
+        (Some(serde_json::Value::String(s)), _) => Some(s.as_bytes().to_vec()),
+        (_, Some(serde_json::Value::String(hex))) => Some(
+            (0..hex.len())
+                .step_by(2)
+                .filter_map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+                .collect(),
+        ),
+        _ => None,
+    };
+    if let Some(b) = bytes {
+        parts.push(safe_banner(
+            &b,
+            crate::output::human::ResultPrinter::BANNER_W,
+        ));
+    }
+    if let Some(t) = extras.get("tls") {
+        parts.push(tls_summary(t));
+    }
+    parts.join("  ")
+}
+
+/// `tls1.2 h2 sha256:ab12cd34`, `tls alert protocol_version`, `not tls`, `tls no reply`
+/// — the same words `run` prints, derived from the recorded object.
+fn tls_summary(t: &serde_json::Value) -> String {
+    if let Some(name) = t["alert"]["name"].as_str() {
+        return format!("tls alert {name}");
+    }
+    match t["negotiated"].as_str() {
+        Some(v) => {
+            let mut s = format!("tls{v}");
+            if let Some(a) = t["alpn"].as_str() {
+                s.push(' ');
+                s.push_str(
+                    &a.chars()
+                        .filter(|c| (' '..='~').contains(c))
+                        .collect::<String>(),
+                );
+            }
+            if let Some(h) = t["leaf_sha256"].as_str() {
+                s.push_str(" sha256:");
+                s.push_str(&h[..h.len().min(8)]);
+            }
+            s
+        }
+        None => match t["error"].as_str() {
+            Some(e) if e.starts_with("not TLS") => "not tls".into(),
+            _ => "tls no reply".into(),
+        },
+    }
 }
 
 /// Map a scan termination to a process exit code.

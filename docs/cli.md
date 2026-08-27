@@ -37,7 +37,7 @@ completion
 | `output verify <file>` | integrity and completeness |
 | `output remainder <file>` | endpoints never probed, as `--pairs` input |
 | `output events <file>` | raw JSONL event stream, verbatim |
-| `output results <file>` | every probe result, filterable |
+| `output results <file>` | every probe result, filterable; the table ends with what the service said (banner, TLS summary) when the record has it |
 | `completion <shell>` | `bash` `zsh` `fish` `elvish` `power-shell` |
 
 ## Flags

@@ -138,7 +138,7 @@ impl ResultPrinter {
     /// `99999.9ms`
     const LATENCY_W: usize = 9;
     /// Enough to recognise a greeting; the record has all of it.
-    const BANNER_W: usize = 48;
+    pub(crate) const BANNER_W: usize = 48;
     const GAP: usize = 2;
 
     /// One result line. Format:
