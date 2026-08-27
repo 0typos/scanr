@@ -112,7 +112,7 @@ scanr output remainder scanr-results/scan-*.jsonl.gz | scanr run --pairs -   # e
 ```
 
 `--tls` adds the one active probe: a fixed TLS 1.2 ClientHello to silent open ports,
-recording certificate, cipher and ALPN (off by default; the record says what was sent).
+recording the certificate (subject, alternative names, validity, key type, the DER itself), cipher and ALPN (off by default; the record says what was sent).
 
 gzip-framed and span-collapsed by default (`--no-compress`, `--no-spans` for one row per
 probe); `zcat`, `zless` and every `scanr output` command read either. The config event

@@ -103,7 +103,7 @@ No per-probe start event: derivable, and it would double file size.
 | `banner` | bytes volunteered; absent if none or `--banner` off |
 | `banner_hex` | replaces `banner` when not valid UTF-8 |
 | `banner_bytes` | bytes read |
-| `tls` | present exactly when the TLS probe ran (open, no banner, `--tls`): `offered` (`"1.2"`), `sent_bytes`, `read_bytes`, `sni`, `negotiated` (`"1.2"` … or `null`), `cipher` (`"0xc02f"`), `cipher_name`, `alpn`, `alert` (`{level, description, name}` or `null`), `leaf_sha256` (hex), `leaf_len`, `leaf_der` (base64, only when ≤ 8 KiB), `chain_len`, `error` (why the flight stopped, when it did) |
+| `tls` | present exactly when the TLS probe ran (open, no banner, `--tls`): `offered` (`"1.2"`), `sent_bytes`, `read_bytes`, `sni`, `negotiated` (`"1.2"` … or `null`), `cipher` (`"0xc02f"`), `cipher_name`, `alpn`, `alert` (`{level, description, name}` or `null`), `leaf_sha256` (hex), `leaf_len`, `leaf_der` (base64, only when ≤ 8 KiB), `chain_len`, `cert` (what the leaf says, read not verified: `subject` and `issuer` as `C=…, O=…, CN=…`, `subject_cn`, `self_signed` — issuer equals subject — `not_before`, `not_after`, `validity` at probe time: `valid`, `expired`, `not_yet_valid`; `san` — up to 64 dNSName/iPAddress entries — `san_count`, `key` such as `rsa-2048`, `ec-p256`), `cert_error` (why the leaf did not parse), `error` (why the flight stopped, when it did) |
 | `attempts` | timeout retries merged into one row |
 | `attempt_states` | per-attempt states |
 | `timing_ms` | `proxy_connect`, `handshake` absent on the direct path |

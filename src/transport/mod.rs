@@ -82,20 +82,32 @@ pub fn read_exact<R: Read>(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Destination {
     Addr(SocketAddr),
+    /// An address the planner resolved locally from `name`. Probed as the address; the
+    /// name travels only so the TLS probe can send it as SNI.
+    Resolved(SocketAddr, std::sync::Arc<str>),
     Host(String, u16),
 }
 
 impl Destination {
     pub fn port(&self) -> u16 {
         match self {
-            Destination::Addr(a) => a.port(),
+            Destination::Addr(a) | Destination::Resolved(a, _) => a.port(),
             Destination::Host(_, p) => *p,
+        }
+    }
+
+    /// The hostname for SNI, when one is known.
+    pub fn sni(&self) -> Option<&str> {
+        match self {
+            Destination::Addr(_) => None,
+            Destination::Resolved(_, name) => Some(name),
+            Destination::Host(h, _) => Some(h.as_str()),
         }
     }
 
     pub fn ip(&self) -> Option<IpAddr> {
         match self {
-            Destination::Addr(a) => Some(a.ip()),
+            Destination::Addr(a) | Destination::Resolved(a, _) => Some(a.ip()),
             Destination::Host(..) => None,
         }
     }
@@ -104,7 +116,7 @@ impl Destination {
 impl fmt::Display for Destination {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Destination::Addr(a) => write!(f, "{a}"),
+            Destination::Addr(a) | Destination::Resolved(a, _) => write!(f, "{a}"),
             Destination::Host(h, p) => write!(f, "{h}:{p}"),
         }
     }

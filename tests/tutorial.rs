@@ -389,7 +389,10 @@ fn the_direct_use_cases_hold_against_the_lab() {
     assert_eq!(code(&tls), 0, "{}", err(&tls));
     let shown = out(&tls);
     assert!(shown.contains("tls no reply"), "{shown}");
-    assert!(shown.contains("tls1.2 h2 sha256:"), "{shown}");
+    assert!(
+        shown.contains("tls1.2 h2 cn=lab.internal self-signed sha256:"),
+        "{shown}"
+    );
     let rec = record_in(&d.path().join("results-tls"));
     let rows = scanr(
         d.path(),

@@ -297,10 +297,7 @@ impl ProxyTransport {
             .filter(|_| outcome.state == State::Open)
             .and_then(|o| super::read_banner(&s, o, connect_elapsed));
         // Through a proxy the hostname survives to here, so SNI can name it.
-        let sni = match dest {
-            Destination::Host(h, _) => Some(h.as_str()),
-            Destination::Addr(_) => None,
-        };
+        let sni = dest.sni();
         let tls = timing
             .tls
             .as_ref()
@@ -674,7 +671,7 @@ pub fn build_connect_request(dest: &Destination) -> Vec<u8> {
     let mut req = Vec::with_capacity(22);
     req.extend_from_slice(&[VERSION, CMD_CONNECT, 0x00]);
     match dest {
-        Destination::Addr(a) => match a.ip() {
+        Destination::Addr(a) | Destination::Resolved(a, _) => match a.ip() {
             IpAddr::V4(v4) => {
                 req.push(ATYP_IPV4);
                 req.extend_from_slice(&v4.octets());

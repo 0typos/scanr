@@ -243,11 +243,12 @@ accepted 2026-08-25 · alternatives rejected: per-proxy status mapping; Digest/N
 - Also found: 3proxy's SOCKS5 answers `0x05` for its *own* connect timeout when that is shorter than scanr's, so its "refused" means "failed"; documented as a caveat in `transports.md`.
 
 ### D35 — TLS ClientHello probe: active, opt-in, TLS 1.2 only
-accepted 2026-08-25 · alternatives rejected: a full handshake via rustls (C/asm provider, ends the static build; D19, D28); x509 parsing in scanr (D32: a worse `tlsx`) · trigger: a mature pure-Rust rustls provider
+accepted 2026-08-25 · amended 2026-08-27 (leaf read, SNI on the direct path) · alternatives rejected: a full handshake via rustls (C/asm provider, ends the static build; D19, D28); x509 verification in scanr (D32: a worse `tlsx`) · trigger: a mature pure-Rust rustls provider
 
 - The one thing scanr sends to a service. Off by default (`--tls`, `tls = true`); the record carries `scan_config.tls.sent_bytes` and a per-result `tls` object, so a record can be audited on the point. Runs only on open ports that volunteered no banner — TLS servers never speak first — on the same connection, after the banner wait.
-- 163 fixed bytes: TLS 1.2 ClientHello, fixed client random, twenty common suites, ALPN `h2, http/1.1`, no `supported_versions`, SNI when the transport carries a hostname. `docs/security.md` lists them and a test holds it to the code.
+- 163 fixed bytes: TLS 1.2 ClientHello, fixed client random, twenty common suites, ALPN `h2, http/1.1`, no `supported_versions`, SNI whenever the target was given as a name — the direct path now keeps the name beside the address it resolved (`Destination::Resolved`), after a real 443 answered `internal_error` to a nameless hello. `docs/security.md` lists them and a test holds it to the code.
 - Reads ServerHello (version, cipher, ALPN), Certificate (leaf DER ≤ 8 KiB embedded, SHA-256 always, chain length) or Alert, then resets. Verified against `openssl s_server`: `-tls1_2` yields the certificate it was given and `h2`; `-tls1_3` answers `protocol_version` (70). Flight bounded at 64 KiB, deadline-driven, ALPN filtered to printable ASCII; fuzz target `tls_reply`, seeds captured from OpenSSL.
+- Amended: the leaf is read, never verified. `x509` lifts subject, issuer, alternative names, validity and key type from the DER already in the record into `tls.cert`, so a result line says `cn=nas.example self-signed expired` and `output results` says it again for any record that carries the DER. A fixed-depth walker, bounded strings and counts, fuzz target `x509_leaf`. Verification stays rejected: trust is a policy question `tlsx` and the browser answer better.
 - SHA-256 and base64 are hand-rolled; no new dependency, musl binary still 0 `NEEDED`.
 - Known limit: on the direct path a locally resolved hostname reaches the probe as an address, so no SNI is sent; through a proxy with transport DNS the name survives and SNI is sent. `sni` in the record says which.
 

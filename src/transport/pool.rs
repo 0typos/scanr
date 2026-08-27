@@ -72,7 +72,7 @@ impl PoolTransport {
             h = h.wrapping_mul(0x0000_0100_0000_01b3);
         };
         match dest {
-            Destination::Addr(a) => {
+            Destination::Addr(a) | Destination::Resolved(a, _) => {
                 match a.ip() {
                     std::net::IpAddr::V4(v4) => v4.octets().iter().for_each(|b| eat(*b)),
                     std::net::IpAddr::V6(v6) => v6.octets().iter().for_each(|b| eat(*b)),

@@ -68,7 +68,7 @@ The only command-line settings; all else is config, so a run is reproducible fro
 - `--pairs`: exact `host:port` endpoints, not target × port. `output remainder … | run --pairs -` resumes without re-probing.
 - `--resumed-from`: scan being continued. `remainder` emits `# resumed-from:`; `run` reads it from the pipe.
 - `--banner` (default on): read what an open service volunteers, sending nothing. Only SSH, SMTP, FTP, POP3, IMAP, MySQL greet first; HTTP and TLS do not, so empty means "said nothing unprompted". `banner_timeout` (500ms) is a ceiling; the wait scales off measured connect time. A worker waiting on a silent port issues no probes.
-- `--tls` (default off): send a TLS 1.2 ClientHello to open ports that volunteered no banner, on the same connection, and record the certificate (leaf DER and SHA-256), cipher and ALPN the server answers with; a 1.3-only server answers a `protocol_version` alert, recorded as such. The one active probe scanr has — `scan_config.tls.sent_bytes` states what was sent. `tls_timeout` (1s) is the ceiling on the wait.
+- `--tls` (default off): send a TLS 1.2 ClientHello to open ports that volunteered no banner, on the same connection, and record the certificate (leaf DER, SHA-256, and what it says: subject, issuer, alternative names, validity, key type — read, not verified), cipher and ALPN the server answers with; SNI is sent when the target was given as a name; a 1.3-only server answers a `protocol_version` alert, recorded as such. The one active probe scanr has — `scan_config.tls.sent_bytes` states what was sent. `tls_timeout` (1s) is the ceiling on the wait.
 
 ### Flags on the other commands
 

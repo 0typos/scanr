@@ -35,6 +35,7 @@ pub mod tls;
 pub mod transport;
 pub mod units;
 pub mod verify;
+pub mod x509;
 
 /// In-process TCP and SOCKS5 fixtures.
 ///

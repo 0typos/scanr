@@ -40,3 +40,13 @@ description = "The lab hosts through the dante proxy"
 transport = "dante"
 targets = ["lab"]
 ports = ["lab"]
+
+[targets.mini]
+include = ["nas.mad.family"]
+
+[scans.mini]
+transport = "direct"
+targets = ["mini"]
+ports = ["all"]
+connect_timeout = "100ms"
+retries = 0
