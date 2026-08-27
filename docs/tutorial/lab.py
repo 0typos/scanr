@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """The lab for docs/tutorial.md: three loopback services with known behaviour.
 
-    python3 docs/tutorial-lab.py            # run until Ctrl-C
-    python3 docs/tutorial-lab.py --check    # connect to each service once and exit
+    python3 docs/tutorial/lab.py            # run until Ctrl-C
+    python3 docs/tutorial/lab.py --check    # connect to each service once and exit
 
   25025  greets on connect, like SMTP    -> a banner, never probed for TLS
   28080  accepts and says nothing        -> a silent open port
@@ -11,7 +11,7 @@
   29001  nothing listening               -> closed
 
 Everything binds 127.0.0.1. The TLS certificate is generated on first run into
-`tutorial-lab-cert.pem` / `tutorial-lab-key.pem` next to this script (needs `openssl`
+`lab-cert.pem` / `lab-key.pem` next to this script (needs `openssl`
 on PATH); delete them to get a new one. No dependencies beyond the standard library.
 """
 
@@ -32,8 +32,8 @@ CLOSED_PORTS = (29000, 29001)
 GREETING = b"220 mail.lab.internal ESMTP ready\r\n"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CERT = os.path.join(HERE, "tutorial-lab-cert.pem")
-KEY = os.path.join(HERE, "tutorial-lab-key.pem")
+CERT = os.path.join(HERE, "lab-cert.pem")
+KEY = os.path.join(HERE, "lab-key.pem")
 
 
 def listener(port: int) -> socket.socket:

@@ -1,3 +1,7 @@
 /target
 /scanr-results/
-docs/tutorial-lab-*.pem
+docs/tutorial/*.pem
+docs/tutorial/.state/
+docs/tutorial/results*/
+docs/tutorial/*.jsonl
+docs/tutorial/pairs.txt
