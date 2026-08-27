@@ -199,6 +199,10 @@ enum OutputCmd {
         /// Output shape: table, json, nmap, or list
         #[arg(long, value_name = "FORMAT", default_value = "table", value_parser = format_arg)]
         format: ResultFormat,
+        /// Show banners untruncated in the table (still printable ASCII only); the
+        /// default cuts them at 48 characters so a screen of results stays one line each
+        #[arg(long)]
+        full: bool,
     },
 }
 
@@ -1265,6 +1269,7 @@ fn cmd_output(cli: &Cli, cmd: &OutputCmd) -> Result<u8, ConfigError> {
             ports,
             states,
             format,
+            full,
         } => cmd_output_results(
             cli,
             file,
@@ -1272,6 +1277,7 @@ fn cmd_output(cli: &Cli, cmd: &OutputCmd) -> Result<u8, ConfigError> {
             ports.as_deref(),
             states.as_deref(),
             *format,
+            *full,
         ),
         OutputCmd::Events { file } => {
             let mut out = std::io::stdout().lock();
@@ -1307,6 +1313,7 @@ fn cmd_output_results(
     ports: Option<&[String]>,
     states: Option<&str>,
     format: ResultFormat,
+    full: bool,
 ) -> Result<u8, ConfigError> {
     use crate::verify::Query;
 
@@ -1404,7 +1411,14 @@ fn cmd_output_results(
             };
             // What the service said, as the live run showed it: a trailing column, so
             // the replay of a record carries the evidence the record was kept for.
-            let evidence = evidence_column(h);
+            let evidence = evidence_column(
+                h,
+                if full {
+                    usize::MAX
+                } else {
+                    crate::output::human::ResultPrinter::BANNER_W
+                },
+            );
             let tail = if evidence.is_empty() {
                 format!("{:<12} {}", h.source, h.service.as_deref().unwrap_or(""))
             } else {
@@ -1426,7 +1440,7 @@ fn cmd_output_results(
 
 /// The banner and TLS summary of a result, rendered exactly as `run` prints them:
 /// printable ASCII only, because the bytes are the scanned host's.
-fn evidence_column(h: &crate::verify::Hit) -> String {
+fn evidence_column(h: &crate::verify::Hit, banner_width: usize) -> String {
     use crate::output::human::safe_banner;
     let Some(extras) = &h.extras else {
         return String::new();
@@ -1443,10 +1457,7 @@ fn evidence_column(h: &crate::verify::Hit) -> String {
         _ => None,
     };
     if let Some(b) = bytes {
-        parts.push(safe_banner(
-            &b,
-            crate::output::human::ResultPrinter::BANNER_W,
-        ));
+        parts.push(safe_banner(&b, banner_width));
     }
     if let Some(t) = extras.get("tls") {
         parts.push(tls_summary(t));

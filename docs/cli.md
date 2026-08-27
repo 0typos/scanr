@@ -78,7 +78,7 @@ These change what a command prints or measures, not how a scan runs.
 | `config init` | `--force` overwrite an existing `scanr.toml` |
 | `transport test` | `--known-open`, `--known-closed` endpoints of known state to measure against; `--calibrate` finds the proxy's connection cap |
 | `output summarize` | `--by <section>`: `scan`, `host`, `network`, `port`, `service`; `--format table\|json` (`--json` is a deprecated alias that warns) |
-| `output results` | `--hosts`, `--ports`, `--states` filter; `--format` (below) |
+| `output results` | `--hosts`, `--ports`, `--states` filter; `--format` (below); `--full` shows banners untruncated in the table (default 48 characters; always printable ASCII only) |
 
 All other commands take only the globals.
 
