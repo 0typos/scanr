@@ -20,7 +20,10 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
   `offered_ciphers` (suite names, the 1.3 suite first), `offered_alpn`, `offered_groups`
   and `offered_sigalgs`. The offer is fixed for every probe, so it is recorded once in
   the config event; a record now states both what was offered and what each server
-  chose, without cross-referencing `docs/security.md`.
+  chose, without cross-referencing `docs/security.md`. With `--tls-versions`,
+  `version_hellos` becomes one object per survey version (`ssl2`, `ssl3`, `1.0`, `1.1`,
+  `1.2`) carrying that hello's `sent_bytes` and the era-appropriate `ciphers` it offers,
+  in place of the bare sizes.
 
 ## [1.0.0-rc.2] - 2026-08-27
 

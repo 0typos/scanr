@@ -1115,7 +1115,26 @@ fn config_event(plan: &ScanPlan, facts: &HostFacts) -> serde_json::Value {
         // record can be audited on the point: zero means nothing was sent.
         "tls": match &plan.timing.tls {
             None => json!({ "enabled": false, "sent_bytes": 0 }),
-            Some(t) => json!({
+            Some(t) => {
+                // One object per survey hello, keyed by version, with its size and the
+                // suites it offers; empty unless the survey is on. Built here because
+                // `json!` takes values, not statement blocks.
+                let version_hellos = {
+                    let mut m = serde_json::Map::new();
+                    if t.versions() {
+                        for &v in &crate::tls::SURVEY_VERSIONS[..5] {
+                            m.insert(
+                                crate::tls::version_name(v),
+                                json!({
+                                    "sent_bytes": crate::tls::survey_hello(v, None).len(),
+                                    "ciphers": crate::tls::survey_offered_ciphers(v),
+                                }),
+                            );
+                        }
+                    }
+                    serde_json::Value::Object(m)
+                };
+                json!({
                 "enabled": true,
                 "offered": crate::tls::OFFERED,
                 "offered_ciphers": crate::tls::offered_ciphers(),
@@ -1125,15 +1144,9 @@ fn config_event(plan: &ScanPlan, facts: &HostFacts) -> serde_json::Value {
                 "sent_bytes": crate::tls::client_hello(None).len(),
                 "timeout_ms": t.timeout().as_millis() as u64,
                 "versions": t.versions(),
-                "version_hellos": if t.versions() {
-                    crate::tls::SURVEY_VERSIONS[..5]
-                        .iter()
-                        .map(|v| crate::tls::survey_hello(*v, None).len())
-                        .collect::<Vec<_>>()
-                } else {
-                    Vec::new()
-                },
-            }),
+                "version_hellos": version_hellos,
+                })
+            }
         },
         "output": {
             "dir": plan.output_dir.to_string_lossy(),

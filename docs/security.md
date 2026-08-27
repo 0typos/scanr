@@ -109,7 +109,8 @@ and `http/1.1`; `supported_versions` names 1.3 then 1.2; `key_share` carries one
 point, computed from the private key published in `src/tls.rs`
 (`PROBE_X25519_PRIVATE`). A test holds this document to the bytes the code sends, and
 `scan_config.tls` lists the offered cipher suites, ALPN, groups and signature schemes by
-name, so a record states the offer without pointing here.
+name, and — under `--tls-versions` — `version_hellos` names the suites each survey hello
+offers, so a record states every offer without pointing here.
 
 A server that picks 1.2 or older sends its first flight in the clear — ServerHello,
 Certificate, ServerKeyExchange, ServerHelloDone, or an Alert — and it is read. A server

@@ -2289,7 +2289,15 @@ fn the_version_survey_names_a_legacy_only_server() {
     let events = read_events(d.path());
     let config = events.iter().find(|e| e["type"] == "scan_config").unwrap();
     assert_eq!(config["tls"]["versions"], true, "{config}");
-    assert_eq!(config["tls"]["version_hellos"].as_array().unwrap().len(), 5);
+    let vh = &config["tls"]["version_hellos"];
+    assert_eq!(vh.as_object().unwrap().len(), 5, "{config}");
+    assert!(vh["ssl2"]["sent_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(vh["ssl2"]["ciphers"][0], "SSL2-RC4-128-MD5", "{config}");
+    assert_eq!(vh["ssl3"]["ciphers"][0], "ECDHE-RSA-AES256-SHA", "{config}");
+    assert!(
+        vh["1.2"]["ciphers"].as_array().unwrap().len() >= 20,
+        "{config}"
+    );
     let row = events
         .iter()
         .find(|e| e["type"] == "probe_result" && e["state"] == "open")
