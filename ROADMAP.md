@@ -1,8 +1,11 @@
 # Roadmap to 1.0
 
-Status 2026-08-25. Last release 0.2.2 (2026-08-01). `main` carries unreleased work:
-`schema_version 2`, the 0600 record, exit-code fixes, SHA-pinned CI. That ships as 0.3.0
-first (P0).
+Status 2026-08-26. **1.0.0-rc.1 is released** (tagged with 0.3.0, 0.4.0 and 0.5.0 on
+2026-08-26; binaries on GitHub). P0–P3 are done; P4, the soak, started 2026-08-26 and
+ends no earlier than 2026-09-23 or after three engagements, whichever is later. `main`
+since rc.1 carries D37 (batched collector), D38 (event loop deferred), the timeout-bound
+plan projection and `results --format json` evidence fields — none of it a surface change,
+so the soak clock did not restart.
 
 ## What 1.0 promises
 
@@ -31,9 +34,9 @@ was outside the project's control and is withdrawn (D36). 1.0.0 is tagged when:
 
 ## Phases
 
-### P0 — release 0.3.0 (now)
+### P0 — release 0.3.0 · done 2026-08-26
 
-- Ship what is on `main`. Per `RELEASING.md`.
+- Shipped as v0.3.0 (tagged 2026-08-26 together with 0.4.0, 0.5.0 and rc.1).
 - Docs compacted and drift fixed (done 2026-08-25).
 
 ### P1 — HTTP CONNECT transport → 0.4.0 · D34 · done 2026-08-25
@@ -96,7 +99,7 @@ HTTP CONNECT and the TLS probe is checked against `openssl s_server` in CI.
 - Compat corpus `tests/compat/`: records from 0.2.2 (v1) and 0.3.0+ (v2) — gzip and plain, spans and rows, complete and interrupted — with expected output for `events`, `results`, `summarize`, `verify`, `remainder`; `config init` output from each 0.x that must still load. A read regression fails the build.
 - `CHANGELOG.md` "About the version number" states the policy.
 
-### P4 — soak → 1.0.0
+### P4 — soak → 1.0.0 · in progress since 2026-08-26
 
 - Run the rc on real work. Record one long run's RSS over time (the multi-hour gap) and
   add a fidelity row for any proxy not yet in the table.
@@ -127,10 +130,11 @@ triggers live in `docs/design/decisions.md`.
 
 ## Definition of done
 
-- [ ] 0.3.0 released from `main`
-- [x] HTTP CONNECT: three-proxy fidelity table, mixed chains tested, fuzz clean (0.4.0) — code done 2026-08-25; release pending
-- [x] TLS probe: 1.2 and 1.3-only verified, off-by-default proven, musl static (0.5.0) — code done 2026-08-25; release pending
+- [x] 0.3.0 released from `main` (2026-08-26)
+- [x] HTTP CONNECT: three-proxy fidelity table, mixed chains tested, fuzz clean (released as 0.4.0, 2026-08-26)
+- [x] TLS probe: 1.2 and 1.3-only verified, off-by-default proven, musl static (released as 0.5.0, 2026-08-26)
 - [x] `--format` unified; exit codes pinned; backlog "before freeze" items closed (backlog was empty)
 - [x] `docs/stability.md` and compat corpus in place; `docs/evidence.md` added
-- [ ] `1.0.0-rc.1` tagged (commit is release-ready); soak period completed with no surface change
+- [x] `1.0.0-rc.1` tagged and released (2026-08-26)
+- [ ] soak period completed with no surface change (earliest 2026-09-23)
 - [ ] `1.0.0`
