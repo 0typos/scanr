@@ -26,10 +26,13 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
 ### Changed
 
 - The tutorial lab is a single installable `uv` script, `docs/tutorial/scanr-lab`
-  (PEP 723, `typer`), replacing the bash `docs/tutorial/lab`. `up` / `tunnel` / `check` /
-  `down` behave as before; `install` / `uninstall` symlink it into `uv tool dir --bin` so
-  `scanr-lab` runs from anywhere. `lab.py` stays plain Python — `tests/tutorial.rs` runs
-  it directly, so the test path and CI are unchanged.
+  (PEP 723, `typer`), replacing the bash `docs/tutorial/lab`. `up` prints an aligned
+  summary of the services and proxies it owns (no longer echoing `lab.py`'s banner with
+  its misleading "Ctrl-C to stop"); `check` shows a live `up` / `down` per port including
+  the tunnel; `down` also sweeps an `ssh -D` orphaned by a stale pidfile. `install` /
+  `uninstall` symlink it into `uv tool dir --bin` so `scanr-lab` runs from anywhere.
+  `lab.py` stays plain Python — `tests/tutorial.rs` runs it directly, so the test path
+  and CI are unchanged.
 
 ## [1.0.0-rc.5] - 2026-08-27
 

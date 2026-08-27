@@ -22,20 +22,28 @@ all packaged in [`docs/tutorial/`](tutorial/) so you can start without building 
 ```console
 $ cd docs/tutorial
 $ ./scanr-lab up
-services   lab up on 127.0.0.1: 25025 greets, 28080 silent, 28443 tls1.2 (h2, http/1.1), 28444 tls1.0-1.1 only; 29000, 29001 closed. Ctrl-C to stop.
-proxies    squid :3128  tinyproxy :3129  3proxy http :3130 socks5 :1081  dante :1082
-$ ./scanr-lab tunnel
-tunnel     ssh -D 127.0.0.1:1088 via throwaway sshd on :2222
-$ ./scanr-lab check
-127.0.0.1:25025  greets
-127.0.0.1:28080  silent
-127.0.0.1:28443  tls TLSv1.2 alpn=h2
-127.0.0.1:28444  legacy tls1.0-1.1
-127.0.0.1:29000  closed
-127.0.0.1:29001  closed
-127.0.0.1:3128   squid up
-...
+scanr-lab: lab is up on 127.0.0.1
+
+  services
+    :25025  greets       SMTP-style banner on connect
+    :28080  silent       open, volunteers nothing
+    :28443  tls 1.2      ALPN h2, http/1.1; self-signed
+    :28444  tls 1.0/1.1  the old appliance (use case 9)
+    :29000  closed       nothing listening
+    :29001  closed       nothing listening
+
+  proxies
+    :3128   squid      http connect
+    :3129   tinyproxy  http connect
+    :3130   3proxy     http connect
+    :1081   3proxy     socks5
+    :1082   dante      socks5
+
+  next: scanr-lab check  |  scanr-lab tunnel  |  scanr-lab down
 ```
+
+`./scanr-lab tunnel` adds the `ssh -D` for use case 5; `./scanr-lab check` shows a live
+`up` / `down` for every port; `./scanr-lab down` stops it all.
 
 `scanr-lab` is a single [`uv`](https://docs.astral.sh/uv/) script — no VM, no root — that
 brings the whole environment up: `./scanr-lab install` puts it on your PATH as

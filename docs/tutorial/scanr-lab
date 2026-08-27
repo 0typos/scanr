@@ -28,8 +28,28 @@ import typer
 HERE = Path(__file__).resolve().parent
 STATE = HERE / ".state"
 IMAGE = "scanr-tutorial-proxies"
-PROXIES = HERE / "proxies"
+PROXY_DIR = HERE / "proxies"
 COMMAND = "scanr-lab"
+HOST = "127.0.0.1"
+TUNNEL_PORT = 1088
+
+# What the lab exposes, described here so the summary reads the same every run rather
+# than echoing lab.py's internal banner. (port, label, note)
+SERVICES = [
+    (25025, "greets", "SMTP-style banner on connect"),
+    (28080, "silent", "open, volunteers nothing"),
+    (28443, "tls 1.2", "ALPN h2, http/1.1; self-signed"),
+    (28444, "tls 1.0/1.1", "the old appliance (use case 9)"),
+    (29000, "closed", "nothing listening"),
+    (29001, "closed", "nothing listening"),
+]
+PROXIES = [
+    (3128, "squid", "http connect"),
+    (3129, "tinyproxy", "http connect"),
+    (3130, "3proxy", "http connect"),
+    (1081, "3proxy", "socks5"),
+    (1082, "dante", "socks5"),
+]
 
 
 class LabError(RuntimeError):
@@ -90,6 +110,26 @@ def spawn(argv: list[str], log: Path, pidfile: Path) -> None:
     pidfile.write_text(str(proc.pid))
 
 
+def kill_matching(needle: str) -> None:
+    """SIGTERM any process whose command line contains `needle` (Linux /proc), so an
+    orphaned tunnel whose pidfile was already removed is still cleaned up on `down`."""
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            cmdline = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+        except OSError:
+            continue
+        if needle in cmdline:
+            try:
+                os.kill(int(entry.name), 15)
+            except (ProcessLookupError, PermissionError, ValueError):
+                pass
+
+
 def kill_pidfile(pidfile: Path) -> None:
     if not pidfile.exists():
         return
@@ -104,24 +144,20 @@ def kill_pidfile(pidfile: Path) -> None:
 
 def services_up() -> None:
     if listening(25025) and listening(28080) and listening(28443):
-        note("services   already up")
         return
     STATE.mkdir(parents=True, exist_ok=True)
     require_command("python3")
     spawn(["python3", str(HERE / "lab.py")], STATE / "lab.log", STATE / "lab.pid")
     wait_for(28443)
-    first = (STATE / "lab.log").read_text().splitlines()[:1]
-    note(f"services   {first[0] if first else 'starting'}")
 
 
-def proxies_up() -> None:
+def proxies_up() -> str:
     if shutil.which("podman") is None:
-        note("proxies    skipped: no podman (use cases 5-7 and 10 need a SOCKS5/HTTP proxy)")
-        return
+        return "skipped"
     STATE.mkdir(parents=True, exist_ok=True)
     if subprocess.run(["podman", "image", "exists", IMAGE], check=False).returncode != 0:
         note(f"proxies    building {IMAGE} (fedora-minimal + squid, tinyproxy, 3proxy, dante)...")
-        run(["podman", "build", "-q", "-t", IMAGE, str(PROXIES)], quiet=True)
+        run(["podman", "build", "-q", "-t", IMAGE, str(PROXY_DIR)], quiet=True)
     subprocess.run(
         ["podman", "rm", "-f", "tut-squid", "tut-tinyproxy", "tut-3proxy", "tut-dante"],
         stdout=subprocess.DEVNULL,
@@ -129,22 +165,19 @@ def proxies_up() -> None:
         check=False,
     )
     containers = [
-        ("tut-squid", f"{PROXIES}/squid.conf:/etc/squid/squid.conf:Z",
+        ("tut-squid", f"{PROXY_DIR}/squid.conf:/etc/squid/squid.conf:Z",
          ["squid", "-N", "-f", "/etc/squid/squid.conf"]),
-        ("tut-tinyproxy", f"{PROXIES}/tinyproxy.conf:/etc/tinyproxy/tinyproxy.conf:Z",
+        ("tut-tinyproxy", f"{PROXY_DIR}/tinyproxy.conf:/etc/tinyproxy/tinyproxy.conf:Z",
          ["tinyproxy", "-d", "-c", "/etc/tinyproxy/tinyproxy.conf"]),
-        ("tut-3proxy", f"{PROXIES}/3proxy.cfg:/etc/3proxy/3proxy.cfg:Z",
+        ("tut-3proxy", f"{PROXY_DIR}/3proxy.cfg:/etc/3proxy/3proxy.cfg:Z",
          ["3proxy", "/etc/3proxy/3proxy.cfg"]),
-        ("tut-dante", f"{PROXIES}/sockd.conf:/etc/sockd.conf:Z",
+        ("tut-dante", f"{PROXY_DIR}/sockd.conf:/etc/sockd.conf:Z",
          ["sockd", "-N", "1", "-f", "/etc/sockd.conf"]),
     ]
     for name, volume, cmd in containers:
         run(["podman", "run", "-d", "--rm", "--name", name, "--network", "host",
              "-v", volume, IMAGE, *cmd], quiet=True)
-    if wait_for(3128) and wait_for(1082):
-        note("proxies    squid :3128  tinyproxy :3129  3proxy http :3130 socks5 :1081  dante :1082")
-    else:
-        note("proxies    started but not all ports are listening yet; run `scanr-lab check`")
+    return "up" if wait_for(3128) and wait_for(1082) else "partial"
 
 
 def tunnel_up() -> None:
@@ -182,19 +215,53 @@ def tunnel_up() -> None:
         fail("tunnel     FAILED\n" + (d / "ssh.log").read_text() if (d / "ssh.log").exists() else "tunnel failed")
 
 
+def print_ready(proxies: str) -> None:
+    print(f"scanr-lab: lab is up on {HOST}\n")
+    print("  services")
+    for port, label, desc in SERVICES:
+        print(f"    :{port:<6} {label:<12} {desc}".rstrip())
+    print()
+    if proxies == "up":
+        print("  proxies")
+        for port, name, kind in PROXIES:
+            print(f"    :{port:<6} {name:<10} {kind}")
+    elif proxies == "partial":
+        print("  proxies    started, but not all are listening yet — run: scanr-lab check")
+    else:
+        print("  proxies    skipped: no podman (use cases 5-7 and 10 need a proxy)")
+    print("\n  next: scanr-lab check  |  scanr-lab tunnel  |  scanr-lab down")
+
+
+def print_status() -> None:
+    def mark(up: bool) -> str:
+        return "up  " if up else "down"
+
+    print(f"scanr-lab: status on {HOST}\n")
+    print("  services")
+    for port, label, _desc in SERVICES:
+        up = listening(port)
+        state = "closed" if port in (29000, 29001) and not up else mark(up)
+        print(f"    {state:<6} :{port:<6} {label}")
+    print("\n  proxies")
+    for port, name, kind in PROXIES:
+        print(f"    {mark(listening(port)):<6} :{port:<6} {name} ({kind})")
+    print("\n  tunnel")
+    up = listening(TUNNEL_PORT)
+    hint = "" if up else "   (start it with: scanr-lab tunnel)"
+    print(f"    {mark(up):<6} :{TUNNEL_PORT:<6} ssh -D{hint}")
+
+
 def check_lab() -> None:
-    if (HERE / "lab.py").exists():
-        subprocess.run(["python3", str(HERE / "lab.py"), "--check"], check=False)
-    for name, port in [("squid", 3128), ("tinyproxy", 3129), ("3proxy-http", 3130),
-                       ("3proxy-socks5", 1081), ("dante", 1082), ("ssh-D", 1088)]:
-        state = f"{name} up" if listening(port) else f"{name} down"
-        print(f"127.0.0.1:{port:<6} {state}")
+    print_status()
 
 
 def down_lab() -> None:
     kill_pidfile(STATE / "lab.pid")
     kill_pidfile(STATE / "sshd" / "ssh.pid")
     kill_pidfile(STATE / "sshd" / "sshd.pid")
+    # Belt and suspenders: catch a tunnel orphaned by an out-of-sync pidfile.
+    kill_matching(f"ssh -N -D {HOST}:{TUNNEL_PORT}")
+    kill_matching(str(STATE / "sshd" / "sshd_config"))
     if shutil.which("podman"):
         subprocess.run(
             ["podman", "rm", "-f", "tut-squid", "tut-tinyproxy", "tut-3proxy", "tut-dante"],
@@ -261,7 +328,7 @@ app = typer.Typer(
 def up() -> None:
     """Start the loopback services and, if podman is present, the four proxies."""
     services_up()
-    proxies_up()
+    print_ready(proxies_up())
 
 
 @app.command()
