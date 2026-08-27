@@ -54,6 +54,20 @@ pub fn now_rfc3339() -> String {
     rfc3339_ms(now_epoch_ms())
 }
 
+/// Epoch milliseconds as `YYYY_MM_DD-hh_mm_ssZ` (UTC, second resolution): a readable,
+/// filesystem-safe, chronologically-sortable stamp for output filenames. Underscores,
+/// not `-` or `:`, so it never collides with the `-` that separates filename fields and
+/// is legal on every filesystem. The date and time are underscore blocks split by a
+/// single `-`, so the two halves stand apart at a glance in a directory listing.
+pub fn filename_stamp(epoch_ms: u64) -> String {
+    let secs = (epoch_ms / 1000) as i64;
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (y, mo, d) = civil_from_days(days);
+    let (h, mi, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    format!("{y:04}_{mo:02}_{d:02}-{h:02}_{mi:02}_{s:02}Z")
+}
+
 /// Does this string have the exact shape `rfc3339_ms` produces?
 ///
 /// Deliberately a shape check, not a parser: D18 rejected a date library because we

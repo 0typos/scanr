@@ -11,12 +11,12 @@ proxy-native, config-first, forensically complete.
 ```console
 $ scanr run internal-web
 scanr 0.3.0 — internal-web via socks5 127.0.0.1:1080 — 255,510 probes (255 targets x 1002 ports)
-  scan a3f19c02  seed 9f2c00a1b4de7731  concurrency 512  -> ./scanr-results/scan-1785294704201-a3f19c02.jsonl.partial
+  scan a3f19c02  seed 9f2c00a1b4de7731  concurrency 512  -> ./scanr-results/scan-adhoc-2026_07_29-03_11_44Z-a3f19c02.jsonl.partial
 10.20.30.40:22/tcp    open   ssh          18.2ms
 10.20.30.40:443/tcp   open   https        21.4ms
 ...
 completed in 10m41s — 38 open, 1204 closed, 254210 filtered, 58 error (255,510 of 255,510 probed)
-  record: ./scanr-results/scan-1785294704201-a3f19c02.jsonl
+  record: ./scanr-results/scan-adhoc-2026_07_29-03_11_44Z-a3f19c02.jsonl
 ```
 
 ## Why

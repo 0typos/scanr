@@ -3097,7 +3097,8 @@ mod tests {
         use crate::output::JsonlWriter;
 
         let d = tempfile::tempdir().unwrap();
-        let mut w = JsonlWriter::create(d.path(), "cut01", 1_700_000_000_000, true).unwrap();
+        let mut w =
+            JsonlWriter::create(d.path(), "probe", "cut01", 1_700_000_000_000, true).unwrap();
         w.emit("scan_started", json!({"schema_version": 1}))
             .unwrap();
         w.emit("scan_config", json!({"probes_planned": 20_000}))
