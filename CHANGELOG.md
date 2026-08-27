@@ -14,6 +14,8 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
 
 ## [Unreleased]
 
+## [1.0.0-rc.2] - 2026-08-27
+
 ### Added
 
 - `docs/tutorial.md`, a learn-by-using guide with real output, and `docs/tutorial/`, its
