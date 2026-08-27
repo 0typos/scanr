@@ -6,3 +6,6 @@ docs/tutorial/results*/
 docs/tutorial/*.jsonl
 docs/tutorial/pairs.txt
 scanr-results/
+
+# Multi-arch release staging (scripts/build-all.sh).
+dist/

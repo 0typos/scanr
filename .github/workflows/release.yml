@@ -5,6 +5,11 @@
 # job, and the tag-versus-`--version` comparison inside the build job. Neither has
 # ever executed. Expect to iterate on them during the first real `v*` tag.
 #
+# The matrix cross-compiles nine targets with cargo-zigbuild (scanr is pure Rust with no
+# C deps, so one toolchain covers them all). `scripts/build-all.sh` is the same build
+# locally; it has produced all nine archives, so compilation and packaging are proven,
+# but the workflow's tooling install and cross legs are new — iterate on the first tag.
+#
 # Distribution is prebuilt static binaries attached to a GitHub release; the crate is
 # marked `publish = false` and is not pushed to crates.io.
 name: Release
@@ -30,10 +35,21 @@ jobs:
     name: Build ${{ matrix.target }}
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
+        # Pure-Rust, no C deps, so cargo-zigbuild cross-compiles every one of these from
+        # the x86_64 runner — static musl for drop-anywhere use, glibc where musl has no
+        # Rust std (s390x). Locally: `scripts/build-all.sh`.
         target:
           - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - armv7-unknown-linux-musleabihf
+          - i686-unknown-linux-musl
+          - riscv64gc-unknown-linux-musl
+          - powerpc64le-unknown-linux-musl
           - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - s390x-unknown-linux-gnu
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         # build.rs stamps the commit into every scan record, so the tag must resolve to
@@ -45,38 +61,49 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
 
-      - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Install cross tooling (zig + cargo-zigbuild)
+        run: |
+          pip install --user ziglang==0.13.0
+          cargo install cargo-zigbuild --locked
 
-      - name: Verify the binary reports the tagged version
+      - name: Refuse a dirty tree
+        # build.rs stamps `-dirty` into --version from git; check git directly so this
+        # holds for every target, including the cross ones we cannot execute here.
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::built from a dirty working tree"; exit 1
+          fi
+
+      - name: Completions (native, identical for every target)
+        run: |
+          cargo build --release --locked
+          mkdir -p completions
+          for sh in bash zsh fish elvish power-shell; do
+            target/release/scanr completion "$sh" > "completions/$sh"
+          done
+
+      - name: Build
+        run: cargo zigbuild --release --locked --target ${{ matrix.target }}
+
+      - name: Verify the version matches the tag
+        # The version is compiled from the same source for every target, so checking it
+        # on the natively-runnable x86_64 builds is enough to catch a tag/version drift.
+        if: startsWith(matrix.target, 'x86_64') && github.ref_type == 'tag'
         run: |
           BIN=target/${{ matrix.target }}/release/scanr
-          "$BIN" --version
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            want="${GITHUB_REF_NAME#v}"
-            got="$("$BIN" --version | head -1 | awk '{print $2}')"
-            if [ "$want" != "$got" ]; then
-              echo "::error::tag $GITHUB_REF_NAME does not match binary version $got"
-              exit 1
-            fi
-          fi
-          # A release build must not advertise a dirty tree.
-          if "$BIN" --version | grep -q dirty; then
-            echo "::error::built from a dirty working tree"; exit 1
+          got="$("$BIN" --version | head -1 | awk '{print $2}')"
+          want="${GITHUB_REF_NAME#v}"
+          if [ "$want" != "$got" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match binary version $got"; exit 1
           fi
 
       - name: Package
         run: |
           name="scanr-${GITHUB_REF_NAME:-dev}-${{ matrix.target }}"
-          mkdir -p "dist/$name"
+          mkdir -p "dist/$name/completions"
           cp target/${{ matrix.target }}/release/scanr "dist/$name/"
           cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
-          # Ship completions so installation does not require running the binary first.
-          mkdir -p "dist/$name/completions"
-          for sh in bash zsh fish elvish power-shell; do
-            target/${{ matrix.target }}/release/scanr completion "$sh" \
-              > "dist/$name/completions/$sh" || true
-          done
+          cp completions/* "dist/$name/completions/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           ( cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )
 

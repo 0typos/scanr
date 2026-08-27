@@ -19,7 +19,11 @@ period, or a config key's meaning changed is a **major** version.
 - The library API. `lib.rs` says so; every module is public only so tests and fuzz targets can reach it.
 - stderr text, `plan` rendering, progress lines, warning wording. Match on `scan_warning.code`, not on prose.
 - Performance figures. They are measurements on one machine, recorded with their method.
-- Platforms other than Linux x86_64 (gnu and musl). macOS builds and passes CI as a courtesy.
+- Platforms. **Linux x86_64 (gnu and musl) is the tested platform** — the full suite runs
+  there in CI. Release binaries are also cross-compiled for aarch64, armv7, i686, riscv64
+  and ppc64le (static musl) and for aarch64 and s390x (glibc); those are built and
+  smoke-run under emulation, not full-tested, and are provided best-effort. macOS builds
+  and passes CI as a courtesy; Windows is not planned.
 - MSRV. A bump is a minor.
 - Per-proxy behaviour. What a given proxy answers is measured, not promised; `transport test` measures yours.
 

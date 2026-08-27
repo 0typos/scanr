@@ -54,6 +54,13 @@ binary checked for 0 `NEEDED` entries, macOS build and test, the nmap differenti
 region-coverage floor, MSRV (`rust-version` in `Cargo.toml`), `cargo install` from a clean
 checkout, `cargo deny`, and a replay of `fuzz/seeds/`.
 
+`release.yml` cross-compiles nine targets with `cargo-zigbuild` (x86_64/aarch64/armv7/
+i686/riscv64/ppc64le static musl, plus aarch64/s390x glibc) — scanr is pure Rust with no
+C deps, so one toolchain covers them all, no VMs. `scripts/build-all.sh` runs the same
+build locally and has produced all nine archives; the CI legs are newer than the local
+path, so expect to iterate on the first real tag. To add or drop a target, edit both the
+`release.yml` matrix and the `TARGETS` list in the script.
+
 The fuzz job replays committed seeds only. Fuzzing itself is manual:
 
 ```console
