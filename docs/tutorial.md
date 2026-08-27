@@ -3,7 +3,7 @@
 Ten use cases, each a real command with its real output, and at each step what the
 tool does that `nmap` does not — and what it deliberately leaves to nmap. Everything
 below was captured on 2026-08-26 against the lab in the next section; run it yourself
-and the outputs match apart from timings and ids.
+and the outputs match apart from timings, ids and the certificate fingerprint.
 
 The claim, up front. A port scan through a proxy is usually both untrustworthy and
 unrepeatable: the proxy decides what `closed` means, the scanner guesses, and what
@@ -17,29 +17,24 @@ spot.
 ## The lab
 
 Three loopback services, two closed ports, one unroutable network, and four proxies.
+The services come from one script in this repository, standard library only:
 
 ```console
-# a service that greets, a silent service, and a TLS 1.2 server
-python3 - <<'EOF' &
-import socket, threading, time
-def serve(port, greeting):
-    s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(("127.0.0.1", port)); s.listen(64)
-    while True:
-        c, _ = s.accept()
-        if greeting: c.sendall(greeting)
-        c.close()
-threading.Thread(target=serve, args=(25025, b"220 mail.lab.internal ESMTP ready\r\n"), daemon=True).start()
-threading.Thread(target=serve, args=(28080, b""), daemon=True).start()
-while True: time.sleep(3600)
-EOF
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
-  -keyout key.pem -out cert.pem -days 2 -subj /CN=lab 2>/dev/null
-openssl s_server -accept 127.0.0.1:28443 -tls1_2 -alpn h2,http/1.1 -key key.pem -cert cert.pem -quiet &
+$ python3 docs/tutorial-lab.py &
+lab up on 127.0.0.1: 25025 greets, 28080 silent, 28443 tls1.2 (h2, http/1.1); 29000, 29001 closed. Ctrl-C to stop.
+
+$ python3 docs/tutorial-lab.py --check
+127.0.0.1:25025  greets
+127.0.0.1:28080  silent
+127.0.0.1:28443  tls TLSv1.2 alpn=h2
+127.0.0.1:29000  closed
+127.0.0.1:29001  closed
 ```
 
-Ports 29000 and 29001 have nothing listening. `192.0.2.0/24` (TEST-NET-1) is never routed,
-so probes to it time out. The proxies are dante (SOCKS5, `127.0.0.1:1082`), 3proxy
+25025 greets on connect like an SMTP server, 28080 accepts and says nothing, 28443 is a
+TLS 1.2 server (Python's `ssl` module, with a self-signed certificate the script
+generates once beside itself). Ports 29000 and 29001 have nothing listening.
+`192.0.2.0/24` (TEST-NET-1) is never routed, so probes to it time out. The proxies are dante (SOCKS5, `127.0.0.1:1082`), 3proxy
 (SOCKS5, `:1081`), squid (HTTP CONNECT, `:3128`) and an OpenSSH dynamic forward
 (`ssh -N -D 127.0.0.1:1088 bastion`, to a throwaway `sshd` here); any SOCKS5 and HTTP
 proxy you have will do — change the addresses in the config below.
