@@ -139,16 +139,20 @@ impl<W: Write> Drop for GzFrames<W> {
 impl JsonlWriter {
     pub fn create(
         dir: &Path,
+        scan_name: &str,
         scan_id: &str,
         epoch_ms: u64,
         compress: bool,
     ) -> std::io::Result<Self> {
         std::fs::create_dir_all(dir)?;
-        let name = if compress {
-            format!("scan-{epoch_ms}-{scan_id}.jsonl.gz")
-        } else {
-            format!("scan-{epoch_ms}-{scan_id}.jsonl")
-        };
+        // `scan-<name>-<stamp>-<id>`: the name identifies it at a glance, the stamp
+        // orders it, the id joins it to the record and breaks ties. The `scan-` prefix
+        // stays so `scan-*` globs and `find_record` keep working. The record's own
+        // `scan_name`/`scan_id`/`started_at_epoch_ms` remain the authority; this is a label.
+        let slug = slug_scan_name(scan_name);
+        let stamp = crate::timefmt::filename_stamp(epoch_ms);
+        let ext = if compress { "jsonl.gz" } else { "jsonl" };
+        let name = format!("scan-{slug}-{stamp}-{scan_id}.{ext}");
         let final_path = dir.join(&name);
         let partial_path = dir.join(format!("{name}.partial"));
         // 0600, not the 0644 the default umask gives. `docs/security.md` calls the record
@@ -354,6 +358,30 @@ impl Counts {
 /// UUID and ULID were both considered and rejected (D18) — sortability is already
 /// provided by the epoch prefix in the filename, and 32 bits is ample against
 /// same-millisecond collision on a single host.
+/// A scan name reduced to a filename-safe slug: alphanumerics and `.-_` kept, runs of
+/// anything else collapsed to one `_`, trimmed and capped at 40 characters. The ad-hoc
+/// sentinel becomes `adhoc`; an empty or all-unsafe name becomes `scan`.
+fn slug_scan_name(name: &str) -> String {
+    if name == crate::plan::resolve::ADHOC_SCAN_NAME {
+        return "adhoc".to_string();
+    }
+    let mut out = String::new();
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+            out.push(c);
+        } else if !out.is_empty() && !out.ends_with('_') {
+            out.push('_');
+        }
+    }
+    let trimmed = out.trim_matches(|c: char| matches!(c, '_' | '.' | '-'));
+    let capped: String = trimmed.chars().take(40).collect();
+    if capped.is_empty() {
+        "scan".to_string()
+    } else {
+        capped
+    }
+}
+
 pub fn new_scan_id() -> String {
     let seed = crate::plan::permute::random_seed();
     format!("{:08x}", seed as u32)
@@ -365,7 +393,7 @@ mod compression_tests {
     use std::io::Read as _;
 
     fn write_record(dir: &Path, events: usize) -> PathBuf {
-        let mut w = JsonlWriter::create(dir, "gz001", 1_700_000_000_000, true).unwrap();
+        let mut w = JsonlWriter::create(dir, "probe", "gz001", 1_700_000_000_000, true).unwrap();
         w.emit("scan_started", json!({"schema_version": SCHEMA_VERSION}))
             .unwrap();
         for i in 0..events {
@@ -430,7 +458,8 @@ mod compression_tests {
             .len();
 
         let d2 = tempfile::tempdir().unwrap();
-        let mut w = JsonlWriter::create(d2.path(), "pl001", 1_700_000_000_000, false).unwrap();
+        let mut w =
+            JsonlWriter::create(d2.path(), "probe", "pl001", 1_700_000_000_000, false).unwrap();
         w.emit("scan_started", json!({"schema_version": SCHEMA_VERSION}))
             .unwrap();
         for i in 0..5000 {
@@ -469,7 +498,8 @@ mod tests {
     #[test]
     fn writes_partial_then_renames_on_terminal() {
         let dir = tempfile::tempdir().unwrap();
-        let mut w = JsonlWriter::create(dir.path(), "abcd1234", 1_700_000_000_000, false).unwrap();
+        let mut w =
+            JsonlWriter::create(dir.path(), "probe", "abcd1234", 1_700_000_000_000, false).unwrap();
         assert!(w.partial_path().exists());
         assert!(
             w.partial_path()
@@ -486,37 +516,68 @@ mod tests {
         assert!(final_path.exists());
         assert!(final_path.to_string_lossy().ends_with(".jsonl"));
         assert!(!final_path.to_string_lossy().ends_with(".partial"));
-        assert!(
-            !dir.path()
-                .join("scan-1700000000000-abcd1234.jsonl.partial")
-                .exists()
-        );
+        // No `.partial` remains once a terminal event has renamed it.
+        let leftover = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().ends_with(".partial"));
+        assert!(!leftover, "the .partial should be gone after finalize");
     }
 
     #[test]
     fn stays_partial_without_a_terminal_event() {
         // This is how a consumer detects that the process died mid-scan.
         let dir = tempfile::tempdir().unwrap();
-        let mut w = JsonlWriter::create(dir.path(), "dead", 1, false).unwrap();
+        let mut w = JsonlWriter::create(dir.path(), "probe", "dead", 1, false).unwrap();
         w.emit("scan_started", json!({})).unwrap();
         let p = w.finalize().unwrap();
         assert!(p.to_string_lossy().ends_with(".partial"));
     }
 
     #[test]
-    fn filename_carries_epoch_and_scan_id() {
+    fn filename_carries_name_stamp_and_scan_id() {
         let dir = tempfile::tempdir().unwrap();
-        let w = JsonlWriter::create(dir.path(), "a3f19c02", 1_785_294_704_201, false).unwrap();
+        let epoch = 1_785_294_704_201;
+        let w = JsonlWriter::create(dir.path(), "internal-web", "a3f19c02", epoch, false).unwrap();
+        let stamp = crate::timefmt::filename_stamp(epoch);
         assert_eq!(
-            w.final_path().file_name().unwrap(),
-            "scan-1785294704201-a3f19c02.jsonl"
+            w.final_path().file_name().unwrap().to_string_lossy(),
+            format!("scan-internal-web-{stamp}-a3f19c02.jsonl"),
         );
+        // A gz record and the ad-hoc sentinel.
+        let w = JsonlWriter::create(
+            dir.path(),
+            crate::plan::resolve::ADHOC_SCAN_NAME,
+            "0e1a180b",
+            epoch,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            w.final_path().file_name().unwrap().to_string_lossy(),
+            format!("scan-adhoc-{stamp}-0e1a180b.jsonl.gz"),
+        );
+    }
+
+    #[test]
+    fn scan_names_are_slugged_for_the_filename() {
+        assert_eq!(slug_scan_name("internal-web"), "internal-web");
+        assert_eq!(slug_scan_name("(ad-hoc)"), "adhoc");
+        assert_eq!(slug_scan_name("My Server"), "My_Server");
+        assert_eq!(slug_scan_name("web/prod:2"), "web_prod_2");
+        assert_eq!(slug_scan_name("  spaced  "), "spaced");
+        assert_eq!(slug_scan_name("***"), "scan");
+        assert_eq!(
+            slug_scan_name("dots.and_underscores"),
+            "dots.and_underscores"
+        );
+        assert_eq!(slug_scan_name(&"x".repeat(60)).len(), 40);
     }
 
     #[test]
     fn sequence_is_strictly_increasing() {
         let dir = tempfile::tempdir().unwrap();
-        let mut w = JsonlWriter::create(dir.path(), "s", 1, false).unwrap();
+        let mut w = JsonlWriter::create(dir.path(), "probe", "s", 1, false).unwrap();
         for i in 0..50 {
             w.emit("probe_result", json!({"port": i})).unwrap();
         }
@@ -536,7 +597,7 @@ mod tests {
     #[test]
     fn envelope_is_present_on_every_event() {
         let dir = tempfile::tempdir().unwrap();
-        let mut w = JsonlWriter::create(dir.path(), "envtest", 1, false).unwrap();
+        let mut w = JsonlWriter::create(dir.path(), "probe", "envtest", 1, false).unwrap();
         w.emit("scan_started", json!({"x": 1})).unwrap();
         w.emit_terminal("scan_completed", json!({})).unwrap();
         let path = w.finalize().unwrap();
@@ -553,7 +614,7 @@ mod tests {
     #[test]
     fn nothing_is_written_after_the_terminal_event() {
         let dir = tempfile::tempdir().unwrap();
-        let mut w = JsonlWriter::create(dir.path(), "t", 1, false).unwrap();
+        let mut w = JsonlWriter::create(dir.path(), "probe", "t", 1, false).unwrap();
         w.emit_terminal("scan_interrupted", json!({"signal": "SIGINT"}))
             .unwrap();
         w.emit("probe_result", json!({"port": 80})).unwrap();
@@ -627,7 +688,7 @@ mod tests {
     fn critical_events_are_flushed_immediately() {
         // A reader must be able to see the header while the scan is still running.
         let dir = tempfile::tempdir().unwrap();
-        let mut w = JsonlWriter::create(dir.path(), "flush", 1, false).unwrap();
+        let mut w = JsonlWriter::create(dir.path(), "probe", "flush", 1, false).unwrap();
         w.emit("scan_started", json!({})).unwrap();
         w.emit("scan_config", json!({"scan_name": "x"})).unwrap();
         let observed = std::fs::read_to_string(w.partial_path()).unwrap();
@@ -641,7 +702,7 @@ mod tests {
     #[test]
     fn body_fields_merge_into_the_envelope() {
         let dir = tempfile::tempdir().unwrap();
-        let mut w = JsonlWriter::create(dir.path(), "m", 1, false).unwrap();
+        let mut w = JsonlWriter::create(dir.path(), "probe", "m", 1, false).unwrap();
         w.emit_terminal(
             "scan_completed",
             json!({"duration_ms": 1234, "counts": {"open": 2}}),

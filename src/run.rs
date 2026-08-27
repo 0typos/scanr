@@ -206,11 +206,17 @@ pub(crate) fn execute_with(
 
     let mut writer = match harness.writer {
         Some(w) => w,
-        None => JsonlWriter::create(&plan.output_dir, &scan_id, started_ms, plan.compress)
-            .map_err(|e| ScanError::Output {
-                path: plan.output_dir.clone(),
-                source: e,
-            })?,
+        None => JsonlWriter::create(
+            &plan.output_dir,
+            &plan.scan_name,
+            &scan_id,
+            started_ms,
+            plan.compress,
+        )
+        .map_err(|e| ScanError::Output {
+            path: plan.output_dir.clone(),
+            source: e,
+        })?,
     };
 
     // The header is a hard failure: a record without it cannot be interpreted, so there
