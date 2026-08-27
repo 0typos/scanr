@@ -2092,6 +2092,29 @@ fn the_tls_probe_records_the_leaf_and_verify_accepts_it() {
     let config = events.iter().find(|e| e["type"] == "scan_config").unwrap();
     assert_eq!(config["tls"]["enabled"], true);
     assert!(config["tls"]["sent_bytes"].as_u64().unwrap() > 100);
+    // The offer is recorded, not just the versions: a reader sees the whole menu.
+    let ciphers = config["tls"]["offered_ciphers"].as_array().unwrap();
+    assert_eq!(ciphers[0], "TLS_AES_128_GCM_SHA256", "{config}");
+    assert!(
+        ciphers.iter().any(|c| c == "ECDHE-RSA-AES128-GCM-SHA256"),
+        "{config}"
+    );
+    assert_eq!(
+        config["tls"]["offered_alpn"],
+        serde_json::json!(["h2", "http/1.1"])
+    );
+    assert_eq!(
+        config["tls"]["offered_groups"],
+        serde_json::json!(["x25519", "secp256r1", "secp384r1"])
+    );
+    assert!(
+        config["tls"]["offered_sigalgs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s == "ecdsa_secp256r1_sha256"),
+        "{config}"
+    );
 
     let by_port = |p: u16| {
         events

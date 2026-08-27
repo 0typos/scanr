@@ -62,6 +62,16 @@ pub fn probe_public_key() -> &'static [u8; 32] {
     static KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
     KEY.get_or_init(|| crate::crypto::x25519_public(&PROBE_X25519_PRIVATE))
 }
+/// The named groups the hello offers, in `supported_groups` order. The key share carries
+/// [`GROUP_X25519`] only; a server wanting one of the others answers HelloRetryRequest.
+const OFFERED_GROUPS: &[u16] = &[0x001d, 0x0017, 0x0018];
+/// The signature schemes the hello offers, in `signature_algorithms` order.
+const OFFERED_SIGALGS: &[u16] = &[
+    0x0403, 0x0503, 0x0603, 0x0804, 0x0805, 0x0806, 0x0807, 0x0401, 0x0501, 0x0601, 0x0203, 0x0201,
+];
+/// The ALPN protocols the hello offers.
+const OFFERED_ALPN: &[&str] = &["h2", "http/1.1"];
+
 /// Certificates after the leaf whose fields are kept; the rest are counted.
 pub const MAX_CHAIN_KEPT: usize = 8;
 /// Server extensions recorded; nothing real sends more.
@@ -401,27 +411,14 @@ fn push_sni(ext: &mut Vec<u8>, sni: Option<&str>) {
 fn modern_extensions(sni: Option<&str>, offer13: bool) -> Vec<u8> {
     let mut ext = Vec::with_capacity(160);
     push_sni(&mut ext, sni);
-    push_extension(
-        &mut ext,
-        EXT_SUPPORTED_GROUPS,
-        &[0x00, 0x06, 0x00, 0x1d, 0x00, 0x17, 0x00, 0x18],
-    );
+    push_extension(&mut ext, EXT_SUPPORTED_GROUPS, &u16_list(OFFERED_GROUPS));
     push_extension(&mut ext, EXT_EC_POINT_FORMATS, &[0x01, 0x00]);
     push_extension(
         &mut ext,
         EXT_SIGNATURE_ALGORITHMS,
-        &[
-            0x00, 0x18, 0x04, 0x03, 0x05, 0x03, 0x06, 0x03, 0x08, 0x04, 0x08, 0x05, 0x08, 0x06,
-            0x08, 0x07, 0x04, 0x01, 0x05, 0x01, 0x06, 0x01, 0x02, 0x03, 0x02, 0x01,
-        ],
+        &u16_list(OFFERED_SIGALGS),
     );
-    push_extension(
-        &mut ext,
-        EXT_ALPN,
-        &[
-            0x00, 0x0c, 0x02, b'h', b'2', 0x08, b'h', b't', b't', b'p', b'/', b'1', b'.', b'1',
-        ],
-    );
+    push_extension(&mut ext, EXT_ALPN, &alpn_list(OFFERED_ALPN));
     push_extension(&mut ext, EXT_EXTENDED_MASTER_SECRET, &[]);
     push_extension(&mut ext, EXT_RENEGOTIATION_INFO, &[0x00]);
     if offer13 {
@@ -473,6 +470,50 @@ fn hello_record(
     rec.extend_from_slice(&(hs.len() as u16).to_be_bytes());
     rec.extend_from_slice(&hs);
     rec
+}
+
+/// A `<2-byte length><u16>*` vector, as `supported_groups` and `signature_algorithms` use.
+fn u16_list(items: &[u16]) -> Vec<u8> {
+    let mut out = ((items.len() * 2) as u16).to_be_bytes().to_vec();
+    for &i in items {
+        out.extend_from_slice(&i.to_be_bytes());
+    }
+    out
+}
+
+/// A `ProtocolNameList`: a 2-byte length over `<1-byte length><bytes>` entries.
+fn alpn_list(protocols: &[&str]) -> Vec<u8> {
+    let mut list = Vec::new();
+    for p in protocols {
+        list.push(p.len() as u8);
+        list.extend_from_slice(p.as_bytes());
+    }
+    let mut out = (list.len() as u16).to_be_bytes().to_vec();
+    out.extend_from_slice(&list);
+    out
+}
+
+/// The cipher suites the main hello offers, strongest first — including the one 1.3 suite.
+pub fn offered_ciphers() -> Vec<&'static str> {
+    CIPHER_SUITES.iter().map(|(_, n)| *n).collect()
+}
+
+/// The ALPN protocols offered.
+pub fn offered_alpn() -> Vec<&'static str> {
+    OFFERED_ALPN.to_vec()
+}
+
+/// The named groups offered, e.g. `x25519`, `secp256r1`.
+pub fn offered_groups() -> Vec<String> {
+    OFFERED_GROUPS.iter().map(|&g| group_name(g)).collect()
+}
+
+/// The signature schemes offered, e.g. `ecdsa_secp256r1_sha256`.
+pub fn offered_sigalgs() -> Vec<String> {
+    OFFERED_SIGALGS
+        .iter()
+        .map(|&s| sig_scheme_name(s))
+        .collect()
 }
 
 fn push_extension(out: &mut Vec<u8>, kind: u16, body: &[u8]) {
@@ -1476,6 +1517,29 @@ mod tests {
             crate::crypto::x25519_public(&PROBE_X25519_PRIVATE),
             *probe_public_key()
         );
+    }
+
+    #[test]
+    fn the_offered_lists_match_the_hello_and_name_what_is_sent() {
+        let h = client_hello(None);
+        // Ciphers: every offered id appears in the hello's cipher list, in order, and
+        // the 1.3 suite leads while a common 1.2 suite is present.
+        let ciphers = offered_ciphers();
+        assert_eq!(ciphers.len(), CIPHER_SUITES.len());
+        assert_eq!(ciphers[0], "TLS_AES_128_GCM_SHA256");
+        assert!(ciphers.contains(&"ECDHE-RSA-AES128-GCM-SHA256"));
+        assert_eq!(offered_alpn(), ["h2", "http/1.1"]);
+        assert_eq!(offered_groups(), ["x25519", "secp256r1", "secp384r1"]);
+        assert!(offered_sigalgs().contains(&"ecdsa_secp256r1_sha256".to_string()));
+        assert!(offered_sigalgs().contains(&"ed25519".to_string()));
+        // The names are consistent with the bytes: each group id and the ALPN strings
+        // are present in the hello.
+        for &g in OFFERED_GROUPS {
+            assert!(h.windows(2).any(|w| w == g.to_be_bytes()), "group {g:#06x}");
+        }
+        for a in OFFERED_ALPN {
+            assert!(h.windows(a.len()).any(|w| w == a.as_bytes()), "alpn {a}");
+        }
     }
 
     #[test]

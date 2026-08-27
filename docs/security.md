@@ -107,7 +107,9 @@ Client random is a fixed string; the cipher suites are `TLS_AES_128_GCM_SHA256` 
 one every 1.3 server must implement — and twenty common 1.2 suites; ALPN offers `h2`
 and `http/1.1`; `supported_versions` names 1.3 then 1.2; `key_share` carries one x25519
 point, computed from the private key published in `src/tls.rs`
-(`PROBE_X25519_PRIVATE`). A test holds this document to the bytes the code sends.
+(`PROBE_X25519_PRIVATE`). A test holds this document to the bytes the code sends, and
+`scan_config.tls` lists the offered cipher suites, ALPN, groups and signature schemes by
+name, so a record states the offer without pointing here.
 
 A server that picks 1.2 or older sends its first flight in the clear — ServerHello,
 Certificate, ServerKeyExchange, ServerHelloDone, or an Alert — and it is read. A server

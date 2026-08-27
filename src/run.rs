@@ -1118,6 +1118,10 @@ fn config_event(plan: &ScanPlan, facts: &HostFacts) -> serde_json::Value {
             Some(t) => json!({
                 "enabled": true,
                 "offered": crate::tls::OFFERED,
+                "offered_ciphers": crate::tls::offered_ciphers(),
+                "offered_alpn": crate::tls::offered_alpn(),
+                "offered_groups": crate::tls::offered_groups(),
+                "offered_sigalgs": crate::tls::offered_sigalgs(),
                 "sent_bytes": crate::tls::client_hello(None).len(),
                 "timeout_ms": t.timeout().as_millis() as u64,
                 "versions": t.versions(),
