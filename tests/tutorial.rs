@@ -5,7 +5,9 @@
 //! fixtures that model the same proxies (a faithful SOCKS5, a collapsing one, `ssh -D`'s
 //! silent close, HTTP CONNECT).
 //!
-//! Needs `python3` and `openssl` on PATH for the lab; both are on every CI runner.
+//! Needs `python3` and `openssl` on PATH for the lab. The lab-backed tests run on Linux
+//! only: macOS is not a promised platform (`docs/stability.md`), and its CI job exists
+//! to prove the binary builds and its own suite passes there, not the tutorial's lab.
 
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -216,7 +218,7 @@ impl Lab {
             let log =
                 std::env::temp_dir().join(format!("scanr-tutorial-lab-{}.log", std::process::id()));
             let stderr = std::fs::File::create(&log).expect("lab log");
-            let child = Command::new("python3")
+            let mut child = Command::new("python3")
                 .arg(root().join("docs/tutorial/lab.py"))
                 .arg("--exit-with-parent")
                 .stdin(Stdio::null())
@@ -226,9 +228,13 @@ impl Lab {
                 .expect("python3 is required to run the tutorial lab");
             let start = Instant::now();
             while !(listening(28443) && listening(25025) && listening(28080)) {
+                let exited = child.try_wait().ok().flatten();
                 assert!(
-                    start.elapsed() < Duration::from_secs(20),
-                    "the lab did not come up; its stderr:\n{}",
+                    exited.is_none() && start.elapsed() < Duration::from_secs(20),
+                    "the lab did not come up (child: {}; python3: {}; openssl: {}); its stderr:\n{}",
+                    exited.map_or("still running".to_string(), |s| s.to_string()),
+                    which("python3"),
+                    which("openssl"),
                     std::fs::read_to_string(&log).unwrap_or_default()
                 );
                 std::thread::sleep(Duration::from_millis(100));
@@ -240,9 +246,21 @@ impl Lab {
     }
 }
 
+/// Where a command resolves, for the diagnostic when the lab does not start.
+fn which(name: &str) -> String {
+    Command::new("sh")
+        .args(["-c", &format!("command -v {name}")])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "not found".into())
+}
+
 const LAB_PORTS: &str = "25025,28080,28443,29000,29001";
 
 #[test]
+#[cfg(target_os = "linux")]
 fn the_direct_use_cases_hold_against_the_lab() {
     let _lab = Lab::start();
     let d = tempfile::tempdir().unwrap();
@@ -398,6 +416,7 @@ fn the_direct_use_cases_hold_against_the_lab() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn the_interrupt_and_resume_use_case_holds_against_the_lab() {
     let _lab = Lab::start();
     let d = tempfile::tempdir().unwrap();
@@ -488,6 +507,7 @@ fn with_config(d: &Path, toml: &str) {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn the_proxied_use_cases_hold_against_the_fixtures() {
     use scanr::testsupport::http::{Behavior as H, HttpFixture};
     use scanr::testsupport::socks5::{Behavior as S, Socks5Fixture};
