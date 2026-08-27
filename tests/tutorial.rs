@@ -143,7 +143,8 @@ fn every_scanr_command_in_the_tutorial_parses() {
 fn the_lab_kit_is_present_and_its_config_validates() {
     let kit = root().join("docs/tutorial");
     for f in [
-        "lab",
+        "scanr-lab",
+        "scanr-lab.lock",
         "lab.py",
         "scanr.toml",
         "README.md",
@@ -154,7 +155,7 @@ fn the_lab_kit_is_present_and_its_config_validates() {
         assert!(kit.join(f).exists(), "docs/tutorial/{f} is missing");
     }
     let doc = tutorial();
-    for reference in ["docs/tutorial/lab.py", "./lab up"] {
+    for reference in ["docs/tutorial/lab.py", "./scanr-lab up"] {
         assert!(
             doc.contains(reference),
             "the tutorial no longer mentions `{reference}`"
@@ -200,7 +201,7 @@ fn listening(port: u16) -> bool {
 }
 
 /// The tutorial's services: one per test process, shared by every test that needs them,
-/// or borrowed if `./lab up` is already running.
+/// or borrowed if `./scanr-lab up` is already running.
 ///
 /// Never killed by a test. Tests run in parallel, and a lab owned by the first test to
 /// finish was torn down under the others — a scan then reported every port closed. The

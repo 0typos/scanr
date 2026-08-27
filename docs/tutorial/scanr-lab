@@ -1,0 +1,311 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "typer>=0.16,<1",
+# ]
+# ///
+"""The scanr tutorial lab, in one installable command.
+
+Brings up the loopback services (`lab.py`), the four proxies in rootless podman, and a
+throwaway `ssh -D` tunnel — the environment `docs/tutorial.md` scans. No VM, no root:
+plain Python threads for the services, podman for the proxies, a user-space `sshd` for
+the tunnel. `install` symlinks this script onto PATH so `scanr-lab up` works anywhere.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import socket
+import subprocess
+import time
+from pathlib import Path
+from typing import Annotated, NoReturn
+
+import typer
+
+HERE = Path(__file__).resolve().parent
+STATE = HERE / ".state"
+IMAGE = "scanr-tutorial-proxies"
+PROXIES = HERE / "proxies"
+COMMAND = "scanr-lab"
+
+
+class LabError(RuntimeError):
+    """A lab operation that failed with a message worth printing, not a traceback."""
+
+
+def note(message: str) -> None:
+    print(f"{COMMAND}: {message}", flush=True)
+
+
+def fail(message: str) -> NoReturn:
+    raise LabError(message)
+
+
+def require_command(name: str) -> str:
+    path = shutil.which(name)
+    if path is None:
+        fail(f"required command not found: {name}")
+    return path
+
+
+def run(argv: list[str], *, quiet: bool = False) -> None:
+    try:
+        subprocess.run(
+            argv,
+            check=True,
+            stdout=subprocess.DEVNULL if quiet else None,
+            stderr=subprocess.DEVNULL if quiet else None,
+        )
+    except FileNotFoundError:
+        fail(f"required command not found: {argv[0]}")
+    except subprocess.CalledProcessError as error:
+        fail(f"command failed ({error.returncode}): {' '.join(argv)}")
+
+
+def listening(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.3):
+            return True
+    except OSError:
+        return False
+
+
+def wait_for(port: int, tries: int = 30) -> bool:
+    for _ in range(tries):
+        if listening(port):
+            return True
+        time.sleep(0.1)
+    return listening(port)
+
+
+def spawn(argv: list[str], log: Path, pidfile: Path) -> None:
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with open(log, "w") as out, open(os.devnull) as devnull:
+        proc = subprocess.Popen(
+            argv, stdout=out, stderr=subprocess.STDOUT, stdin=devnull, start_new_session=True
+        )
+    pidfile.write_text(str(proc.pid))
+
+
+def kill_pidfile(pidfile: Path) -> None:
+    if not pidfile.exists():
+        return
+    try:
+        os.kill(int(pidfile.read_text().strip()), 15)
+    except (ProcessLookupError, ValueError):
+        pass
+    pidfile.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------- lab operations
+
+def services_up() -> None:
+    if listening(25025) and listening(28080) and listening(28443):
+        note("services   already up")
+        return
+    STATE.mkdir(parents=True, exist_ok=True)
+    require_command("python3")
+    spawn(["python3", str(HERE / "lab.py")], STATE / "lab.log", STATE / "lab.pid")
+    wait_for(28443)
+    first = (STATE / "lab.log").read_text().splitlines()[:1]
+    note(f"services   {first[0] if first else 'starting'}")
+
+
+def proxies_up() -> None:
+    if shutil.which("podman") is None:
+        note("proxies    skipped: no podman (use cases 5-7 and 10 need a SOCKS5/HTTP proxy)")
+        return
+    STATE.mkdir(parents=True, exist_ok=True)
+    if subprocess.run(["podman", "image", "exists", IMAGE], check=False).returncode != 0:
+        note(f"proxies    building {IMAGE} (fedora-minimal + squid, tinyproxy, 3proxy, dante)...")
+        run(["podman", "build", "-q", "-t", IMAGE, str(PROXIES)], quiet=True)
+    subprocess.run(
+        ["podman", "rm", "-f", "tut-squid", "tut-tinyproxy", "tut-3proxy", "tut-dante"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    containers = [
+        ("tut-squid", f"{PROXIES}/squid.conf:/etc/squid/squid.conf:Z",
+         ["squid", "-N", "-f", "/etc/squid/squid.conf"]),
+        ("tut-tinyproxy", f"{PROXIES}/tinyproxy.conf:/etc/tinyproxy/tinyproxy.conf:Z",
+         ["tinyproxy", "-d", "-c", "/etc/tinyproxy/tinyproxy.conf"]),
+        ("tut-3proxy", f"{PROXIES}/3proxy.cfg:/etc/3proxy/3proxy.cfg:Z",
+         ["3proxy", "/etc/3proxy/3proxy.cfg"]),
+        ("tut-dante", f"{PROXIES}/sockd.conf:/etc/sockd.conf:Z",
+         ["sockd", "-N", "1", "-f", "/etc/sockd.conf"]),
+    ]
+    for name, volume, cmd in containers:
+        run(["podman", "run", "-d", "--rm", "--name", name, "--network", "host",
+             "-v", volume, IMAGE, *cmd], quiet=True)
+    if wait_for(3128) and wait_for(1082):
+        note("proxies    squid :3128  tinyproxy :3129  3proxy http :3130 socks5 :1081  dante :1082")
+    else:
+        note("proxies    started but not all ports are listening yet; run `scanr-lab check`")
+
+
+def tunnel_up() -> None:
+    require_command("ssh")
+    require_command("ssh-keygen")
+    sshd = shutil.which("sshd") or "/usr/sbin/sshd"
+    d = STATE / "sshd"
+    d.mkdir(parents=True, exist_ok=True)
+    d.chmod(0o700)
+    for key in ("host_key", "client_key"):
+        if not (d / key).exists():
+            run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(d / key)], quiet=True)
+    shutil.copy(d / "client_key.pub", d / "authorized_keys")
+    (d / "authorized_keys").chmod(0o600)
+    (d / "host_key").chmod(0o600)
+    (d / "sshd_config").write_text(
+        f"Port 2222\nListenAddress 127.0.0.1\nHostKey {d}/host_key\n"
+        f"AuthorizedKeysFile {d}/authorized_keys\nPasswordAuthentication no\n"
+        f"PubkeyAuthentication yes\nAllowTcpForwarding yes\nPidFile {d}/sshd.pid\nStrictModes no\n"
+    )
+    if not listening(2222):
+        run([sshd, "-f", str(d / "sshd_config"), "-E", str(d / "sshd.log")])
+        wait_for(2222)
+    if not listening(1088):
+        spawn(
+            ["ssh", "-N", "-D", "127.0.0.1:1088", "-p", "2222", "-i", str(d / "client_key"),
+             "-o", "StrictHostKeyChecking=no", "-o", f"UserKnownHostsFile={d}/known_hosts",
+             "-o", "ExitOnForwardFailure=yes", f"{os.environ.get('USER', 'nobody')}@127.0.0.1"],
+            d / "ssh.log", d / "ssh.pid",
+        )
+        wait_for(1088)
+    if listening(1088):
+        note("tunnel     ssh -D 127.0.0.1:1088 via throwaway sshd on :2222")
+    else:
+        fail("tunnel     FAILED\n" + (d / "ssh.log").read_text() if (d / "ssh.log").exists() else "tunnel failed")
+
+
+def check_lab() -> None:
+    if (HERE / "lab.py").exists():
+        subprocess.run(["python3", str(HERE / "lab.py"), "--check"], check=False)
+    for name, port in [("squid", 3128), ("tinyproxy", 3129), ("3proxy-http", 3130),
+                       ("3proxy-socks5", 1081), ("dante", 1082), ("ssh-D", 1088)]:
+        state = f"{name} up" if listening(port) else f"{name} down"
+        print(f"127.0.0.1:{port:<6} {state}")
+
+
+def down_lab() -> None:
+    kill_pidfile(STATE / "lab.pid")
+    kill_pidfile(STATE / "sshd" / "ssh.pid")
+    kill_pidfile(STATE / "sshd" / "sshd.pid")
+    if shutil.which("podman"):
+        subprocess.run(
+            ["podman", "rm", "-f", "tut-squid", "tut-tinyproxy", "tut-3proxy", "tut-dante"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        )
+    note("lab down")
+
+
+# ---------------------------------------------------------------- install / uninstall
+
+def uv_executable_dir() -> Path:
+    require_command("uv")
+    result = subprocess.run(["uv", "tool", "dir", "--bin"], capture_output=True, text=True, check=False)
+    value = result.stdout.strip()
+    if not value:
+        fail("uv did not report its executable directory")
+    return Path(value).expanduser().resolve()
+
+
+def install_launcher(*, force: bool) -> None:
+    source = Path(__file__).resolve()
+    bin_dir = uv_executable_dir()
+    target = bin_dir / COMMAND
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    if target.is_symlink() and target.resolve() == source:
+        note(f"command already installed at {target}")
+        return
+    if target.exists() or target.is_symlink():
+        if not force:
+            fail(f"{target} already exists; inspect it or rerun install with --force")
+        if target.is_dir() and not target.is_symlink():
+            fail(f"refusing to replace directory {target}")
+        target.unlink()
+    target.symlink_to(source)
+    note(f"installed command: {target} -> {source}")
+    entries = [Path(p).expanduser().resolve() for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+    if bin_dir not in entries:
+        note("uv's executable directory is not on PATH; run: uv tool update-shell")
+    else:
+        note(f"ready: {COMMAND} up")
+
+
+def uninstall_launcher() -> None:
+    source = Path(__file__).resolve()
+    target = uv_executable_dir() / COMMAND
+    if not target.is_symlink():
+        fail(f"refusing to remove {target}; it is not a symlink installed by this script")
+    if target.resolve() != source:
+        fail(f"refusing to remove {target}; it points to a different command")
+    target.unlink()
+    note(f"removed command {target}")
+
+
+# ---------------------------------------------------------------- CLI
+
+app = typer.Typer(
+    help="The scanr tutorial lab: loopback services, podman proxies, an ssh -D tunnel.",
+    no_args_is_help=True,
+    add_completion=False,
+)
+
+
+@app.command()
+def up() -> None:
+    """Start the loopback services and, if podman is present, the four proxies."""
+    services_up()
+    proxies_up()
+
+
+@app.command()
+def tunnel() -> None:
+    """Start a throwaway sshd on :2222 and `ssh -D 127.0.0.1:1088` through it (use case 5)."""
+    tunnel_up()
+
+
+@app.command()
+def check() -> None:
+    """Show what is up: services, proxies, tunnel."""
+    check_lab()
+
+
+@app.command()
+def down() -> None:
+    """Stop everything this command started."""
+    down_lab()
+
+
+@app.command()
+def install(
+    force: Annotated[bool, typer.Option("--force", help="Replace an existing non-directory command")] = False,
+) -> None:
+    """Symlink `scanr-lab` into uv's executable directory so it runs from anywhere."""
+    install_launcher(force=force)
+
+
+@app.command()
+def uninstall() -> None:
+    """Remove this checkout's installed `scanr-lab` symlink."""
+    uninstall_launcher()
+
+
+def main() -> None:
+    try:
+        app()
+    except LabError as error:
+        typer.echo(f"{COMMAND}: {error}", err=True)
+        raise SystemExit(1) from None
+    except KeyboardInterrupt:
+        typer.echo(f"\n{COMMAND}: interrupted", err=True)
+        raise SystemExit(130) from None
+
+
+if __name__ == "__main__":
+    main()

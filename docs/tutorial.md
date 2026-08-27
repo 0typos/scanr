@@ -21,12 +21,12 @@ all packaged in [`docs/tutorial/`](tutorial/) so you can start without building 
 
 ```console
 $ cd docs/tutorial
-$ ./lab up
+$ ./scanr-lab up
 services   lab up on 127.0.0.1: 25025 greets, 28080 silent, 28443 tls1.2 (h2, http/1.1), 28444 tls1.0-1.1 only; 29000, 29001 closed. Ctrl-C to stop.
 proxies    squid :3128  tinyproxy :3129  3proxy http :3130 socks5 :1081  dante :1082
-$ ./lab tunnel
+$ ./scanr-lab tunnel
 tunnel     ssh -D 127.0.0.1:1088 via throwaway sshd on :2222
-$ ./lab check
+$ ./scanr-lab check
 127.0.0.1:25025  greets
 127.0.0.1:28080  silent
 127.0.0.1:28443  tls TLSv1.2 alpn=h2
@@ -37,15 +37,18 @@ $ ./lab check
 ...
 ```
 
-The services are `python3 docs/tutorial/lab.py`, standard library only: 25025 greets on
-connect like an SMTP server, 28080 accepts and says nothing, 28443 is a TLS 1.2 server
-with a self-signed certificate, and 28444 answers only TLS 1.0 and 1.1 — the old
-appliance use case 9 surveys. Ports 29000 and 29001 have nothing listening.
+`scanr-lab` is a single [`uv`](https://docs.astral.sh/uv/) script — no VM, no root — that
+brings the whole environment up: `./scanr-lab install` puts it on your PATH as
+`scanr-lab`, and `scanr-lab uninstall` removes it. The services it runs are
+`python3 docs/tutorial/lab.py`, standard library only: 25025 greets on connect like an
+SMTP server, 28080 accepts and says nothing, 28443 is a TLS 1.2 server with a self-signed
+certificate, and 28444 answers only TLS 1.0 and 1.1 — the old appliance use case 9
+surveys. Ports 29000 and 29001 have nothing listening.
 `192.0.2.0/24` (TEST-NET-1) is never routed, so probes to it time out. The proxies —
 dante (SOCKS5 `:1082`), 3proxy (SOCKS5 `:1081`), squid (HTTP CONNECT `:3128`) — run in
 rootless podman from `docs/tutorial/proxies/`; without podman, point the config at any
-SOCKS5 and HTTP proxy you have. `./lab tunnel` adds an OpenSSH dynamic forward through a
-throwaway `sshd`, for use case 5. `./lab down` stops all of it.
+SOCKS5 and HTTP proxy you have. `./scanr-lab tunnel` adds an OpenSSH dynamic forward
+through a throwaway `sshd`, for use case 5. `./scanr-lab down` stops all of it.
 
 The configuration below is `docs/tutorial/scanr.toml`; every command in this guide runs
 from that directory.

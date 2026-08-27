@@ -1,5 +1,5 @@
 # The tutorial's configuration. `cd docs/tutorial` and every command in
-# docs/tutorial.md runs against it. Addresses match `./lab up`; change them to
+# docs/tutorial.md runs against it. Addresses match `./scanr-lab up`; change them to
 # point at proxies of your own.
 version = 1
 
@@ -27,7 +27,7 @@ members = ["dante", "exit-b"]
 
 [transports.tunnel]
 type = "socks5"
-address = "127.0.0.1:1088"       # ./lab tunnel: ssh -N -D 127.0.0.1:1088
+address = "127.0.0.1:1088"       # ./scanr-lab tunnel: ssh -N -D 127.0.0.1:1088
 
 [targets.lab]
 include = ["127.0.0.1"]
