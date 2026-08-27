@@ -5,6 +5,15 @@ tool does that `nmap` does not — and what it deliberately leaves to nmap. Ever
 below was captured on 2026-08-26 against the lab in the next section; run it yourself
 and the outputs match apart from timings and ids.
 
+The claim, up front. A port scan through a proxy is usually both untrustworthy and
+unrepeatable: the proxy decides what `closed` means, the scanner guesses, and what
+survives the engagement is a terminal scrollback. scanr is built so that every scan
+leaves a record that states what was run, what answered, what the proxy could not tell
+you, and what was never reached — and so that a killed scan resumes to the endpoint, not
+the host. It is also fast, but that is a side effect of the design rather than the point.
+Each use case below shows one of those properties working, and what nmap does in the same
+spot.
+
 ## The lab
 
 Three loopback services, two closed ports, one unroutable network, and two proxies.
@@ -59,6 +68,10 @@ hops = ["corp", "dante"]
 [transports.spread]
 type = "pool"
 members = ["dante", "exit-b"]
+
+[transports.tunnel]
+type = "socks5"
+address = "127.0.0.1:1088"       # ssh -N -D 127.0.0.1:1088 bastion
 
 [targets.lab]
 include = ["127.0.0.1"]
@@ -131,9 +144,36 @@ results/scan-1787709194714-5d2875ea.jsonl.gz
 ok — record is complete and internally consistent
 ```
 
-`verify` checks structure, counts and values, and would say so if the file were
-truncated, edited, or held a credential. Run it before trusting a record someone hands
-you. Exit `2` means the record is bad, `1` means it could not be read.
+`verify` checks structure, counts and values. Try to fool it. Drop the row for port
+25025 and verify the result:
+
+```console
+$ zcat results/scan-*.jsonl.gz | grep -v '"port":25025' > tampered.jsonl
+$ scanr output verify tampered.jsonl
+tampered.jsonl
+  6 events
+  terminal: scan_completed
+  2 probe results
+  2 further probes collapsed into 1 span(s)
+
+  problem: terminal event claims 5 completed probes but 2 probe_result events plus 2 probes across 1 probe_span events present
+
+1 problem(s) found
+$ echo $?
+2
+```
+
+Cut the file off before its last line, as a crash would:
+
+```console
+$ zcat results/scan-*.jsonl.gz | head -n -1 > truncated.jsonl
+$ scanr output verify truncated.jsonl
+  problem: no terminal event — the scan did not finish writing (process died?)
+```
+
+The terminal event's counts are the authority and every reader is held to them, so a
+record that has lost a result cannot pass as complete. Run `verify` on any record
+someone hands you. Exit `2` means the record is bad, `1` means it could not be read.
 
 ```console
 $ scanr output summarize results/scan-1787709194714-5d2875ea.jsonl.gz
@@ -291,6 +331,55 @@ Same verdicts as the direct scan, and every result in the record carries
 `source: proxy_reply` — the classification is the proxy's assertion, and the record
 says so. Through OpenSSH's `ssh -D`, which sends no reply at all for a refused port,
 the same scan reports `error` for the two closed ports rather than guessing.
+
+### The proxy everyone actually uses: `ssh -D`
+
+The lab's last transport is an OpenSSH dynamic forward to a throwaway `sshd`
+(`ssh -N -D 127.0.0.1:1088 bastion`), which is how most people reach an internal network
+in practice. Measure it:
+
+```console
+$ scanr transport test tunnel
+transport tunnel (socks5 127.0.0.1:1088)
+  reachable         yes
+  known-open        open      reply 0x00         1.0ms
+  known-closed      error     no reply           0.5ms   <- expected closed
+  blackholed        filtered  no reply        3030.6ms
+
+  fidelity          open_only
+  The known-closed destination produced no usable reply code (the proxy
+  may have timed out or closed the connection, which is what OpenSSH's
+  `ssh -D` does), so closed and filtered cannot be distinguished.
+
+  to record this, add to [transports.tunnel]:
+      fidelity = "open_only"
+```
+
+OpenSSH knows the port was refused — its own log says `connect failed: Connection
+refused` — but its SOCKS5 layer has no way to say so: it closes the channel without a
+reply. Through this proxy a closed port and a firewalled port look identical, and scanr
+says so before you spend the scan. Now the scan:
+
+```console
+$ scanr run lab-audit --transport tunnel --profile ssh --all --output-dir results-tunnel
+scanr 1.0.0-rc.1 — lab-audit via socks5 127.0.0.1:1088 — 5 probes (1 targets x 5 ports)
+  warning: result fidelity of proxy `tunnel` has not been measured; closed and filtered may be indistinguishable
+           run: scanr transport test tunnel
+127.0.0.1:29000/tcp error saltd-licensing 1.0ms
+127.0.0.1:28080/tcp open 1.1ms
+127.0.0.1:29001/tcp error 1.0ms
+127.0.0.1:25025/tcp open 1.1ms 220 mail.lab.internal ESMTP ready..
+127.0.0.1:28443/tcp open 1.1ms
+
+completed in 0.05s — 3 open, 0 closed, 0 filtered, 2 error (5 of 5 probed)
+```
+
+The open set is exact; the two closed ports are `error`, with the reason in the record,
+because `closed` was never observed. Record `fidelity = "open_only"` in the config and
+the warning becomes a statement in every record instead. `--profile ssh` is one of three
+built for this proxy: its listener is local, so the ephemeral-port rate cap that a remote
+proxy needs does not apply, and its throughput cliffs above ~128 in flight (measured;
+[tuning.md](tuning.md)).
 
 Versus nmap: `proxychains nmap` intercepts nmap's sockets with `LD_PRELOAD`, leaks DNS
 unless you are careful, fights nmap's parallelism, and gives you no way to know whether a
@@ -498,10 +587,21 @@ transport exit-b (socks5 127.0.0.1:1081)
 
 That is 3proxy at its default `maxconn 100`. Seven built-in profiles cover the common
 shapes (`proxy`, `proxy-careful`, three for `ssh -D`, `direct`, `direct-fast`), and
-[tuning.md](tuning.md) has the measurements behind them. On its own engine scanr is
-~10× nmap `-T5` on the same terms (640,000 probes/s on a loopback `/24`), but through a
-proxy both tools wait on the proxy; the differences that matter there are the ones
-above.
+[tuning.md](tuning.md) has the measurements behind them.
+
+On its own engine, direct, scanr is not the bottleneck. Same terms for both tools —
+unprivileged connect scans, loopback `/24`, every port refused except the real listeners,
+nmap 7.92 at `-T5 --min-rate 10000 --max-retries 0 -Pn -n`, 64-core machine:
+
+| | probes | scanr, default profile | nmap `-T5` | ratio |
+|---|---|---|---|---|
+| `/24` × 1,000 ports | 256,000 | **0.40 s** (~640,000/s) | 4.82 s | 12× |
+| `/24` × 10,000 ports | 2,560,000 | **4.3 s** (~600,000/s) | 48.4 s | 11× |
+
+Same open ports from both (259 and 515), 18 MB resident against 105 MB, and the
+2.56M-probe record is 36 KB. Through a proxy neither tool's engine matters — the proxy's
+cap and the network's RTT set the rate — which is why the measurements above are the
+ones this tool is built around.
 
 ## 11. Trusting the result
 
@@ -510,6 +610,21 @@ above.
   refused, not warned about; the record is created mode 0600.
 - Every claim in this guide is backed by a named test, a corpus record or a measurement:
   [evidence.md](evidence.md). What 1.x promises to keep stable: [stability.md](stability.md).
+
+## What you got that nmap would not have given you
+
+| use case | nmap | scanr |
+|---|---|---|
+| 1, 2 · the scan and its record | verdicts in `-oX`/`-oG`; no resolved settings, no statement that the run finished | a record with the resolved config, a terminal event with authoritative counts, and `verify` to hold it to them |
+| 3 · before scanning | nothing; you find out by waiting | `plan`: every value with its source layer, both duration bounds, warnings |
+| 4 · repeating a scan | shell history | a committed config, a recorded seed, provenance on every field |
+| 5 · SOCKS5 | `proxychains` interception; a `closed` you cannot attribute | native SOCKS5, measured fidelity, `source: proxy_reply` on every result, `error` rather than a guess |
+| 6 · HTTP CONNECT | not really; `--proxies` is documented as incomplete | native, honest about the protocol's limit, exact open set |
+| 7 · several proxies | one at a time | chains with the exit hop's fidelity; pools with `via` on every result |
+| 8 · interruption | `--resume` at host granularity from its own output | exact endpoint remainder, piped straight back in, records linked |
+| 9 · what a service says | `-sV`, far more, actively | passive banners by default; one documented ClientHello on request; then `--format nmap` hands the open set to `-sV` |
+| 10 · limits | adaptive timing hides them | measured proxy caps, explicit knobs, and the numbers on the page |
+| 11 · trust | — | credentials never recorded, mode 0600, every claim mapped to a test |
 
 ## Where next
 
