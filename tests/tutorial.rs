@@ -214,7 +214,7 @@ static LAB: std::sync::OnceLock<Lab> = std::sync::OnceLock::new();
 impl Lab {
     fn start() -> &'static Lab {
         LAB.get_or_init(|| {
-            if listening(28443) && listening(25025) {
+            if listening(28443) && listening(25025) && listening(28444) {
                 return Lab { _child: None };
             }
             let log =
@@ -229,7 +229,7 @@ impl Lab {
                 .spawn()
                 .expect("python3 is required to run the tutorial lab");
             let start = Instant::now();
-            while !(listening(28443) && listening(25025) && listening(28080)) {
+            while !(listening(28443) && listening(25025) && listening(28080) && listening(28444)) {
                 let exited = child.try_wait().ok().flatten();
                 assert!(
                     exited.is_none() && start.elapsed() < Duration::from_secs(20),
@@ -418,6 +418,53 @@ fn the_direct_use_cases_hold_against_the_lab() {
         smtp.get("tls").is_none(),
         "a greeting service is never probed"
     );
+
+    // 9b. The version survey: the modern port speaks only 1.2; the legacy port only
+    // 1.0/1.1, and is named as such with advice for reaching it.
+    let ver = scanr(
+        d.path(),
+        &[
+            "run",
+            "--targets",
+            "127.0.0.1",
+            "--ports",
+            "28443,28444",
+            "--tls",
+            "--tls-versions",
+            "--no-spans",
+            "--output-dir",
+            "results-ver",
+        ],
+    );
+    assert_eq!(code(&ver), 0, "{}", err(&ver));
+    let shown = out(&ver);
+    assert!(shown.contains("versions:1.2..1.2"), "{shown}");
+    assert!(
+        shown.contains("tls alert protocol_version legacy-only:tls1.1"),
+        "{shown}"
+    );
+    let rec = record_in(&d.path().join("results-ver"));
+    let rows: Vec<Value> = out(&scanr(
+        d.path(),
+        &["output", "results", "--format", "json", rec.to_str().unwrap()],
+    ))
+    .lines()
+    .map(|l| serde_json::from_str(l).unwrap())
+    .collect();
+    let legacy = &rows.iter().find(|r| r["port"] == 28444).unwrap()["tls"]["versions"];
+    assert_eq!(legacy["newest"], "1.1", "{legacy}");
+    assert_eq!(legacy["legacy_only"], true);
+    assert_eq!(legacy["ssl3"]["accepted"], false);
+    assert_eq!(legacy["1.0"]["accepted"], true);
+    assert_eq!(legacy["1.1"]["accepted"], true);
+    assert_eq!(legacy["1.2"]["accepted"], false);
+    assert!(
+        legacy["advice"].as_str().unwrap().contains("--tls-max 1.1"),
+        "{legacy}"
+    );
+    let modern = &rows.iter().find(|r| r["port"] == 28443).unwrap()["tls"]["versions"];
+    assert_eq!(modern["newest"], "1.2");
+    assert_eq!(modern["legacy_only"], false);
 }
 
 #[test]
