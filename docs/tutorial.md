@@ -3,7 +3,7 @@
 Ten use cases, each a real command with its real output, and at each step what the
 tool does that `nmap` does not — and what it deliberately leaves to nmap. Everything
 below was captured on 2026-08-26 against the lab in the next section; run it yourself
-and the outputs match apart from timings, ids and the certificate fingerprint.
+and the outputs match apart from timings, ids, and the certificate's fingerprint and dates.
 
 The claim, up front. A port scan through a proxy is usually both untrustworthy and
 unrepeatable: the proxy decides what `closed` means, the scanner guesses, and what
@@ -22,7 +22,7 @@ all packaged in [`docs/tutorial/`](tutorial/) so you can start without building 
 ```console
 $ cd docs/tutorial
 $ ./lab up
-services   lab up on 127.0.0.1: 25025 greets, 28080 silent, 28443 tls1.2 (h2, http/1.1); 29000, 29001 closed. Ctrl-C to stop.
+services   lab up on 127.0.0.1: 25025 greets, 28080 silent, 28443 tls1.2 (h2, http/1.1), 28444 tls1.0-1.1 only; 29000, 29001 closed. Ctrl-C to stop.
 proxies    squid :3128  tinyproxy :3129  3proxy http :3130 socks5 :1081  dante :1082
 $ ./lab tunnel
 tunnel     ssh -D 127.0.0.1:1088 via throwaway sshd on :2222
@@ -30,6 +30,7 @@ $ ./lab check
 127.0.0.1:25025  greets
 127.0.0.1:28080  silent
 127.0.0.1:28443  tls TLSv1.2 alpn=h2
+127.0.0.1:28444  legacy tls1.0-1.1
 127.0.0.1:29000  closed
 127.0.0.1:29001  closed
 127.0.0.1:3128   squid up
@@ -38,7 +39,8 @@ $ ./lab check
 
 The services are `python3 docs/tutorial/lab.py`, standard library only: 25025 greets on
 connect like an SMTP server, 28080 accepts and says nothing, 28443 is a TLS 1.2 server
-with a self-signed certificate. Ports 29000 and 29001 have nothing listening.
+with a self-signed certificate, and 28444 answers only TLS 1.0 and 1.1 — the old
+appliance use case 9 surveys. Ports 29000 and 29001 have nothing listening.
 `192.0.2.0/24` (TEST-NET-1) is never routed, so probes to it time out. The proxies —
 dante (SOCKS5 `:1082`), 3proxy (SOCKS5 `:1081`), squid (HTTP CONNECT `:3128`) — run in
 rootless podman from `docs/tutorial/proxies/`; without podman, point the config at any
@@ -552,7 +554,7 @@ $ scanr run --targets 127.0.0.1 --ports 25025,28080,28443 --tls --output-dir res
 
 $ scanr output results --format json results-tls/scan-*.jsonl.gz \
     | jq -c 'select(.tls.negotiated != null) | {port, cn: .tls.cert.subject_cn, expires: .tls.cert.not_after, alpn: .tls.alpn, cipher: .tls.cipher_name}'
-{"port":28443,"alpn":"h2","cipher":"ECDHE-ECDSA-AES256-GCM-SHA384","sha256":"3f87a1b8d012cb38"}
+{"port":28443,"cn":"lab.internal","expires":"2026-09-26T01:43:02Z","alpn":"h2","cipher":"ECDHE-ECDSA-AES256-GCM-SHA384"}
 ```
 
 Three ports, three different answers: a greeting (never probed — a service that spoke
@@ -561,15 +563,54 @@ server that returned its certificate, cipher and ALPN. The record holds what
 scanr read from the leaf under `tls.cert` — subject, issuer, alternative names, validity
 window, key type — and the DER itself for `openssl x509` or `tlsx`. Read, never
 verified: the line says `self-signed`, not `untrusted`, because trust is a policy
-scanr does not have. A TLS 1.3-only
-server answers with a `protocol_version` alert, recorded as such.
+scanr does not have.
 
-The scan's config event says `"tls": {"enabled": true, "offered": "1.3,1.2", "sent_bytes": 218}`;
+The hello offers TLS 1.3 and 1.2, and scanr reads either: on a 1.3 server it finishes
+the key exchange and decrypts the certificate rather than stopping at the version. The
+scan's config event says `"tls": {"enabled": true, "offered": "1.3,1.2", "sent_bytes": 218}`;
 with `--tls` off it says `"sent_bytes": 0`. The exact 218 bytes are listed in
 [security.md](security.md).
 
-nmap `-sV` does far more here — and that is where use case 2's `--format nmap` sends the
-open ports.
+### Which SSL/TLS versions: the old appliance
+
+A server answers a hello with the *highest* version it shares, never the oldest it still
+accepts, so one hello cannot tell you whether a box still speaks SSLv3 — the thing you
+need to know before you can even connect to it with a modern client. `--tls-versions`
+asks each version for itself, on its own connection with a hello of that era. Port 28444
+is the lab's old appliance; 28443 is the modern server, for contrast:
+
+```console
+$ scanr run --targets 127.0.0.1 --ports 28443,28444 --tls --tls-versions --output-dir results-ver
+127.0.0.1:28443/tcp open 0.1ms tls1.2 h2 cn=lab.internal self-signed sha256:7dc3c9a4 versions:1.2..1.2
+127.0.0.1:28444/tcp open 0.1ms tls alert protocol_version legacy-only:tls1.1
+```
+
+28443 refused the survey's older hellos and speaks only 1.2 (`versions:1.2..1.2`). 28444
+rejected the main 1.3/1.2 hello outright — hence the alert — but answered the 1.0 and 1.1
+hellos, and nothing newer: **`legacy-only:tls1.1`**, a server no current browser or
+default `openssl` will connect to. The record says exactly which versions answered and
+what it takes to reach it:
+
+```console
+$ scanr output results --format json results-ver/scan-*.jsonl.gz \
+    | jq -c 'select(.tls.versions.legacy_only) | {port, newest: .tls.versions.newest, advice: .tls.versions.advice}'
+{"port":28444,"newest":"1.1","advice":"TLS 1.0/1.1 only: browsers refuse it; use openssl s_client -tls1_1 (or -tls1) with -cipher DEFAULT:@SECLEVEL=0, or curl --tls-max 1.1"}
+
+$ scanr output results --format json results-ver/scan-*.jsonl.gz \
+    | jq -c 'select(.port==28444) | .tls.versions | {ssl2:.ssl2.accepted, ssl3:.ssl3.accepted, "1.0":."1.0".accepted, "1.1":."1.1".accepted, "1.2":."1.2".accepted}'
+{"ssl2":false,"ssl3":false,"1.0":true,"1.1":true,"1.2":false}
+```
+
+`advice` is scanr answering the question you actually have — which tool, with which flag,
+still reaches this host — rather than leaving you to work it out. The survey costs up to
+five extra connections per silent open port (`.tls.versions.connections`), so it is
+opt-in: `--tls` records the version the server prefers, `--tls-versions` records the whole
+range it accepts. It is still all reading — no cipher is exercised, no handshake
+completed. Enumerating every cipher suite is `testssl.sh`'s job, and dozens of
+connections per port; scanr stops at the version range and the certificate.
+
+nmap `-sV` does far more with the open ports themselves — and that is where use case 2's
+`--format nmap` sends them.
 
 ## 10. Tuning: the proxy is the limit, not scanr
 
@@ -629,7 +670,7 @@ ones this tool is built around.
 | 6 · HTTP CONNECT | not really; `--proxies` is documented as incomplete | native, honest about the protocol's limit, exact open set |
 | 7 · several proxies | one at a time | chains with the exit hop's fidelity; pools with `via` on every result |
 | 8 · interruption | `--resume` at host granularity from its own output | exact endpoint remainder, piped straight back in, records linked |
-| 9 · what a service says | `-sV`, far more, actively | passive banners by default; one documented ClientHello on request; then `--format nmap` hands the open set to `-sV` |
+| 9 · what a service says | `-sV`, far more, actively | passive banners by default; one documented ClientHello (TLS 1.3 and 1.2) on request; `--tls-versions` names a server only an old client can reach and how to reach it; then `--format nmap` hands the open set to `-sV` |
 | 10 · limits | adaptive timing hides them | measured proxy caps, explicit knobs, and the numbers on the page |
 | 11 · trust | — | credentials never recorded, mode 0600, every claim mapped to a test |
 
