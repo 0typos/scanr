@@ -2143,6 +2143,47 @@ fn the_tls_probe_records_the_leaf_and_verify_accepts_it() {
     assert!(table.contains("220 smtp fixture.."), "{table}");
 }
 
+/// The table cuts banners at 48 characters; `--full` shows them whole, and the
+/// printable-ASCII boundary holds either way.
+#[test]
+fn results_full_shows_the_whole_banner_still_filtered() {
+    let d = tempfile::tempdir().unwrap();
+    let long: &'static [u8] =
+        b"220 a.very.long.greeting.example ESMTP Postfix (Debian/GNU) ready \x1b[2J at your service\r\n";
+    let (_l, greeting) = greeting_port(long);
+    let port = greeting.port().to_string();
+    let out = scanr(
+        d.path(),
+        &[
+            "run",
+            "--no-spans",
+            "--targets",
+            "127.0.0.1",
+            "--ports",
+            &port,
+            "--output-dir",
+            "out",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let rec = scanr::testsupport::find_record(&d.path().join("out")).unwrap();
+    let file = rec.to_str().unwrap();
+
+    let short = stdout(&scanr(d.path(), &["output", "results", file]));
+    assert!(
+        short.contains("220 a.very.long.greeting.example ESMTP Postfix (…"),
+        "{short}"
+    );
+    assert!(!short.contains("at your service"), "{short}");
+
+    let full = stdout(&scanr(d.path(), &["output", "results", "--full", file]));
+    assert!(
+        full.contains("ready .[2J at your service.."),
+        "escape filtered, nothing cut: {full}"
+    );
+    assert!(!full.contains('\x1b') && !full.contains('…'), "{full:?}");
+}
+
 /// Against real OpenSSL: a TLS 1.2 server yields its certificate, a 1.3-only server
 /// answers `protocol_version`. Needs the `openssl` binary; run with `--ignored`.
 #[test]

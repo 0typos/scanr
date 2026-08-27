@@ -4,7 +4,7 @@
 .SH NAME
 scanr\-output\-results \- Every probe result, with spans expanded; filter by host, port, or state
 .SH SYNOPSIS
-\fBscanr\-output\-results\fR [\fB\-\-hosts\fR] [\fB\-\-ports\fR] [\fB\-\-states\fR] [\fB\-\-format\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIFILE\fR> 
+\fBscanr\-output\-results\fR [\fB\-\-hosts\fR] [\fB\-\-ports\fR] [\fB\-\-states\fR] [\fB\-\-format\fR] [\fB\-\-full\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIFILE\fR> 
 .SH DESCRIPTION
 Every probe result, with spans expanded; filter by host, port, or state
 .SH OPTIONS
@@ -20,6 +20,9 @@ Only these states: open, closed, filtered, error (comma\-separated)
 .TP
 \fB\-\-format\fR \fI<FORMAT>\fR [default: table]
 Output shape: table, json, nmap, or list
+.TP
+\fB\-\-full\fR
+Show banners untruncated in the table (still printable ASCII only); the default cuts them at 48 characters so a screen of results stays one line each
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

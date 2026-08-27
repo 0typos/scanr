@@ -27,7 +27,8 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
 
 - `output results` shows the banner and the TLS summary as a trailing column of its
   table, exactly as `run` printed them live; replaying a record no longer hides the
-  evidence it was kept for.
+  evidence it was kept for. `--full` shows banners untruncated (the default cuts at 48
+  characters; the printable-ASCII filter applies either way).
 - `output results --format json` now carries `banner`, `banner_hex`, `banner_bytes` and
   `tls` when the record has them. The reader built for handing results to other tools
   dropped exactly the evidence those tools want; `events` always had it.
