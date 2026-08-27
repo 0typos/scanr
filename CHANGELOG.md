@@ -14,6 +14,8 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
 
 ## [Unreleased]
 
+## [1.0.0-rc.5] - 2026-08-27
+
 ### Changed
 
 - Record filenames are `scan-<name>-<UTC time>-<id>.jsonl.gz`, e.g.
