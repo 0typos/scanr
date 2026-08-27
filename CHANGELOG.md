@@ -23,6 +23,9 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
   to resolve)`, `disabled (hostname targets rejected)`. A pinned mode shows only itself;
   `auto` shows both the request and what it resolved to, so it never leaves the reader
   guessing which resolver a scan used.
+- `RELEASING.md` records the release cadence: batch small non-surface changes into
+  `[Unreleased]` rather than cutting a release candidate for each; tag when a promised
+  surface moves or a batch is worth a build.
 
 ## [1.0.0-rc.3] - 2026-08-27
 

@@ -3,6 +3,16 @@
 Distribution is prebuilt static binaries on a GitHub release. `publish = false`: not on
 crates.io. GitHub (`origin`) is canonical; the forgejo remote is a mirror.
 
+## Cadence
+
+A tag publishes binaries, so it is deliberate. Batch small non-surface changes — `plan`
+and stderr wording, docs, tutorial, perf, internal refactors — into `[Unreleased]` and
+let them accumulate; do not cut a release candidate for each. Tag when a **promised
+surface** moves (the JSONL record, the CLI, the config format — see `docs/stability.md`),
+or when enough has accumulated to be worth a build, and only when asked. rc.2 through rc.4
+all shipped on one day, one change each; rc.4 was a `plan`-rendering polish that did not
+touch a promised surface. Prefer one rc that carries the batch.
+
 ## Checklist
 
 1. **Changelog.** Rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` and add a fresh
