@@ -1,7 +1,9 @@
 # Roadmap to 1.0
 
-Status 2026-08-27. **1.0.0-rc.3 is released** (rc.1 with 0.3.0–0.5.0 on 2026-08-26;
-rc.2 and rc.3 on 2026-08-27; binaries on GitHub). P0–P3 are done. rc.2/rc.3 expand the
+Status 2026-08-27. **1.0.0-rc.4 is released** (rc.1 with 0.3.0–0.5.0 on 2026-08-26;
+rc.2, rc.3 and rc.4 on 2026-08-27; binaries on GitHub). P0–P3 are done. rc.4 changes
+only the human `plan` `dns` row (naming the effective mode's resolver) — a non-promised
+surface, so the soak clock is unchanged from rc.3. rc.2/rc.3 expand the
 TLS probe (D35 amended): the full leaf certificate is read (unverified) into `tls.cert`,
 the whole flight including the chain, TLS 1.3 is read by finishing the key exchange, and
 `--tls-versions` surveys SSLv2 through 1.2 and names a server only an old client can

@@ -14,6 +14,8 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
 
 ## [Unreleased]
 
+## [1.0.0-rc.4] - 2026-08-27
+
 ### Changed
 
 - `plan`'s `dns` row names the effective mode's resolver, not just the mode:

@@ -307,7 +307,7 @@ dependencies = [
 
 [[package]]
 name = "scanr"
-version = "1.0.0-rc.3"
+version = "1.0.0-rc.4"
 dependencies = [
  "clap",
  "clap_complete",
