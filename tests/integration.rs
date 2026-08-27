@@ -2083,7 +2083,10 @@ fn the_tls_probe_records_the_leaf_and_verify_accepts_it() {
     );
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     let shown = stdout(&out);
-    assert!(shown.contains("tls1.2 h2 sha256:"), "{shown}");
+    assert!(
+        shown.contains("tls1.2 h2 cn=fixture.scanr.invalid self-signed sha256:"),
+        "{shown}"
+    );
 
     let events = read_events(d.path());
     let config = events.iter().find(|e| e["type"] == "scan_config").unwrap();
@@ -2139,8 +2142,58 @@ fn the_tls_probe_records_the_leaf_and_verify_accepts_it() {
     // And the human table replays what the live run showed, as a trailing column.
     let t = scanr(d.path(), &["output", "results", rec.to_str().unwrap()]);
     let table = stdout(&t);
-    assert!(table.contains("tls1.2 h2 sha256:"), "{table}");
+    assert!(
+        table.contains("tls1.2 h2 cn=fixture.scanr.invalid self-signed sha256:"),
+        "{table}"
+    );
     assert!(table.contains("220 smtp fixture.."), "{table}");
+}
+
+/// A target given by name keeps its name through local resolution, so the direct path
+/// sends SNI — a virtual-hosting server answers with its certificate rather than an
+/// alert — and what the leaf says lands in the record and on the result line.
+#[test]
+fn a_hostname_target_carries_sni_on_the_direct_path() {
+    use scanr::testsupport::tls::{Behavior, TlsFixture};
+    let d = tempfile::tempdir().unwrap();
+    let fx = TlsFixture::start(Behavior::Tls12 { alpn: Some("h2") });
+    let port = fx.addr().port().to_string();
+    let out = scanr(
+        d.path(),
+        &[
+            "run",
+            "--tls",
+            "--no-spans",
+            "--targets",
+            "localhost",
+            "--ports",
+            &port,
+            "--output-dir",
+            "out",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let events = read_events(d.path());
+    let row = events
+        .iter()
+        .find(|e| e["type"] == "probe_result" && e["state"] == "open")
+        .expect("the fixture port is open");
+    assert_eq!(row["tls"]["sni"], true, "{row}");
+    let cert = &row["tls"]["cert"];
+    assert_eq!(cert["subject"], "CN=fixture.scanr.invalid", "{row}");
+    assert_eq!(cert["subject_cn"], "fixture.scanr.invalid");
+    assert_eq!(cert["issuer"], "CN=fixture.scanr.invalid");
+    assert_eq!(cert["self_signed"], true);
+    assert_eq!(cert["validity"], "valid");
+    assert_eq!(cert["not_after"], "2036-08-22T22:35:12Z");
+    assert_eq!(cert["key"], "ec-p256");
+    assert_eq!(cert["san_count"], 0);
+    assert!(row["tls"]["cert_error"].is_null(), "{row}");
+    let shown = stdout(&out);
+    assert!(
+        shown.contains("tls1.2 h2 cn=fixture.scanr.invalid self-signed sha256:"),
+        "{shown}"
+    );
 }
 
 /// The table cuts banners at 48 characters; `--full` shows them whole, and the

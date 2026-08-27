@@ -25,7 +25,7 @@ impl DirectTransport {
 impl Transport for DirectTransport {
     fn probe(&self, dest: &Destination, timing: &Timing) -> ProbeOutcome {
         let addr = match dest {
-            Destination::Addr(a) => *a,
+            Destination::Addr(a) | Destination::Resolved(a, _) => *a,
             // The planner rejects this combination, so reaching it is a bug rather than
             // a user error — say so plainly instead of guessing.
             Destination::Host(h, _) => {
@@ -58,13 +58,13 @@ impl Transport for DirectTransport {
                     .and_then(|o| super::read_banner(&stream, o, elapsed));
                 // TLS servers never speak first, so a silent open port is exactly where
                 // a ClientHello can learn something. Same connection; nothing is sent
-                // to a service that already greeted. A locally resolved name has been
-                // reduced to its address by here, so no SNI travels on the direct path.
+                // to a service that already greeted. A locally resolved name travels
+                // beside its address, so SNI can name the target here too.
                 let tls = timing
                     .tls
                     .as_ref()
                     .filter(|_| banner.is_none())
-                    .map(|o| crate::tls::probe(&stream, o, elapsed, None));
+                    .map(|o| crate::tls::probe(&stream, o, elapsed, dest.sni()));
                 close_without_time_wait(&stream);
                 ProbeOutcome::open(phases, Source::LocalStack)
                     .with_banner(banner)

@@ -30,6 +30,15 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
   evidence it was kept for. `--full`, on `run` and on `output results`, shows banners
   untruncated (the default cuts at 48 characters; the printable-ASCII filter applies
   either way).
+- The TLS probe reads the leaf certificate. `tls.cert` carries subject, issuer,
+  alternative names, validity at probe time (`valid`, `expired`, `not_yet_valid`),
+  whether issuer equals subject (`self_signed`) and the key type; result lines and
+  `output results` say `cn=host self-signed expired` — for records written before this
+  too, from the DER they already hold. Read, never verified; bounded and fuzzed
+  (`x509_leaf`).
+- SNI travels on the direct path when the target was given as a name: a locally resolved
+  address now keeps its hostname, so a virtual-hosting server answers with its certificate
+  instead of an alert. A real 443 answered `internal_error` to the nameless hello.
 - `output results --format json` now carries `banner`, `banner_hex`, `banner_bytes` and
   `tls` when the record has them. The reader built for handing results to other tools
   dropped exactly the evidence those tools want; `events` always had it.

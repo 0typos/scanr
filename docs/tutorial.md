@@ -548,18 +548,20 @@ record states what was sent either way:
 $ scanr run --targets 127.0.0.1 --ports 25025,28080,28443 --tls --output-dir results-tls
 127.0.0.1:25025/tcp open 0.1ms 220 mail.lab.internal ESMTP ready..
 127.0.0.1:28080/tcp open 0.1ms tls no reply
-127.0.0.1:28443/tcp open 0.1ms tls1.2 h2 sha256:3f87a1b8
+127.0.0.1:28443/tcp open 0.1ms tls1.2 h2 cn=lab.internal self-signed sha256:7dc3c9a4
 
 $ scanr output results --format json results-tls/scan-*.jsonl.gz \
-    | jq -c 'select(.tls.negotiated != null) | {port, alpn: .tls.alpn, cipher: .tls.cipher_name, sha256: .tls.leaf_sha256[0:16]}'
+    | jq -c 'select(.tls.negotiated != null) | {port, cn: .tls.cert.subject_cn, expires: .tls.cert.not_after, alpn: .tls.alpn, cipher: .tls.cipher_name}'
 {"port":28443,"alpn":"h2","cipher":"ECDHE-ECDSA-AES256-GCM-SHA384","sha256":"3f87a1b8d012cb38"}
 ```
 
 Three ports, three different answers: a greeting (never probed — a service that spoke
 first is not TLS), a silent port that closed on the hello (`tls no reply`), and a TLS
-server that returned its certificate, cipher and ALPN. The record holds the leaf
-certificate as base64 DER for `openssl x509` or `tlsx` to parse; scanr does not parse
-x509 itself, for the same reason it does not fingerprint services. A TLS 1.3-only
+server that returned its certificate, cipher and ALPN. The record holds what
+scanr read from the leaf under `tls.cert` — subject, issuer, alternative names, validity
+window, key type — and the DER itself for `openssl x509` or `tlsx`. Read, never
+verified: the line says `self-signed`, not `untrusted`, because trust is a policy
+scanr does not have. A TLS 1.3-only
 server answers with a `protocol_version` alert, recorded as such.
 
 The scan's config event says `"tls": {"enabled": true, "offered": "1.2", "sent_bytes": 163}`;

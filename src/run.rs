@@ -396,6 +396,7 @@ fn spawn_workers(
         // was one allocation and one `fmt` per result on the hot path, for a string that
         // is the same for every port of the target.
         names: plan.target_names().into(),
+        sni_names: sni_names(plan),
         transport: transport.clone(),
         permutation: Permutation::new(total.max(1), plan.seed),
         counter: counter.clone(),
@@ -829,6 +830,8 @@ impl Drop for Batch<'_> {
 struct Shared {
     plan: Arc<ScanPlan>,
     names: Arc<[Arc<str>]>,
+    /// The name each locally resolved address came from, for SNI on the direct path.
+    sni_names: std::collections::HashMap<std::net::IpAddr, Arc<str>>,
     transport: Arc<dyn Transport>,
     permutation: Permutation,
     counter: Arc<WorkCounter>,
@@ -837,10 +840,25 @@ struct Shared {
 
 type Workers = (Vec<std::thread::JoinHandle<()>>, Receiver<Vec<Completed>>);
 
+/// Which hostname each locally resolved address came from, so the direct path can send
+/// SNI; a proxy with remote DNS is handed the name itself. The first name wins when two
+/// share an address.
+fn sni_names(plan: &ScanPlan) -> std::collections::HashMap<std::net::IpAddr, Arc<str>> {
+    let mut names = std::collections::HashMap::new();
+    for host in &plan.resolved_hosts {
+        let name: Arc<str> = host.hostname.as_str().into();
+        for a in &host.addresses {
+            names.entry(*a).or_insert_with(|| name.clone());
+        }
+    }
+    names
+}
+
 fn worker(shared: &Shared, cancel: &Cancel, tx: &std::sync::mpsc::SyncSender<Vec<Completed>>) {
     let Shared {
         plan,
         names,
+        sni_names,
         transport,
         permutation,
         counter,
@@ -860,7 +878,14 @@ fn worker(shared: &Shared, cancel: &Cancel, tx: &std::sync::mpsc::SyncSender<Vec
         let permuted = permutation.apply(index);
         let (target, port) = plan.probe_at(permuted);
         let (dest, resolved) = match target {
-            Target::Addr(ip) => (Destination::Addr(SocketAddr::new(*ip, port)), Some(*ip)),
+            Target::Addr(ip) => {
+                let addr = SocketAddr::new(*ip, port);
+                let dest = match sni_names.get(ip) {
+                    Some(name) => Destination::Resolved(addr, name.clone()),
+                    None => Destination::Addr(addr),
+                };
+                (dest, Some(*ip))
+            }
             Target::Host(h) => (Destination::Host(h.clone(), port), None),
         };
 
@@ -1756,10 +1781,7 @@ mod tests {
 
     impl Transport for FlakyTransport {
         fn probe(&self, dest: &Destination, _timing: &Timing) -> ProbeOutcome {
-            let port = match dest {
-                Destination::Addr(a) => a.port(),
-                Destination::Host(_, p) => *p,
-            };
+            let port = dest.port();
             let mut seen = self.seen.lock().unwrap();
             let n = seen.entry(port).or_insert(0);
             *n += 1;

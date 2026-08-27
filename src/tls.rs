@@ -4,8 +4,9 @@
 //! first — a fixed TLS 1.2 ClientHello is written on the same connection and the
 //! server's first flight is read: ServerHello (version, cipher, ALPN), Certificate (the
 //! leaf, hashed and kept), or an Alert. Then the socket is reset as every probe socket
-//! is. No key exchange, no verification, no x509 parsing: the leaf DER is evidence for
-//! `tlsx`, `openssl x509` and `nmap -sV` to interpret.
+//! is. No key exchange, no verification. The leaf's names, validity and key are read by
+//! [`crate::x509`] — bounded and unverified — and the DER itself is kept for `tlsx`,
+//! `openssl x509` and `nmap -sV`.
 //!
 //! TLS 1.2 only, on purpose. In 1.3 the Certificate and the ALPN answer are encrypted,
 //! and reading them means a full handshake — a real TLS stack, which means C or assembly
@@ -131,6 +132,10 @@ pub struct TlsObservation {
     pub chain_len: Option<u32>,
     /// Why the flight ended before a Certificate or Alert, if it did.
     pub error: Option<String>,
+    /// What the leaf says, when it parsed. Read, not verified: see [`crate::x509`].
+    pub cert: Option<crate::x509::Leaf>,
+    /// Why the leaf did not parse, when it did not.
+    pub cert_error: Option<&'static str>,
 }
 
 /// Send the ClientHello on an open connection and read the reply.
@@ -161,6 +166,10 @@ pub fn probe(
         return obs;
     }
     read_server_flight(&mut &*stream, Some(deadline), &mut obs);
+    if let Some(c) = &mut obs.cert {
+        let now = (crate::timefmt::now_epoch_ms() / 1000) as i64;
+        c.validity = Some(c.validity_at(now));
+    }
     obs
 }
 
@@ -409,6 +418,10 @@ fn parse_certificate(m: &[u8], obs: &mut TlsObservation) -> Result<(), String> {
         if count == 0 {
             obs.leaf_sha256 = Some(sha256(der));
             obs.leaf_len = Some(der.len() as u32);
+            match crate::x509::parse(der) {
+                Ok(c) => obs.cert = Some(c),
+                Err(e) => obs.cert_error = Some(e),
+            }
             if der.len() <= MAX_LEAF_DER {
                 obs.leaf_der = Some(der.to_vec());
             }
@@ -487,7 +500,11 @@ impl TlsObservation {
             "leaf_sha256": self.leaf_sha256.map(|h| hex(&h)),
             "leaf_len": self.leaf_len,
             "chain_len": self.chain_len,
+            "cert": self.cert.as_ref().map(|c| c.to_json()),
         });
+        if let Some(e) = self.cert_error {
+            v["cert_error"] = json!(e);
+        }
         if let Some(der) = &self.leaf_der {
             v["leaf_der"] = json!(base64(der));
         }
@@ -514,6 +531,13 @@ impl TlsObservation {
         if let Some(a) = &self.alpn {
             s.push(' ');
             s.push_str(a);
+        }
+        if let Some(c) = &self.cert {
+            let words = c.summary();
+            if !words.is_empty() {
+                s.push(' ');
+                s.push_str(&words);
+            }
         }
         if let Some(h) = &self.leaf_sha256 {
             s.push_str(" sha256:");
@@ -856,16 +880,28 @@ mod fixture_tests {
         assert_eq!(t.leaf_der.as_deref(), Some(FIXTURE_CERT_DER));
         assert_eq!(t.leaf_sha256, Some(sha256(FIXTURE_CERT_DER)));
         assert_eq!(t.chain_len, Some(2));
-        assert!(
-            !t.sni,
-            "no name survives local resolution on the direct path"
-        );
+        assert!(!t.sni, "an address target carries no name");
         assert!(t.sent_bytes > 100);
         assert!(
-            t.display().starts_with("tls1.2 h2 sha256:"),
+            t.display()
+                .starts_with("tls1.2 h2 cn=fixture.scanr.invalid self-signed sha256:"),
             "{}",
             t.display()
         );
+    }
+
+    #[test]
+    fn a_resolved_name_travels_as_sni_on_the_direct_path() {
+        let fx = TlsFixture::start(Behavior::Tls12 { alpn: Some("h2") });
+        let dest = Destination::Resolved(fx.addr(), "fixture.scanr.invalid".into());
+        let o = DirectTransport::new("d".into()).probe(&dest, &timing(true));
+        let t = o.tls.expect("the probe ran");
+        assert!(t.sni, "the name the planner resolved is sent as SNI");
+        let cert = t.cert.expect("the fixture leaf parses");
+        assert_eq!(cert.subject_cn.as_deref(), Some("fixture.scanr.invalid"));
+        assert!(cert.self_signed);
+        assert_eq!(cert.validity, Some(crate::x509::Validity::Valid));
+        assert_eq!(t.cert_error, None);
     }
 
     #[test]

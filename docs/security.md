@@ -90,8 +90,8 @@ connection the scan already made. It addresses the service rather than observing
 which is why it is **off by default** and why the record states `tls.sent_bytes` — `0`
 when it never ran.
 
-What is sent, byte for byte (163 bytes; an SNI extension is added when the target is a
-hostname the transport resolves):
+What is sent, byte for byte (163 bytes; an SNI extension is added when the target was
+given as a name, whether scanr resolved it or the proxy will):
 
 ```
 160301009e0100009a03037363616e7220746c732070726f62653a206e6f7420
@@ -111,13 +111,20 @@ no bytes after the flight. A test holds this document to the bytes the code send
 What comes back is peer-chosen and treated as such: record and message lengths are
 bounded (64 KiB flight, 8 KiB embedded leaf), the read is deadline-driven, the ALPN
 string is filtered to printable ASCII, and the leaf certificate is stored as base64 DER
-for other tools to parse — scanr does not parse x509.
+for other tools to verify.
+
+scanr reads the leaf but verifies nothing. `src/x509.rs` lifts subject, issuer,
+alternative names, validity window and key type with a DER walker whose nesting is
+fixed by the code rather than the input, every length checked against the bytes
+present, strings reduced to printable ASCII and capped at 253 bytes, at most 64
+alternative names kept (all counted). `self_signed` means issuer equals subject byte for
+byte — no signature is checked. Fuzzed: `x509_leaf`.
 
 ## Untrusted input
 
 Bytes from an uncontrolled proxy are parsed, including a peer-supplied length in the
 `ATYP_DOMAIN` bound address of a CONNECT reply and the length of an HTTP CONNECT
-response, and every length in a TLS server flight. Seven fuzz targets under
+response, and every length in a TLS server flight and its certificate. Eight fuzz targets under
 `fuzz/fuzz_targets/`, seeds committed and replayed in CI:
 
 | target | covers |
@@ -126,6 +133,7 @@ response, and every length in a TLS server flight. Seven fuzz targets under
 | `socks5_reply` | CONNECT reply parser, including the address length |
 | `http_connect_reply` | HTTP CONNECT response parser: status line, header block bound, printable filtering |
 | `tls_reply` | TLS server flight: record, handshake and certificate lengths; ALPN filtering; leaf bound |
+| `x509_leaf` | the leaf certificate: DER tags and lengths, names, times, alternative names; strings printable; the same answer twice |
 | `config` | loading, validation, the caret renderer's byte-offset slicing |
 | `specs` | target, port and duration parsing |
 | `record` | truncated or corrupted records |

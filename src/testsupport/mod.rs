@@ -85,11 +85,10 @@ where
 }
 
 /// An address on loopback with nothing listening. Probes report `closed` (RST).
+/// Port 1 on loopback: nothing listens there, and unlike a bound-then-released
+/// ephemeral port, a parallel test cannot pick it up between the release and the probe.
 pub fn closed_port() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-    let addr = listener.local_addr().expect("local addr");
-    drop(listener);
-    addr
+    SocketAddr::from(([127, 0, 0, 1], 1))
 }
 
 /// Locate the finalized scan record in an output directory.

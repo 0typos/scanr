@@ -61,3 +61,10 @@ path = "fuzz_targets/tls_reply.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "x509_leaf"
+path = "fuzz_targets/x509_leaf.rs"
+test = false
+doc = false
+bench = false

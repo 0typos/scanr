@@ -45,7 +45,7 @@ pub fn build_connect_request(
 /// `host:port` as the request line and `Host` header want it; IPv6 literals bracketed.
 fn authority(dest: &Destination) -> String {
     match dest {
-        Destination::Addr(a) => match a.ip() {
+        Destination::Addr(a) | Destination::Resolved(a, _) => match a.ip() {
             IpAddr::V4(v4) => format!("{v4}:{}", a.port()),
             IpAddr::V6(v6) => format!("[{v6}]:{}", a.port()),
         },
@@ -199,6 +199,33 @@ pub fn classify(r: &Response, authenticating: bool, phases: Phases) -> ProbeOutc
 
 /// RFC 4648 §4, unpadded input of any length. Hand-rolled: twenty lines against a
 /// dependency for one header.
+/// Decode standard base64 (the record's `leaf_der`); `None` on any byte outside the
+/// alphabet. Padding ends the input.
+pub fn unbase64(input: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut acc = 0u32;
+    let mut bits = 0u32;
+    for b in input.bytes() {
+        let v = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => break,
+            _ => return None,
+        };
+        acc = (acc << 6) | u32::from(v);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
+}
+
 pub fn base64(input: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
@@ -269,6 +296,15 @@ mod tests {
             "{s}"
         );
         assert!(s.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn unbase64_inverts_base64_and_rejects_strangers() {
+        for input in [&b""[..], b"f", b"fo", b"foo", b"foob", b"fooba", b"foobar"] {
+            assert_eq!(unbase64(&base64(input)).as_deref(), Some(input));
+        }
+        assert_eq!(unbase64("Zm9v YmFy"), None);
+        assert_eq!(unbase64("Zm9v\n"), None);
     }
 
     #[test]

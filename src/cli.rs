@@ -1496,6 +1496,22 @@ fn tls_summary(t: &serde_json::Value) -> String {
                         .collect::<String>(),
                 );
             }
+            // Records written before the reader existed carry the DER but no `cert`.
+            let cert = match t.get("cert") {
+                Some(c) if c.is_object() => Some(c.clone()),
+                _ => t["leaf_der"]
+                    .as_str()
+                    .and_then(crate::transport::http::unbase64)
+                    .and_then(|der| crate::x509::parse(&der).ok())
+                    .map(|leaf| leaf.to_json()),
+            };
+            if let Some(c) = cert {
+                let words = crate::x509::summary_json(&c);
+                if !words.is_empty() {
+                    s.push(' ');
+                    s.push_str(&words);
+                }
+            }
             if let Some(h) = t["leaf_sha256"].as_str() {
                 s.push_str(" sha256:");
                 s.push_str(&h[..h.len().min(8)]);

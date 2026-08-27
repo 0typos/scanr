@@ -233,7 +233,7 @@ jobs:
       # That has happened twice.
       - name: Replay seeds
         run: |
-          for target in socks5_reply socks5_handshake http_connect_reply tls_reply config specs record; do
+          for target in socks5_reply socks5_handshake http_connect_reply tls_reply x509_leaf config specs record; do
             echo "--- $target ---"
             for seed in fuzz/seeds/"$target"/*; do
               cargo fuzz run "$target" "$seed"

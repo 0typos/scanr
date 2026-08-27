@@ -1,2 +1,2 @@
-127.0.0.1:37889/tcp   open      local_stack                   tls1.2 h2 sha256:3f87a1b8
+127.0.0.1:37889/tcp   open      local_stack                   tls1.2 h2 cn=fixture.scanr.invalid self-signed sha256:3f87a1b8
 127.0.0.1:40813/tcp   open      local_stack                   220 corpus.example ESMTP..
