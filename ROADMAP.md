@@ -1,16 +1,19 @@
 # Roadmap to 1.0
 
-Status 2026-08-27. **1.0.0-rc.2 is released** (rc.1 with 0.3.0–0.5.0 on 2026-08-26;
-rc.2 on 2026-08-27; binaries on GitHub). P0–P3 are done. rc.2 expands the TLS probe
-(D35 amended): the full leaf certificate is read (unverified) into `tls.cert`, the whole
-flight including the chain, TLS 1.3 is read by finishing the key exchange, and
+Status 2026-08-27. **1.0.0-rc.3 is released** (rc.1 with 0.3.0–0.5.0 on 2026-08-26;
+rc.2 and rc.3 on 2026-08-27; binaries on GitHub). P0–P3 are done. rc.2/rc.3 expand the
+TLS probe (D35 amended): the full leaf certificate is read (unverified) into `tls.cert`,
+the whole flight including the chain, TLS 1.3 is read by finishing the key exchange, and
 `--tls-versions` surveys SSLv2 through 1.2 and names a server only an old client can
-reach. This is new promised surface — new record fields, the `--tls-versions` /`--full`
-flags, the `tls_versions` config key — all additive, so every earlier record still reads
-back; but new surface, so shipping it in rc.2 restarts the soak. P4 runs from 2026-08-27
-and ends no earlier than 2026-09-24 or after three engagements, whichever is later. The
-rc.1-only additions (D37 batched collector, D38 deferred, the timeout-bound plan
-projection, `results --format json` evidence fields) carried no surface change.
+reach. rc.3 also records the hello's whole offer in `scan_config.tls` — `offered_ciphers`,
+`offered_alpn`, `offered_groups`, `offered_sigalgs`, and per-survey-version suites in
+`version_hellos` (reshaped from bare sizes to an object). This is new promised surface —
+new record fields, the `--tls-versions` / `--full` flags, the `tls_versions` config key
+— every earlier record still reads back, but the surface moved, so shipping it restarts
+the soak. P4 runs from 2026-08-27 and ends no earlier than 2026-09-24 or after three
+engagements, whichever is later. The rc.1-only additions (D37 batched collector, D38
+deferred, the timeout-bound plan projection, `results --format json` evidence fields)
+carried no surface change.
 
 ## What 1.0 promises
 

@@ -14,6 +14,8 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
 
 ## [Unreleased]
 
+## [1.0.0-rc.3] - 2026-08-27
+
 ### Added
 
 - `scan_config.tls` now records the hello's offer, not just the versions:
