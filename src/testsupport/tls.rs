@@ -44,9 +44,13 @@ pub const FIXTURE_CERT_DER: &[u8] = &[
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Behavior {
-    /// A TLS 1.2 server: ServerHello (cipher `0xc02f`, the given ALPN), Certificate
-    /// (the fixture leaf, then a copy as issuer), ServerHelloDone.
+    /// A TLS 1.2 server: ServerHello (cipher `0xc02f`, the given ALPN, secure
+    /// renegotiation), Certificate (the fixture leaf, then a copy as issuer), an x25519
+    /// ServerKeyExchange signed `ecdsa_secp256r1_sha256`, ServerHelloDone.
     Tls12 { alpn: Option<&'static str> },
+    /// A server of 2005: TLS 1.0, `AES128-SHA`, no extensions at all, and it stops
+    /// talking as soon as it has sent its certificate.
+    Tls10,
     /// A 1.3-only server, which answers a 1.2 offer with `protocol_version`.
     Tls13Only,
     /// Any alert.
@@ -117,7 +121,7 @@ pub fn tls12_flight(alpn: Option<&str>) -> Vec<u8> {
     hello.push(0);
     hello.extend_from_slice(&[0xc0, 0x2f]);
     hello.push(0);
-    let mut ext = Vec::new();
+    let mut ext = vec![0xff, 0x01, 0x00, 0x01, 0x00];
     if let Some(a) = alpn {
         let mut list = vec![0, (a.len() + 1) as u8, a.len() as u8];
         list.extend_from_slice(a.as_bytes());
@@ -136,13 +140,44 @@ pub fn tls12_flight(alpn: Option<&str>) -> Vec<u8> {
     let mut cert_body = (certs.len() as u32).to_be_bytes()[1..].to_vec();
     cert_body.extend_from_slice(&certs);
 
+    let mut kx = vec![0x03, 0x00, 0x1d, 32];
+    kx.extend_from_slice(&[0x11u8; 32]);
+    kx.extend_from_slice(&[0x04, 0x03, 0x00, 0x40]);
+    kx.extend_from_slice(&[0x22u8; 64]);
+
     let mut hs = Vec::new();
-    for (kind, body) in [(2u8, hello), (11u8, cert_body), (14u8, Vec::new())] {
+    for (kind, body) in [
+        (2u8, hello),
+        (11u8, cert_body),
+        (12u8, kx),
+        (14u8, Vec::new()),
+    ] {
         hs.push(kind);
         hs.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
         hs.extend_from_slice(&body);
     }
     record(0x16, &hs)
+}
+
+/// A TLS 1.0 first flight with no extensions and no ServerHelloDone, in 1.0 records.
+pub fn tls10_flight() -> Vec<u8> {
+    let mut hello = vec![0x03, 0x01];
+    hello.extend_from_slice(&[0x42u8; 32]);
+    hello.push(0);
+    hello.extend_from_slice(&[0x00, 0x2f, 0x00]);
+    let mut cert_body = ((FIXTURE_CERT_DER.len() + 3) as u32).to_be_bytes()[1..].to_vec();
+    cert_body.extend_from_slice(&(FIXTURE_CERT_DER.len() as u32).to_be_bytes()[1..]);
+    cert_body.extend_from_slice(FIXTURE_CERT_DER);
+    let mut hs = Vec::new();
+    for (kind, body) in [(2u8, hello), (11u8, cert_body)] {
+        hs.push(kind);
+        hs.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+        hs.extend_from_slice(&body);
+    }
+    let mut r = vec![0x16, 0x03, 0x01];
+    r.extend_from_slice(&(hs.len() as u16).to_be_bytes());
+    r.extend_from_slice(&hs);
+    r
 }
 
 fn record(kind: u8, payload: &[u8]) -> Vec<u8> {
@@ -168,6 +203,7 @@ fn handle(mut s: TcpStream, behavior: Behavior, shutdown: Arc<AtomicBool>) -> st
     read_hello(&mut s)?;
     match behavior {
         Behavior::Tls12 { alpn } => s.write_all(&tls12_flight(alpn)),
+        Behavior::Tls10 => s.write_all(&tls10_flight()),
         Behavior::Tls13Only => s.write_all(&record(0x15, &[2, 70])),
         Behavior::Alert { level, description } => s.write_all(&record(0x15, &[level, description])),
         Behavior::Greets => unreachable!("handled above"),

@@ -105,16 +105,18 @@ c027c00ac009c014c013009d009c003d003c0035002f01000049000a00080006
 Client random is a fixed string, cipher suites are twenty common TLS 1.2 suites, ALPN
 offers `h2` and `http/1.1`, and there is no `supported_versions` extension, so nothing
 newer than 1.2 is ever negotiated. The server's first flight is read — ServerHello,
-Certificate, or an Alert — and the socket is reset. No key exchange, no verification,
-no bytes after the flight. A test holds this document to the bytes the code sends.
+Certificate, ServerKeyExchange, ServerHelloDone, or an Alert — and the socket is reset.
+No key exchange, no verification, no bytes after the flight. A test holds this document
+to the bytes the code sends.
 
 What comes back is peer-chosen and treated as such: record and message lengths are
 bounded (64 KiB flight, 8 KiB embedded leaf), the read is deadline-driven, the ALPN
 string is filtered to printable ASCII, and the leaf certificate is stored as base64 DER
 for other tools to verify.
 
-scanr reads the leaf but verifies nothing. `src/x509.rs` lifts subject, issuer,
-alternative names, validity window and key type with a DER walker whose nesting is
+scanr reads the leaf — and the certificates after it — but verifies nothing.
+`src/x509.rs` lifts subject, issuer, alternative names, validity window, serial,
+signature and key algorithms with a DER walker whose nesting is
 fixed by the code rather than the input, every length checked against the bytes
 present, strings reduced to printable ASCII and capped at 253 bytes, at most 64
 alternative names kept (all counted). `self_signed` means issuer equals subject byte for

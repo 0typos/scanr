@@ -1487,7 +1487,7 @@ fn tls_summary(t: &serde_json::Value) -> String {
     }
     match t["negotiated"].as_str() {
         Some(v) => {
-            let mut s = format!("tls{v}");
+            let mut s = crate::tls::protocol_label(v);
             if let Some(a) = t["alpn"].as_str() {
                 s.push(' ');
                 s.push_str(

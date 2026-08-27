@@ -39,13 +39,19 @@ const RECORD_ALERT: u8 = 0x15;
 const HS_CLIENT_HELLO: u8 = 1;
 const HS_SERVER_HELLO: u8 = 2;
 const HS_CERTIFICATE: u8 = 11;
+const HS_SERVER_KEY_EXCHANGE: u8 = 12;
 const HS_SERVER_HELLO_DONE: u8 = 14;
+/// Certificates after the leaf whose fields are kept; the rest are counted.
+pub const MAX_CHAIN_KEPT: usize = 8;
+/// Server extensions recorded; nothing real sends more.
+const MAX_SERVER_EXTENSIONS: usize = 32;
 const EXT_SERVER_NAME: u16 = 0x0000;
 const EXT_SUPPORTED_GROUPS: u16 = 0x000a;
 const EXT_EC_POINT_FORMATS: u16 = 0x000b;
 const EXT_SIGNATURE_ALGORITHMS: u16 = 0x000d;
 const EXT_ALPN: u16 = 0x0010;
 const EXT_EXTENDED_MASTER_SECRET: u16 = 0x0017;
+const EXT_SESSION_TICKET: u16 = 0x0023;
 const EXT_RENEGOTIATION_INFO: u16 = 0xff01;
 
 /// The cipher suites offered, strongest first. Wide enough that a server with any
@@ -136,6 +142,45 @@ pub struct TlsObservation {
     pub cert: Option<crate::x509::Leaf>,
     /// Why the leaf did not parse, when it did not.
     pub cert_error: Option<&'static str>,
+    /// The certificates after the leaf, up to [`MAX_CHAIN_KEPT`].
+    pub chain: Vec<ChainCert>,
+    /// The ServerHello's compression method; anything but 0 is a finding.
+    pub compression: Option<u8>,
+    /// Extension types the ServerHello carried, in order.
+    pub server_extensions: Vec<u16>,
+    /// The ECDHE group from ServerKeyExchange (TLS ≤ 1.2) or the key share (1.3).
+    pub kx_group: Option<u16>,
+    /// The signature scheme the server signed its key exchange with (TLS 1.2 and 1.3).
+    pub sig_scheme: Option<u16>,
+}
+
+/// One certificate after the leaf: hashed always, read when it parses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainCert {
+    pub sha256: [u8; 32],
+    pub len: u32,
+    pub cert: Option<crate::x509::Leaf>,
+    pub cert_error: Option<&'static str>,
+}
+
+impl ChainCert {
+    fn to_json(&self) -> serde_json::Value {
+        use serde_json::json;
+        let mut v = json!({ "sha256": hex(&self.sha256), "len": self.len });
+        match (&self.cert, self.cert_error) {
+            (Some(c), _) => {
+                v["subject"] = json!(c.subject);
+                v["issuer"] = json!(c.issuer);
+                v["self_signed"] = json!(c.self_signed);
+                v["not_after"] = json!(crate::x509::rfc3339(c.not_after));
+                v["key"] = json!(c.key);
+                v["sig_alg"] = json!(c.sig_alg);
+            }
+            (None, Some(e)) => v["cert_error"] = json!(e),
+            (None, None) => {}
+        }
+        v
+    }
 }
 
 /// Send the ClientHello on an open connection and read the reply.
@@ -241,7 +286,8 @@ fn push_extension(out: &mut Vec<u8>, kind: u16, body: &[u8]) {
     out.extend_from_slice(body);
 }
 
-/// Read records until a Certificate, an Alert, ServerHelloDone, a bound, or an error.
+/// Read records until ServerHelloDone, an Alert, a bound, or an error. Once the leaf is
+/// in hand the flight ending early is not an error: what was read stands.
 ///
 /// Generic over the reader so the fuzz harness can drive it. Fills `obs` as it goes, so
 /// a flight that stops halfway still leaves what was learned.
@@ -251,6 +297,9 @@ pub fn read_server_flight<R: Read>(s: &mut R, deadline: Option<Instant>, obs: &m
     loop {
         let mut head = [0u8; 5];
         if let Err(e) = read_exact(s, &mut head, deadline) {
+            if obs.leaf_sha256.is_some() {
+                return;
+            }
             obs.error = Some(if total == 0 && is_timeout(&e) {
                 "no reply within the budget".into()
             } else {
@@ -279,6 +328,9 @@ pub fn read_server_flight<R: Read>(s: &mut R, deadline: Option<Instant>, obs: &m
         }
         let mut body = vec![0u8; len];
         if let Err(e) = read_exact(s, &mut body, deadline) {
+            if obs.leaf_sha256.is_some() {
+                return;
+            }
             obs.error = Some(format!("reading TLS record body: {e}"));
             obs.read_bytes = total as u32;
             return;
@@ -341,10 +393,10 @@ fn drain_handshake(buf: &mut Vec<u8>, obs: &mut TlsObservation) -> Flight {
             HS_CERTIFICATE => {
                 if let Err(e) = parse_certificate(&msg, obs) {
                     obs.error = Some(e);
+                    return Flight::Done;
                 }
-                // The leaf is what the probe is for; nothing after it is read.
-                return Flight::Done;
             }
+            HS_SERVER_KEY_EXCHANGE => parse_server_key_exchange(&msg, obs),
             HS_SERVER_HELLO_DONE => return Flight::Done,
             _ => {}
         }
@@ -366,6 +418,7 @@ fn parse_server_hello(m: &[u8], obs: &mut TlsObservation) -> Result<(), String> 
     let cipher = m.get(at..at + 2).ok_or("ServerHello truncated at cipher")?;
     obs.negotiated = Some(u16::from_be_bytes([m[0], m[1]]));
     obs.cipher = Some(u16::from_be_bytes([cipher[0], cipher[1]]));
+    obs.compression = m.get(at + 2).copied();
     let mut p = at + 3;
     if p + 2 > m.len() {
         return Ok(()); // no extensions
@@ -378,6 +431,9 @@ fn parse_server_hello(m: &[u8], obs: &mut TlsObservation) -> Result<(), String> 
         let len = u16::from_be_bytes([m[p + 2], m[p + 3]]) as usize;
         p += 4;
         let body = m.get(p..(p + len).min(end)).unwrap_or(&[]);
+        if obs.server_extensions.len() < MAX_SERVER_EXTENSIONS {
+            obs.server_extensions.push(kind);
+        }
         if kind == EXT_ALPN && body.len() >= 3 {
             let n = body[2] as usize;
             if let Some(proto) = body.get(3..3 + n) {
@@ -425,6 +481,17 @@ fn parse_certificate(m: &[u8], obs: &mut TlsObservation) -> Result<(), String> {
             if der.len() <= MAX_LEAF_DER {
                 obs.leaf_der = Some(der.to_vec());
             }
+        } else if obs.chain.len() < MAX_CHAIN_KEPT {
+            let (cert, cert_error) = match crate::x509::parse(der) {
+                Ok(c) => (Some(c), None),
+                Err(e) => (None, Some(e)),
+            };
+            obs.chain.push(ChainCert {
+                sha256: sha256(der),
+                len: der.len() as u32,
+                cert,
+                cert_error,
+            });
         }
         count += 1;
         p += len;
@@ -434,6 +501,57 @@ fn parse_certificate(m: &[u8], obs: &mut TlsObservation) -> Result<(), String> {
         return Err("Certificate message carried no certificate".into());
     }
     Ok(())
+}
+
+/// ECDHE ServerKeyExchange: `curve_type(1)=3 named_curve(2) point<1..> [scheme(2)]
+/// signature<2..>`. Only the group and, in 1.2, the scheme are wanted; static-DH and
+/// PSK shapes are left alone.
+fn parse_server_key_exchange(m: &[u8], obs: &mut TlsObservation) {
+    let ecdhe = matches!(obs.cipher, Some(c) if (0xc000..=0xc0ff).contains(&c) || (0xcc00..=0xccff).contains(&c));
+    if !ecdhe || m.len() < 4 || m[0] != 3 {
+        return;
+    }
+    obs.kx_group = Some(u16::from_be_bytes([m[1], m[2]]));
+    let at = 4 + m[3] as usize;
+    if let Some(s) = m.get(at..at + 2).filter(|_| obs.negotiated == Some(0x0303)) {
+        obs.sig_scheme = Some(u16::from_be_bytes([s[0], s[1]]));
+    }
+}
+
+pub fn group_name(id: u16) -> String {
+    match id {
+        0x0017 => "secp256r1".into(),
+        0x0018 => "secp384r1".into(),
+        0x0019 => "secp521r1".into(),
+        0x001d => "x25519".into(),
+        0x001e => "x448".into(),
+        0x0100 => "ffdhe2048".into(),
+        0x0101 => "ffdhe3072".into(),
+        0x0102 => "ffdhe4096".into(),
+        other => format!("0x{other:04x}"),
+    }
+}
+
+pub fn sig_scheme_name(id: u16) -> String {
+    match id {
+        0x0201 => "rsa_pkcs1_sha1".into(),
+        0x0203 => "ecdsa_sha1".into(),
+        0x0401 => "rsa_pkcs1_sha256".into(),
+        0x0403 => "ecdsa_secp256r1_sha256".into(),
+        0x0501 => "rsa_pkcs1_sha384".into(),
+        0x0503 => "ecdsa_secp384r1_sha384".into(),
+        0x0601 => "rsa_pkcs1_sha512".into(),
+        0x0603 => "ecdsa_secp521r1_sha512".into(),
+        0x0804 => "rsa_pss_rsae_sha256".into(),
+        0x0805 => "rsa_pss_rsae_sha384".into(),
+        0x0806 => "rsa_pss_rsae_sha512".into(),
+        0x0807 => "ed25519".into(),
+        0x0808 => "ed448".into(),
+        0x0809 => "rsa_pss_pss_sha256".into(),
+        0x080a => "rsa_pss_pss_sha384".into(),
+        0x080b => "rsa_pss_pss_sha512".into(),
+        other => format!("0x{other:04x}"),
+    }
 }
 
 pub fn alert_name(description: u8) -> &'static str {
@@ -463,13 +581,26 @@ pub fn cipher_name(id: u16) -> Option<&'static str> {
         .map(|(_, n)| *n)
 }
 
-fn version_name(v: u16) -> String {
+/// The record's `negotiated` value: `1.2`, or `ssl3` for the one pre-TLS version that
+/// shares the record format.
+pub fn version_name(v: u16) -> String {
     match v {
+        0x0304 => "1.3".into(),
         0x0303 => "1.2".into(),
         0x0302 => "1.1".into(),
         0x0301 => "1.0".into(),
-        0x0304 => "1.3".into(),
+        0x0300 => "ssl3".into(),
+        0x0002 => "ssl2".into(),
         other => format!("0x{other:04x}"),
+    }
+}
+
+/// `tls1.2`, `ssl3`: the word a result line uses.
+pub fn protocol_label(name: &str) -> String {
+    if name.starts_with("ssl") {
+        name.to_string()
+    } else {
+        format!("tls{name}")
     }
 }
 
@@ -501,6 +632,14 @@ impl TlsObservation {
             "leaf_len": self.leaf_len,
             "chain_len": self.chain_len,
             "cert": self.cert.as_ref().map(|c| c.to_json()),
+            "chain": self.chain.iter().map(ChainCert::to_json).collect::<Vec<_>>(),
+            "compression": self.compression,
+            "server_extensions": self.server_extensions.iter().map(|e| format!("0x{e:04x}")).collect::<Vec<_>>(),
+            "secure_renegotiation": self.server_extensions.contains(&EXT_RENEGOTIATION_INFO),
+            "extended_master_secret": self.server_extensions.contains(&EXT_EXTENDED_MASTER_SECRET),
+            "session_ticket": self.server_extensions.contains(&EXT_SESSION_TICKET),
+            "kx_group": self.kx_group.map(group_name),
+            "sig_scheme": self.sig_scheme.map(sig_scheme_name),
         });
         if let Some(e) = self.cert_error {
             v["cert_error"] = json!(e);
@@ -520,7 +659,7 @@ impl TlsObservation {
             return format!("tls alert {}", alert_name(d));
         }
         let mut s = match self.negotiated {
-            Some(v) => format!("tls{}", version_name(v)),
+            Some(v) => protocol_label(&version_name(v)),
             None => {
                 return match &self.error {
                     Some(e) if e.starts_with("not TLS") => "not tls".into(),
@@ -749,6 +888,63 @@ mod tests {
     }
 
     #[test]
+    fn key_exchange_hello_extensions_and_the_chain_are_read_from_the_whole_flight() {
+        let obs = flight(&crate::testsupport::tls::tls12_flight(Some("h2")));
+        assert_eq!(obs.error, None, "{obs:?}");
+        assert_eq!(obs.kx_group, Some(0x001d));
+        assert_eq!(obs.sig_scheme, Some(0x0403));
+        assert_eq!(obs.compression, Some(0));
+        assert_eq!(obs.server_extensions, [EXT_RENEGOTIATION_INFO, EXT_ALPN]);
+        assert_eq!(obs.chain_len, Some(2));
+        assert_eq!(obs.chain.len(), 1, "the leaf is not in its own chain");
+        let issuer = obs.chain[0].cert.as_ref().unwrap();
+        assert_eq!(issuer.subject, "CN=fixture.scanr.invalid");
+        let j = obs.to_json();
+        assert_eq!(j["kx_group"], "x25519");
+        assert_eq!(j["sig_scheme"], "ecdsa_secp256r1_sha256");
+        assert_eq!(j["secure_renegotiation"], true);
+        assert_eq!(j["extended_master_secret"], false);
+        assert_eq!(j["chain"][0]["subject"], "CN=fixture.scanr.invalid");
+        assert_eq!(j["chain"][0]["sig_alg"], "ecdsa-sha256");
+        assert_eq!(
+            j["cert"]["serial"],
+            "33fa2a29649685df458ba05b4b1ceb0f77db2b16"
+        );
+        assert_eq!(j["cert"]["version"], 3);
+    }
+
+    #[test]
+    fn a_tls10_flight_without_extensions_or_hello_done_is_read_whole() {
+        let obs = flight(&crate::testsupport::tls::tls10_flight());
+        assert_eq!(
+            obs.error, None,
+            "the leaf was in hand when the flight ended: {obs:?}"
+        );
+        assert_eq!(obs.negotiated, Some(0x0301));
+        assert_eq!(obs.cipher, Some(0x002f));
+        assert_eq!(obs.compression, Some(0));
+        assert!(obs.server_extensions.is_empty());
+        assert_eq!(obs.kx_group, None);
+        assert!(
+            obs.display()
+                .starts_with("tls1.0 cn=fixture.scanr.invalid self-signed sha256:"),
+            "{}",
+            obs.display()
+        );
+        assert_eq!(obs.to_json()["negotiated"], "1.0");
+        assert_eq!(obs.to_json()["cipher_name"], "AES128-SHA");
+    }
+
+    #[test]
+    fn ssl3_and_ssl2_have_their_own_labels() {
+        assert_eq!(version_name(0x0300), "ssl3");
+        assert_eq!(protocol_label(&version_name(0x0300)), "ssl3");
+        assert_eq!(protocol_label(&version_name(0x0303)), "tls1.2");
+        assert_eq!(version_name(0x0002), "ssl2");
+        assert_eq!(version_name(0x0299), "0x0299");
+    }
+
+    #[test]
     fn handshake_messages_spanning_records_are_reassembled() {
         let leaf = b"leaf";
         let mut hs = server_hello(None);
@@ -885,6 +1081,25 @@ mod fixture_tests {
         assert!(
             t.display()
                 .starts_with("tls1.2 h2 cn=fixture.scanr.invalid self-signed sha256:"),
+            "{}",
+            t.display()
+        );
+    }
+
+    #[test]
+    fn a_tls10_server_is_read_by_stepping_down() {
+        let fx = TlsFixture::start(Behavior::Tls10);
+        let o = direct(&fx, true);
+        assert_eq!(o.state, State::Open);
+        let t = o.tls.expect("the probe ran");
+        assert_eq!(t.error, None, "{t:?}");
+        assert_eq!(t.negotiated, Some(0x0301));
+        assert_eq!(
+            t.cert.as_ref().map(|c| c.sig_alg.as_str()),
+            Some("ecdsa-sha256")
+        );
+        assert!(
+            t.display().starts_with("tls1.0 cn=fixture.scanr.invalid"),
             "{}",
             t.display()
         );

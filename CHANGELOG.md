@@ -35,7 +35,13 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
   whether issuer equals subject (`self_signed`) and the key type; result lines and
   `output results` say `cn=host self-signed expired` — for records written before this
   too, from the DER they already hold. Read, never verified; bounded and fuzzed
-  (`x509_leaf`).
+  (`x509_leaf`). The leaf also carries `serial`, `sig_alg` and `version`; a SHA-1 or
+  MD5 signature is flagged `sha1-signed` / `md5-signed` on the line.
+- The TLS flight is read to ServerHelloDone rather than stopping at the leaf, so the
+  record gains `chain` (the certificates after the leaf, hashed and read, up to 8), the
+  ECDHE `kx_group` and `sig_scheme` from ServerKeyExchange, `compression`, and the
+  ServerHello's `server_extensions` with `secure_renegotiation`, `extended_master_secret`
+  and `session_ticket` derived from it. `negotiated` says `ssl3` for an SSLv3 answer.
 - SNI travels on the direct path when the target was given as a name: a locally resolved
   address now keeps its hostname, so a virtual-hosting server answers with its certificate
   instead of an alert. A real 443 answered `internal_error` to the nameless hello.
