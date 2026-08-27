@@ -195,41 +195,48 @@ fn listening(port: u16) -> bool {
     .is_ok()
 }
 
-/// The tutorial's services, spawned for the test — or borrowed, if `./lab up` is running.
+/// The tutorial's services: one per test process, shared by every test that needs them,
+/// or borrowed if `./lab up` is already running.
+///
+/// Never killed by a test. Tests run in parallel, and a lab owned by the first test to
+/// finish was torn down under the others — a scan then reported every port closed. The
+/// child is told `--exit-with-parent` and leaves when this process does.
 struct Lab {
-    child: Option<Child>,
+    _child: Option<Child>,
 }
+
+static LAB: std::sync::OnceLock<Lab> = std::sync::OnceLock::new();
 
 impl Lab {
-    fn start() -> Self {
-        if listening(28443) && listening(25025) {
-            return Self { child: None };
-        }
-        let child = Command::new("python3")
-            .arg(root().join("docs/tutorial/lab.py"))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("python3 is required to run the tutorial lab");
-        let start = Instant::now();
-        while !(listening(28443) && listening(25025) && listening(28080)) {
-            assert!(
-                start.elapsed() < Duration::from_secs(15),
-                "the lab did not come up"
-            );
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        Self { child: Some(child) }
-    }
-}
-
-impl Drop for Lab {
-    fn drop(&mut self) {
-        if let Some(c) = &mut self.child {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
+    fn start() -> &'static Lab {
+        LAB.get_or_init(|| {
+            if listening(28443) && listening(25025) {
+                return Lab { _child: None };
+            }
+            let log =
+                std::env::temp_dir().join(format!("scanr-tutorial-lab-{}.log", std::process::id()));
+            let stderr = std::fs::File::create(&log).expect("lab log");
+            let child = Command::new("python3")
+                .arg(root().join("docs/tutorial/lab.py"))
+                .arg("--exit-with-parent")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(stderr)
+                .spawn()
+                .expect("python3 is required to run the tutorial lab");
+            let start = Instant::now();
+            while !(listening(28443) && listening(25025) && listening(28080)) {
+                assert!(
+                    start.elapsed() < Duration::from_secs(20),
+                    "the lab did not come up; its stderr:\n{}",
+                    std::fs::read_to_string(&log).unwrap_or_default()
+                );
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Lab {
+                _child: Some(child),
+            }
+        })
     }
 }
 
