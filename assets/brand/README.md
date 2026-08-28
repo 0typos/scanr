@@ -1,9 +1,9 @@
 # scanr brand
 
-The mark follows one scanning pulse through an S-shaped proxy route. The three smaller
-nodes are proxy hops between the larger endpoints. Cyan is the path, amber is the probe
-in flight, and magenta is the endpoint state. The deep-ink tile keeps the mark legible
-on light and dark backgrounds.
+The mark maps a scan across a branching proxy topology. Bright cyan traces the selected
+route from the scanner to its target; muted branches show the other available hops.
+Amber is the probe in flight, and magenta is the target state. The deep-ink tile keeps
+the mark legible on light and dark backgrounds.
 
 ## Assets
 
