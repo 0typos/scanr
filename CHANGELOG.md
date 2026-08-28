@@ -14,12 +14,21 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
 
 ## [Unreleased]
 
+### Added
+
+- Plans and runs suggest the `ssh` profiles when a loopback SOCKS5 transport may be an
+  `ssh -D` listener; `transport test` gives the same advice after measuring one.
+
 ### Fixed
 
 - Release binaries were stamped `-dirty` (rc.6, rc.7): the workflow wrote shell
   completions into an untracked `completions/` before the cross build, so `build.rs` saw
   a dirty tree. They go to the ignored `dist/` now, and the workflow refuses a `-dirty`
   binary.
+- The CLI reference now shows that `--exclude` accepts a spec or file, and the getting
+  started version capture reflects rc.7.
+- The tutorial demo renderer no longer interrupts `agg` after its first progress update
+  and leaves a one-frame GIF.
 
 ## [1.0.0-rc.7] - 2026-08-28
 

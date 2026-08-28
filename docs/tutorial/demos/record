@@ -208,7 +208,7 @@ for a in "$@"; do
   esac
 done
 
-render() { agg --cols "$COLS" --rows "$ROWS" --font-size 14 "$HERE/$1.cast" "$HERE/$1.gif" 2>&1 | tail -c 0; }
+render() { agg --cols "$COLS" --rows "$ROWS" --font-size 14 "$HERE/$1.cast" "$HERE/$1.gif" >/dev/null 2>&1; }
 
 (( gif )) && ! command -v agg >/dev/null && { echo "agg not found (cargo install --git https://github.com/asciinema/agg)" >&2; exit 1; }
 if (( render_only )); then

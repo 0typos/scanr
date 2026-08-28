@@ -289,7 +289,7 @@ targets         1 (127.0.0.1)
 ports           5 (25025,28080,28443,29000-29001)
 probes          5
 labels          /etc/services (5,863) + builtin (2)     builtin
-order           randomized, seed 0a693b6e29273549       builtin
+order           randomized, seed c34fc9e738756cc3       builtin
 
 Timing
 concurrency     512                                     builtin.proxy
@@ -313,6 +313,8 @@ timeout-bound   ~10.25s if every probe times out (5s x 2 attempts / 512 in fligh
 
 Host
 facts           ephemeral 32768-60999 (28232 ports), tcp_tw_reuse=2 (loopback only), nofile=524288
+
+hint     if loopback proxy `dante` is an `ssh -D` listener, use `--profile ssh` (`ssh-fast` for a nearby server, `ssh-slow` for a high-latency link); general proxy profiles can overwhelm OpenSSH with concurrent connections
 ```
 
 No traffic. Every value shows the layer it came from (`builtin.proxy`, `scan.lab-audit`,
@@ -389,6 +391,9 @@ transport       dante (socks5 127.0.0.1:1082)  fidelity full
 scope           5 probes (1 targets x 5 ports)
 ...
 
+Warnings
+hint            if loopback proxy `dante` is an `ssh -D` listener, use `--profile ssh` (`ssh-fast` for a nearby server, `ssh-slow` for a high-latency link); general proxy profiles can overwhelm OpenSSH with concurrent connections
+
 Results
 127.0.0.1:29001/tcp closed 0.8ms
 127.0.0.1:29000/tcp closed saltd-licensing 0.8ms
@@ -417,9 +422,9 @@ in practice. Measure it:
 $ scanr transport test tunnel
 transport tunnel (socks5 127.0.0.1:1088)
   reachable         yes
-  known-open        open      reply 0x00         1.0ms
-  known-closed      error     no reply           0.5ms   <- expected closed
-  blackholed        filtered  no reply        3030.6ms
+  known-open        open      reply 0x00         0.7ms
+  known-closed      error     no reply           0.3ms   <- expected closed
+  blackholed        filtered  no reply        3012.7ms
 
   fidelity          open_only
   The known-closed destination produced no usable reply code (the proxy
@@ -428,6 +433,9 @@ transport tunnel (socks5 127.0.0.1:1088)
 
   to record this, add to [transports.tunnel]:
       fidelity = "open_only"
+
+  If this is an ssh -D listener, use --profile ssh (ssh-fast for a nearby
+  server, ssh-slow for a high-latency link).
 ```
 
 OpenSSH knows the port was refused; its own log says `connect failed: Connection

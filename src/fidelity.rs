@@ -609,6 +609,23 @@ impl FidelityReport {
                 "\n  a chain's fidelity is its exit hop's; record it on that transport,\n                   not on the chain itself.\n",
             );
         }
+        if self.kind == "socks5"
+            && self.fidelity == Fidelity::OpenOnly
+            && self
+                .address
+                .as_deref()
+                .and_then(|a| a.parse::<SocketAddr>().ok())
+                .is_some_and(|a| a.ip().is_loopback())
+        {
+            s.push('\n');
+            for line in wrap(
+                "If this is an ssh -D listener, use --profile ssh (ssh-fast for a \
+                 nearby server, ssh-slow for a high-latency link).",
+                72,
+            ) {
+                s.push_str(&format!("  {line}\n"));
+            }
+        }
         s
     }
 }
@@ -693,6 +710,7 @@ mod tests {
         assert!(r.reachable);
         assert_eq!(r.fidelity, Fidelity::Full, "{}", r.explanation);
         assert!(r.explanation.contains("tell `closed` apart"));
+        assert!(!r.render().contains("--profile ssh"));
     }
 
     #[test]
@@ -796,11 +814,16 @@ mod tests {
     #[test]
     fn report_renders_the_expectation_mismatch() {
         let fx = Socks5Fixture::start(Behavior::Collapsing);
-        let r = measure(&socks_transport(fx.addr()), &timing(), None, None, false).unwrap();
+        let mut r = measure(&socks_transport(fx.addr()), &timing(), None, None, false).unwrap();
         let out = r.render();
         assert!(out.contains("known-closed"), "{out}");
         assert!(out.contains("expected closed"), "{out}");
         assert!(out.contains("open_only"), "{out}");
+        assert!(out.contains("--profile ssh"), "{out}");
+
+        r.address = Some("10.1.1.1:1080".into());
+        let out = r.render();
+        assert!(!out.contains("--profile ssh"), "{out}");
     }
 
     #[test]

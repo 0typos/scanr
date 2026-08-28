@@ -1282,7 +1282,7 @@ pub fn render_header(
             style.dim(&format!("seed {:016x}", plan.seed))
         ),
     );
-    if !plan.warnings.is_empty() {
+    if !plan.warnings.is_empty() || !plan.hints.is_empty() {
         section(&mut s, style, "Warnings");
         for w in &plan.warnings {
             kv_key(
@@ -1291,6 +1291,15 @@ pub fn render_header(
                 "1;33",
                 "warning",
                 w.message.replace('\n', &format!("\n{:<16}", "")),
+            );
+        }
+        for hint in &plan.hints {
+            kv_key(
+                &mut s,
+                style,
+                "1;36",
+                "hint",
+                hint.replace('\n', &format!("\n{:<16}", "")),
             );
         }
     }
@@ -2041,6 +2050,34 @@ mod tests {
             writer_failed: false,
             worker_panics,
         }
+    }
+
+    #[test]
+    fn run_header_renders_plan_hints_in_the_diagnostics_block() {
+        let mut plan = ScanPlan::for_test(vec![80], 1);
+        plan.hints = vec!["use `--profile ssh`".into()];
+        let s = render_header(&plan, "abc", None, &Style { color: false });
+        assert!(
+            s.contains("Warnings\nhint            use `--profile ssh`"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn plan_hints_are_not_emitted_as_record_diagnostics() {
+        let sink = Captured::default();
+        let mut writer = JsonlWriter::with_sink(Box::new(sink.clone()), "s-hint");
+        let mut writer_error = None;
+        let mut plan = ScanPlan::for_test(vec![80], 1);
+        plan.hints = vec!["use `--profile ssh`".into()];
+
+        emit_plan_diagnostics(&mut writer, &mut writer_error, &plan);
+
+        assert!(writer_error.is_none());
+        assert!(
+            sink.events().is_empty(),
+            "hints must stay out of the record"
+        );
     }
 
     #[test]

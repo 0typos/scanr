@@ -434,6 +434,11 @@ pub struct ScanPlan {
     pub services: crate::services::ServiceTable,
     pub provenance: Provenance,
     pub warnings: Vec<PlanWarning>,
+    /// Operator advice that is useful before a scan, but is not a record diagnostic.
+    ///
+    /// Unlike `warnings`, hints are intentionally absent from `scan_warning` events so
+    /// adding one does not widen the record's promised warning-code surface.
+    pub hints: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -558,6 +563,7 @@ impl ScanPlan {
             services: crate::services::ServiceTable::builtin_only(),
             provenance: Provenance::default(),
             warnings: vec![],
+            hints: vec![],
         }
     }
 }

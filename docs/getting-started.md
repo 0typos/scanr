@@ -22,7 +22,7 @@ sudo install -m755 target/x86_64-unknown-linux-musl/release/scanr /usr/local/bin
 
 ```console
 $ scanr --version
-scanr 1.0.0-rc.5 (ee3bf48f4 x86_64-unknown-linux-gnu)
+scanr 1.0.0-rc.7 (df922f921 x86_64-unknown-linux-gnu)
 rustc 1.98.0 (88d9e12ae 2026-08-18)
 ```
 
@@ -117,7 +117,8 @@ output          ./scanr-results                         defaults
 ```
 
 `plan` warns on unmeasured fidelity, rate above the ephemeral-port budget, and
-concurrency above `RLIMIT_NOFILE`.
+concurrency above `RLIMIT_NOFILE`. For a loopback SOCKS5 transport it also points to the
+bounded-concurrency `ssh` profiles when the listener may be `ssh -D`.
 
 ## 4. Run it
 
@@ -132,6 +133,9 @@ transport       bastion (socks5 127.0.0.1:1080)  fidelity full
 scope           3 probes (1 targets x 3 ports)
 timing          concurrency 512, rate 400/s, connect_timeout 5s
 scan id         0e1a180b  seed 950f58a8b869db32
+
+Warnings
+hint            if loopback proxy `bastion` is an `ssh -D` listener, use `--profile ssh` (`ssh-fast` for a nearby server, `ssh-slow` for a high-latency link); general proxy profiles can overwhelm OpenSSH with concurrent connections
 
 Results
 127.0.0.1:8080/tcp open http-proxy 0.6ms

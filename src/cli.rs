@@ -852,7 +852,7 @@ pub fn render_plan(plan: &ScanPlan, facts: &HostFacts, no_color: bool) -> String
     s
 }
 
-/// Projection, host facts, and any planning warnings — everything below the value rows.
+/// Projection, host facts, and any planning diagnostics — everything below the value rows.
 /// One aligned `key  value  provenance` line.
 ///
 /// Free rather than a closure so the plan can be rendered in sections without each one
@@ -1059,13 +1059,20 @@ fn render_plan_footer(s: &mut String, plan: &ScanPlan, facts: &HostFacts, style:
     plan_section(s, style, "Host");
     s.push_str(&format!("{:<16}{}\n", "facts", facts));
 
-    if !plan.warnings.is_empty() {
+    if !plan.warnings.is_empty() || !plan.hints.is_empty() {
         s.push('\n');
         for w in &plan.warnings {
             let head = style.paint("33", "warning");
             s.push_str(&format!(
                 "{head}  {}\n",
                 w.message.replace('\n', "\n         ")
+            ));
+        }
+        for hint in &plan.hints {
+            let head = style.paint("36", "hint");
+            s.push_str(&format!(
+                "{head}     {}\n",
+                hint.replace('\n', "\n         ")
             ));
         }
     }
@@ -1648,6 +1655,19 @@ mod tests {
             }
             _ => panic!("expected run"),
         }
+    }
+
+    #[test]
+    fn plan_renders_non_recorded_hints() {
+        let mut plan = ScanPlan::for_test(vec![80], 1);
+        plan.hints = vec!["use `--profile ssh`".into()];
+        let facts = HostFacts {
+            ephemeral_range: None,
+            tcp_tw_reuse: None,
+            rlimit_nofile: None,
+        };
+        let s = render_plan(&plan, &facts, true);
+        assert!(s.contains("hint     use `--profile ssh`"), "{s}");
     }
 
     #[test]

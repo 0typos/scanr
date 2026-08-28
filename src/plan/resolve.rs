@@ -185,6 +185,7 @@ pub fn resolve(
         services,
         provenance: prov,
         warnings,
+        hints: Vec::new(),
     };
     add_operational_warnings(&mut plan, facts);
     Ok(plan)
@@ -1364,6 +1365,18 @@ fn resolve_host(host: &str) -> Vec<IpAddr> {
 
 /// Warnings that depend on the host we are running on, added after the plan is built.
 fn add_operational_warnings(plan: &mut ScanPlan, facts: &HostFacts) {
+    if let TransportKind::Socks5 { address, .. } = &plan.transport.kind
+        && address.ip().is_loopback()
+        && !matches!(plan.profile.as_str(), "ssh" | "ssh-fast" | "ssh-slow")
+    {
+        plan.hints.push(format!(
+            "if loopback proxy `{}` is an `ssh -D` listener, use `--profile ssh` \
+             (`ssh-fast` for a nearby server, `ssh-slow` for a high-latency link); \
+             general proxy profiles can overwhelm OpenSSH with concurrent connections",
+            plan.transport.name
+        ));
+    }
+
     // Every proxied kind, not only a single socks5: a chain inherits `unknown` from any
     // one unmeasured hop and a pool from any one member, and those are exactly the
     // transports whose fidelity is least certain.
@@ -1849,6 +1862,50 @@ fidelity = "open_only"
         );
         let p = plan_of(&text, "s5", Overrides::default());
         assert!(p.warnings.iter().any(|w| w.code == "fidelity_unknown"));
+    }
+
+    #[test]
+    fn loopback_socks5_suggests_an_ssh_profile_without_adding_a_warning_code() {
+        let text = format!(
+            "{BASE}\n[transports.p]\ntype=\"socks5\"\naddress=\"127.0.0.1:1080\"\n\
+             [scans.s5]\ntargets=[\"lab\"]\nports=[\"web\"]\ntransport=\"p\"\n"
+        );
+        let p = plan_of(&text, "s5", Overrides::default());
+        assert!(p.hints.iter().any(|h| h.contains("--profile ssh")));
+        assert_eq!(
+            p.warnings
+                .iter()
+                .filter(|w| w.code == "fidelity_unknown")
+                .count(),
+            1,
+            "the advice must remain separate from promised warning codes"
+        );
+
+        let remote = text.replace("127.0.0.1:1080", "10.1.1.1:1080");
+        assert!(
+            plan_of(&remote, "s5", Overrides::default())
+                .hints
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn ssh_profiles_silence_the_loopback_socks5_hint() {
+        let text = format!(
+            "{BASE}\n[transports.p]\ntype=\"socks5\"\naddress=\"[::1]:1080\"\n\
+             [scans.s5]\ntargets=[\"lab\"]\nports=[\"web\"]\ntransport=\"p\"\n"
+        );
+        for profile in ["ssh", "ssh-fast", "ssh-slow"] {
+            let p = plan_of(
+                &text,
+                "s5",
+                Overrides {
+                    profile: Some(profile.into()),
+                    ..Default::default()
+                },
+            );
+            assert!(p.hints.is_empty(), "{profile} should need no hint");
+        }
     }
 
     #[test]

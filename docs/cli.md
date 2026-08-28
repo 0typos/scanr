@@ -47,7 +47,7 @@ The only command-line settings; all else is config, so a run is reproducible fro
 <!-- RUN FLAGS: checked against the clap definition by tests/cli_spec.rs -->
 ```
 --profile <name>            --transport <name>
---targets <spec|file|->     --ports <spec>          --exclude <spec>
+--targets <spec|file|->     --ports <spec>          --exclude <spec|file>
 --pairs <file|->            --resumed-from <scan-id>
 --concurrency <n>           --rate <n>
 --connect-timeout <dur>     --retries <n>
