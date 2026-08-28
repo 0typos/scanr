@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/brand/scanr-mark.png" width="168" alt="scanr: a signal following an S-shaped route between two network nodes">
+  <img src="assets/brand/scanr-mark.png" width="168" alt="scanr: a probe following an S-shaped route through three proxy hops">
 </p>
 
 <h1 align="center">scanr</h1>

@@ -18,7 +18,7 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
 
 - Plans and runs suggest the `ssh` profiles when a loopback SOCKS5 transport may be an
   `ssh -D` listener; `transport test` gives the same advice after measuring one.
-- A reusable scanr mark, compact icon and documented colour palette under
+- A reusable multi-hop scanr mark, compact icon and documented colour palette under
   `assets/brand/`.
 
 ### Changed
