@@ -19,9 +19,6 @@ spot.
 
 ## The lab
 
-![00-lab](tutorial/demos/00-lab.gif)
-<sub>▶ [`demos/00-lab.cast`](tutorial/demos/00-lab.cast) — `asciinema play` for a real terminal</sub>
-
 Three loopback services, two closed ports, one unroutable network, and four proxies —
 all packaged in [`docs/tutorial/`](tutorial/) so you can start without building anything:
 
@@ -113,6 +110,7 @@ ports = ["lab"]
 ## 1. A first scan, and the file it leaves behind
 
 ![01-first-scan](tutorial/demos/01-first-scan.gif)
+
 <sub>▶ [`demos/01-first-scan.cast`](tutorial/demos/01-first-scan.cast) — `asciinema play` for a real terminal</sub>
 
 ```console
@@ -170,6 +168,7 @@ record does, unconditionally, which is the rest of this guide.
 ## 2. Reading the record
 
 ![02-record](tutorial/demos/02-record.gif)
+
 <sub>▶ [`demos/02-record.cast`](tutorial/demos/02-record.cast) — `asciinema play` for a real terminal</sub>
 
 ```console
@@ -271,6 +270,7 @@ Schema and `jq` recipes: [output-schema.md](output-schema.md).
 ## 3. Look before you scan
 
 ![03-plan](tutorial/demos/03-plan.gif)
+
 <sub>▶ [`demos/03-plan.cast`](tutorial/demos/03-plan.cast) — `asciinema play` for a real terminal</sub>
 
 ```console
@@ -340,6 +340,7 @@ case 8) uses it to say precisely which endpoints a killed scan never reached.
 ## 5. Through a SOCKS5 proxy: know what the proxy can tell you
 
 ![05-socks5](tutorial/demos/05-socks5.gif)
+
 <sub>▶ [`demos/05-socks5.cast`](tutorial/demos/05-socks5.cast) — `asciinema play` for a real terminal</sub>
 
 This is the reason the tool exists. SOCKS5 defines distinct replies for refused,
@@ -463,6 +464,7 @@ records a state it did not observe.
 ## 6. Through an HTTP CONNECT proxy
 
 ![06-http-connect](tutorial/demos/06-http-connect.gif)
+
 <sub>▶ [`demos/06-http-connect.cast`](tutorial/demos/06-http-connect.cast) — `asciinema play` for a real terminal</sub>
 
 Corporate proxies are usually HTTP CONNECT, not SOCKS. scanr supports them with the same
@@ -516,6 +518,7 @@ keeps the status line in each error's `reason`.
 ## 7. Chains and pools
 
 ![07-chain-pool](tutorial/demos/07-chain-pool.gif)
+
 <sub>▶ [`demos/07-chain-pool.cast`](tutorial/demos/07-chain-pool.cast) — `asciinema play` for a real terminal</sub>
 
 A **chain** goes through several proxies in order; an HTTP hop can sit in front of a
@@ -560,6 +563,7 @@ lie.
 ## 8. Interruption, and resuming exactly
 
 ![08-interrupt](tutorial/demos/08-interrupt.gif)
+
 <sub>▶ [`demos/08-interrupt.cast`](tutorial/demos/08-interrupt.cast) — `asciinema play` for a real terminal</sub>
 
 A scan of three hosts, two of them silent, at concurrency 2 so it takes a while; Ctrl-C
@@ -645,6 +649,7 @@ nothing links the two outputs.
 ## 9. What a service says: banners, and the one active probe
 
 ![09-tls](tutorial/demos/09-tls.gif)
+
 <sub>▶ [`demos/09-tls.cast`](tutorial/demos/09-tls.cast) — `asciinema play` for a real terminal</sub>
 
 Banners are read by default and cost nothing to the target beyond the connection the
@@ -726,6 +731,7 @@ nmap `-sV` does far more with the open ports themselves — and that is where us
 ## 10. Tuning: the proxy is the limit, not scanr
 
 ![10-calibrate](tutorial/demos/10-calibrate.gif)
+
 <sub>▶ [`demos/10-calibrate.cast`](tutorial/demos/10-calibrate.cast) — `asciinema play` for a real terminal</sub>
 
 Concurrency and rate are yours to set, and the plan shows them. The number that decides

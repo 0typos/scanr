@@ -25,7 +25,6 @@ COMMENT_PAUSE=${COMMENT_PAUSE:-2}
 IDLE_LIMIT=${IDLE_LIMIT:-4}
 
 DEMOS=(
-  "00-lab            The lab: what is listening"
   "01-first-scan     1. A first scan, and the file it leaves behind"
   "02-record         2. Reading the record"
   "03-plan           3. Look before you scan"
@@ -61,12 +60,6 @@ say() {                            # a dim "# comment" line (or several), then a
   sleep "$COMMENT_PAUSE"
 }
 newest() { ls -t "$1"/scan-*.jsonl.gz | head -1; }
-
-demo_00_lab() {
-  say "The lab: three loopback services, two closed ports, four proxies, one ssh -D." \
-      "scanr-lab up started it; check shows what is listening."
-  type_cmd "./scanr-lab check"
-}
 
 demo_01_first_scan() {
   say "A first scan: five ports on 127.0.0.1, direct. --all prints every verdict," \

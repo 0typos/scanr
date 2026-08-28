@@ -11,7 +11,6 @@ asciinema play docs/tutorial/demos/05-socks5.cast
 
 | cast | tutorial section |
 |---|---|
-| `00-lab` | The lab: `scanr-lab check` |
 | `01-first-scan` | 1. A first scan, and the file it leaves behind (plus the same ports via nmap) |
 | `02-record` | 2. Reading the record: verify, a tampered and a truncated copy, summarize, `--format nmap` / `list` |
 | `03-plan` | 3. Look before you scan |
