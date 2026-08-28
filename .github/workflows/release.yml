@@ -105,9 +105,10 @@ jobs:
       - name: Package
         run: |
           name="scanr-${GITHUB_REF_NAME:-dev}-${{ matrix.target }}"
-          mkdir -p "dist/$name/completions"
+          mkdir -p "dist/$name/completions" "dist/$name/assets"
           cp target/${{ matrix.target }}/release/scanr "dist/$name/"
           cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
+          cp -R assets/brand "dist/$name/assets/"
           cp dist/completions/* "dist/$name/completions/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           ( cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )

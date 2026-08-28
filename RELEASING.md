@@ -64,10 +64,10 @@ glibc). scanr is pure Rust with no C deps, so one toolchain covers them all with
 Each build job checks the tag against `--version` and refuses a dirty tree or a binary
 stamped `-dirty`. Completions are generated once, natively, into the ignored
 `dist/completions` (an untracked `completions/` in the tree made rc.6 and rc.7 report
-`-dirty`). Each archive packages the binary, README, changelog, licences and
-completions; the `publish` job writes SHA-256 sums and attaches everything to the
-release. Only `publish` has `contents: write`. `scripts/build-all.sh` runs the same
-build locally. To add or drop a target, edit both the `release.yml` matrix and the
+`-dirty`). Each archive packages the binary, README and its brand assets, changelog,
+licences and completions; the `publish` job writes SHA-256 sums and attaches everything
+to the release. Only `publish` has `contents: write`. `scripts/build-all.sh` runs the
+same build locally. To add or drop a target, edit both the `release.yml` matrix and the
 `TARGETS` list in the script.
 
 Both workflows need `fetch-depth: 0` because `build.rs` reads git history.

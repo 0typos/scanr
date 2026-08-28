@@ -45,9 +45,10 @@ for t in "${TARGETS[@]}"; do
   cargo zigbuild --release --locked --target "$t"
   name="scanr-${VERSION}-${t}"
   stage="dist/$name"
-  mkdir -p "$stage/completions"
+  mkdir -p "$stage/completions" "$stage/assets"
   cp "target/$t/release/scanr" "$stage/"
   cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "$stage/"
+  cp -R assets/brand "$stage/assets/"
   cp dist/completions/* "$stage/completions/"
   tar -C dist -czf "dist/$name.tar.gz" "$name"
   ( cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )
