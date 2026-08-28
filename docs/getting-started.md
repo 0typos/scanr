@@ -13,8 +13,8 @@ The musl build is static; `cargo install --path .` also works.
 
 ```console
 $ scanr --version
-scanr 0.3.0 (c6f0274ab x86_64-unknown-linux-gnu)
-rustc 1.97.1 (8bab26f4f 2026-07-14)
+scanr 1.0.0-rc.5 (ee3bf48f4 x86_64-unknown-linux-gnu)
+rustc 1.98.0 (88d9e12ae 2026-08-18)
 ```
 
 The commit is recorded in every scan record.
@@ -113,7 +113,7 @@ Warns on unmeasured fidelity, rate above the ephemeral-port budget, concurrency 
 
 ```console
 $ scanr run internal-web --all
-scanr 0.3.0 — internal-web via socks5 127.0.0.1:1080 — 3 probes (1 targets x 3 ports)
+scanr 1.0.0-rc.5 — internal-web via socks5 127.0.0.1:1080 — 3 probes (1 targets x 3 ports)
   scan 0e1a180b  seed 950f58a8b869db32  concurrency 512  -> ./scanr-results/scan-adhoc-2026_07_30T23_50_11Z-0e1a180b.jsonl.gz.partial
 127.0.0.1:8080/tcp open http-proxy 0.6ms
 127.0.0.1:8443/tcp open https-alt 0.5ms
