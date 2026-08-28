@@ -1,6 +1,7 @@
 # Scan record schema
 
-Normative reference for the JSONL record every run writes; tests check the binary against it.
+Normative reference for the JSONL record every run writes. `tests/spec_conformance.rs`
+checks the binary against it.
 
 ## Stability
 
@@ -27,12 +28,12 @@ whose `counts` disagree with its lines.
 
 | version | change |
 |---|---|
-| 2 | `probe_span.probe_indices` in counter space; version 1 used matrix space — see [`probe_span`](#probe_span) |
+| 2 | `probe_span.probe_indices` in counter space; version 1 used matrix space, see [`probe_span`](#probe_span) |
 | 1 | initial |
 
-Reading never drops a version. An unknown version is refused, not guessed (a version 1
-reader given version 2 spans expands them to wrong endpoints with nothing looking
-malformed); `verify` names the accepted versions.
+Reading never drops a version. An unknown version is refused, not guessed. A version 1
+reader given version 2 spans would expand them to wrong endpoints with nothing looking
+malformed. `verify` names the accepted versions.
 
 ## File
 
@@ -43,8 +44,8 @@ scanr-results/scan-<epoch_ms>-<scan_id>.jsonl        # --no-compress
 
 - gzip as concatenated members: `zcat`, `zless`, `gzip -d` work; a killed scan decodes
   to its last frame. `scanr output` reads either form.
-- `.partial` suffix until the terminal event; if it remains, the process died — contents
-  valid, incomplete.
+- `.partial` suffix until the terminal event. If it remains, the process died; the
+  contents are valid but incomplete.
 - One object per line, UTF-8, LF. Every line: `type`, `seq`, `ts` (RFC 3339, ms), `scan_id`.
 - `seq` is write order, not probe order.
 
@@ -72,7 +73,7 @@ Checked by `scanr output verify`:
 | `scan_warning` | 0..n | non-fatal conditions |
 | `scan_completed` / `scan_interrupted` / `scan_failed` | 1, last | outcome, counts |
 
-No per-probe start event: derivable, and it would double file size.
+No per-probe start event. It is derivable and would double file size.
 
 ### Dropped and why
 
@@ -81,6 +82,64 @@ No per-probe start event: derivable, and it would double file size.
 | `scan_plan` | folded into `scan_config` |
 | `scan_error` | non-fatal is `scan_warning`, fatal is `scan_failed` |
 | `scan_interrupt_requested` | `scan_interrupted.requested_at`, with no write during shutdown |
+
+## `scan_started`
+
+```json
+{"type":"scan_started","seq":0,"ts":"2026-07-30T12:42:15.001Z","scan_id":"a3f19c02",
+ "schema_version":2,"tool_version":"1.0.0-rc.6","git_commit":"d27b127","rustc":"rustc 1.89.0",
+ "target_triple":"x86_64-unknown-linux-gnu","started_at_epoch_ms":1753879335001,
+ "hostname":"scanbox","pid":41200}
+```
+
+`schema_version` is what the rest of the file follows. `hostname` is `unknown` when
+`gethostname` fails.
+
+## `scan_config`
+
+Every value the scan ran with, after profile, config file, environment and flags were
+merged. Top-level keys:
+
+| key | holds |
+|---|---|
+| `scan_name`, `description`, `profile` | identity; `null` when unset |
+| `resumed_from` | scan id this one continues, else `null` |
+| `targets` | `spec` (the unexpanded forms), `exclude`, `count`, `expanded` (always `false`), `mode` (`matrix` or `pairs`), `pairs`, `pairs_truncated` |
+| `ports` | `spec`, `count` |
+| `probes_planned` | targets times ports, or the pair count |
+| `permutation` | `algorithm` (`feistel4`), `seed` (16 hex digits) |
+| `transport` | `name`, `type`, `measured_fidelity`, `fidelity_source`; `socks5`/`http` add `address`, `username`, `password` (`[redacted]`), `password_source`; `chain` adds `hops[]` (`name`, `type`, `address`, `username`, `password`); `pool` adds `members[]` (`name`, `type`, `measured_fidelity`). See [Fidelity](#fidelity) |
+| `dns` | `requested`, `effective` |
+| `timing` | `concurrency`, `rate`, `proxy_connect_timeout_ms`, `handshake_timeout_ms`, `connect_timeout_ms`, `retries`, `retry_delay_ms` |
+| `service_labels` | see [`service_label`](#service_label) |
+| `banner` | see [Banners](#banners) |
+| `tls` | see [TLS](#tls) |
+| `output` | `dir`, `open_only`, `compressed`, `spans` |
+| `provenance` | field name to the layer that supplied it: `builtin`, `builtin.<profile>`, `defaults`, `profile.<name>`, `transport.<name>`, `scan.<name>`, `env:<VAR>`, `cli` |
+| `host` | `ephemeral_range` (`[lo, hi]` or `null`), `tcp_tw_reuse`, `rlimit_nofile`, `so_linger_zero` (always `true`) |
+
+## `target_resolved`
+
+One per hostname the local resolver handled; none under transport DNS.
+
+```json
+{"type":"target_resolved","seq":2,"ts":"2026-07-30T12:42:15.020Z","scan_id":"a3f19c02",
+ "target":"web.internal","addresses":["10.20.30.40","10.20.30.41"],"mode":"local",
+ "expanded_to_probes":true}
+```
+
+`expanded_to_probes` is `false` when `addresses` is empty; a `dns_failure` warning
+accompanies it.
+
+## `scan_progress`
+
+```json
+{"type":"scan_progress","seq":900,"ts":"2026-07-30T12:42:20.000Z","scan_id":"a3f19c02",
+ "completed":8120,"planned":255510,"open":3,"rate_per_s":1624.0,"eta_s":152}
+```
+
+`rate_per_s` is over the last interval; `eta_s` is `null` when the rate is below 0.01/s.
+Progress is informational; totals come from the terminal event.
 
 ## `probe_result`
 
@@ -95,7 +154,7 @@ No per-probe start event: derivable, and it would double file size.
 | field | notes |
 |---|---|
 | `state` | `open` · `closed` · `filtered` · `error` |
-| `source` | `local_stack` · `proxy_reply` · `timeout` · `internal`: where the verdict came from |
+| `source` | where the verdict came from: `local_stack` · `proxy_reply` · `timeout` · `internal` |
 | `reason` | free text; `null` when open |
 | `resolved_address` | `null` for hostnames under transport DNS |
 | `service_label` | port-number guess, not a fingerprint; `null` if unknown |
@@ -103,13 +162,13 @@ No per-probe start event: derivable, and it would double file size.
 | `banner` | bytes volunteered; absent if none or `--banner` off |
 | `banner_hex` | replaces `banner` when not valid UTF-8 |
 | `banner_bytes` | bytes read |
-| `tls` | present exactly when the TLS probe ran (open, no banner, `--tls`); `scan_config.tls` carries `enabled`, `offered`, `offered_ciphers` (suite names, the 1.3 suite first), `offered_alpn`, `offered_groups` (`x25519`, `secp256r1`, `secp384r1`), `offered_sigalgs`, `sent_bytes`, `timeout_ms`, `versions` and `version_hellos` (with `--tls-versions`: one object per survey version — `ssl2`, `ssl3`, `1.0`, `1.1`, `1.2` — each `{sent_bytes, ciphers}` naming the era-appropriate suites that hello offers) — the offer is fixed, so it is recorded once here rather than on every result: `offered` (`"1.3,1.2"`; `"1.2"` in records before 1.0.0-rc.2), `sent_bytes`, `read_bytes`, `sni`, `negotiated` (`"1.3"`, `"1.2"`, `"1.1"`, `"1.0"`, `"ssl3"`, or `null`), `cipher` (`"0xc02f"`), `cipher_name`, `alpn`, `alert` (`{level, description, name}` or `null`), `leaf_sha256` (hex), `leaf_len`, `leaf_der` (base64, only when ≤ 8 KiB), `chain_len`, `cert` (what the leaf says, read not verified: `subject` and `issuer` as `C=…, O=…, CN=…`, `subject_cn`, `self_signed` — issuer equals subject — `not_before`, `not_after`, `validity` at probe time: `valid`, `expired`, `not_yet_valid`; `san` — up to 64 dNSName/iPAddress entries — `san_count`, `key` such as `rsa-2048`, `ec-p256`, `version`, `serial` hex, `sig_alg` such as `rsa-sha256`, `ecdsa-sha256`, `rsa-sha1`), `cert_error` (why the leaf did not parse), `chain` (up to 8 certificates after the leaf: `sha256`, `len`, and when they parse `subject`, `issuer`, `self_signed`, `not_after`, `key`, `sig_alg`), `compression`, `server_extensions` (hex type list), `secure_renegotiation`, `extended_master_secret`, `session_ticket`, `kx_group` (`x25519`, `secp256r1`, …), `sig_scheme` (`rsa_pss_rsae_sha256`, …), `hello_retry_request` (the group a 1.3 server asked for instead of x25519; the flight ends there), `versions` (with `--tls-versions`: one object per version — `ssl2`, `ssl3`, `1.0`, `1.1`, `1.2`, `1.3` — each `{accepted: true/false/null, detail, sent_bytes}`, plus `oldest`, `newest`, `legacy_only` — newest accepted is older than 1.2 — `advice` for reaching a legacy-only server, and `connections` opened beyond the probe's), `error` (why the flight stopped, when it did) |
+| `tls` | present exactly when the TLS probe ran (open, no banner, `--tls`); see [TLS](#tls) |
 | `attempts` | timeout retries merged into one row |
 | `attempt_states` | per-attempt states |
 | `timing_ms` | `proxy_connect`, `handshake` absent on the direct path |
 
-- Read `source` before trusting a non-open `state`: a proxy that cannot separate refused
-  from filtered yields `error` / `proxy_reply`, never a fabricated verdict;
+- Read `source` before trusting a non-open `state`. A proxy that cannot separate refused
+  from filtered yields `error` / `proxy_reply`, never a fabricated verdict.
   `scan_config.transport.measured_fidelity` says which applies.
 - Runs of identical `closed`/`filtered` outcomes collapse into `probe_span`; handle both
   or use `--no-spans`. `open`, `error`, resource-pressure hits and disagreeing retries
@@ -131,10 +190,42 @@ No per-probe start event: derivable, and it would double file size.
  "tls": {"enabled": false, "sent_bytes": 0}}
 ```
 
+### TLS
+
+`scan_config.tls` records the offer once, because it is fixed:
+
+| key | holds |
+|---|---|
+| `enabled`, `sent_bytes` | `sent_bytes` is `0` when the probe never ran |
+| `offered` | `"1.3,1.2"`; `"1.2"` in records before 1.0.0-rc.2 |
+| `offered_ciphers` | suite names, the 1.3 suite first |
+| `offered_alpn`, `offered_sigalgs` | as offered |
+| `offered_groups` | `x25519`, `secp256r1`, `secp384r1` |
+| `timeout_ms`, `versions` | the ceiling and whether `--tls-versions` was on |
+| `version_hellos` | with `--tls-versions`: one object per survey version (`ssl2`, `ssl3`, `1.0`, `1.1`, `1.2`), each `{sent_bytes, ciphers}` naming the suites that era's hello offers |
+
+`probe_result.tls` records what came back:
+
+| key | holds |
+|---|---|
+| `offered`, `sent_bytes`, `read_bytes`, `sni` | the flight as sent |
+| `negotiated` | `"1.3"`, `"1.2"`, `"1.1"`, `"1.0"`, `"ssl3"`, or `null` |
+| `cipher`, `cipher_name`, `alpn` | `cipher` is hex, `"0xc02f"` |
+| `alert` | `{level, description, name}` or `null` |
+| `leaf_sha256`, `leaf_len`, `leaf_der`, `chain_len` | `leaf_der` is base64, only when at most 8 KiB |
+| `cert` | what the leaf says, read not verified: `subject` and `issuer` as `C=…, O=…, CN=…`, `subject_cn`, `self_signed` (issuer equals subject), `not_before`, `not_after`, `validity` at probe time (`valid`, `expired`, `not_yet_valid`), `san` (up to 64 dNSName/iPAddress entries), `san_count`, `key` such as `rsa-2048` or `ec-p256`, `version`, `serial` hex, `sig_alg` such as `rsa-sha256`, `ecdsa-sha256`, `rsa-sha1` |
+| `cert_error` | why the leaf did not parse |
+| `chain` | up to 8 certificates after the leaf: `sha256`, `len`, and when they parse `subject`, `issuer`, `self_signed`, `not_after`, `key`, `sig_alg` |
+| `compression`, `server_extensions`, `secure_renegotiation`, `extended_master_secret`, `session_ticket` | hello details; `server_extensions` is a hex type list |
+| `kx_group`, `sig_scheme` | `x25519`, `secp256r1`, …; `rsa_pss_rsae_sha256`, … |
+| `hello_retry_request` | the group a 1.3 server asked for instead of x25519; the flight ends there |
+| `versions` | with `--tls-versions`: one object per version (`ssl2`, `ssl3`, `1.0`, `1.1`, `1.2`, `1.3`), each `{accepted: true/false/null, detail, sent_bytes}`, plus `oldest`, `newest`, `legacy_only` (newest accepted is older than 1.2), `advice` for reaching a legacy-only server, and `connections` opened beyond the probe's |
+| `error` | why the flight stopped, when it did |
+
 ### `service_label`
 
-First answer wins: `defaults.services_file`, `/etc/services`, 59 builtin ports — see
-[configuration](configuration.md#service-labels). Port 4444 is `krb524` to all three;
+First answer wins: `defaults.services_file`, `/etc/services`, 59 builtin ports. See
+[configuration](configuration.md#service-labels). Port 4444 is `krb524` to all three, so
 key automation on `state`, `source`, `reason`. `/etc/services` varies by host, so
 `scan_config.service_labels` records the layers:
 
@@ -149,22 +240,28 @@ key automation on `state`, `source`, `reason`. `/etc/services` varies by host, s
 }}
 ```
 
-- `entries`: tcp ports the layer claimed first; no port counted twice. `builtin` holds 59
+- `entries` counts tcp ports the layer claimed first; no port counted twice. `builtin` holds 59
   but reports only those no file claimed (a stock Linux `/etc/services` names 57).
-- `malformed`: lines the parser gave up on. UDP/SCTP rows skipped, uncounted.
+- `malformed` counts lines the parser gave up on. UDP/SCTP rows are skipped, uncounted.
 - Empty layers are absent; `builtin` is always last and present.
 - `use_etc_services` is `false` only when config declined the host layer; a host without
   `/etc/services` reports `true` with the layer absent.
 
 ### Fidelity
 
-`scan_config.transport.fidelity_source`: `builtin` (direct: the local stack separates
-states), `config` (declared from a `transport test` measurement), `unmeasured`,
-`inherent` (http: the protocol has no status meaning refused, so `open_only` by
-construction), `exit_hop` (chain: the last hop's — `weakest_hop` in records before
-0.4.0), `weakest_member` (pool). Unmeasured chain or pool members give
-`measured_fidelity: "unknown"` beside the derived source. A chain's `hops[]` and a pool's
-`members[]` each carry `type`.
+`scan_config.transport.fidelity_source` says where `measured_fidelity` came from:
+
+| value | transport | meaning |
+|---|---|---|
+| `builtin` | direct | the local stack separates states |
+| `config` | socks5 | declared from a `transport test` measurement |
+| `unmeasured` | socks5 | nothing declared |
+| `inherent` | http | the protocol has no status meaning refused, so `open_only` by construction |
+| `exit_hop` | chain | the last hop's; `weakest_hop` in records before 0.4.0 |
+| `weakest_member` | pool | the weakest member's |
+
+Unmeasured chain or pool members give `measured_fidelity: "unknown"` beside the derived
+source. A chain's `hops[]` and a pool's `members[]` each carry `type`.
 
 ## `probe_span`
 
@@ -192,17 +289,18 @@ endpoint    = targets.pairs[probe_index]
 
 - The seed is required; `scan_config` carries everything. The permutation is the 4-round
   Feistel network named by `permutation.algorithm`. `output results` and `remainder`
-  expand for you.
-- Counter space is why the collapse works: order is randomised, so matrix-space ranges
+  expand spans.
+- `via` appears on a span under a pool, as on `probe_result`.
+- Counter space is why the collapse works. Order is randomised, so matrix-space ranges
   degenerate to about one per probe. Measured on a rate-limited 20,001-probe scan that
   drained repeatedly: 10,023 matrix-space ranges, 595 counter-space, 11× smaller.
   Version 1 wrote matrix indices; expand those by skipping the permutation.
-- Collapsed probes count as `completed`; `remainder` expands them. Lost: per-probe `ts`
-  and exact timing (min/mean/max kept).
+- Collapsed probes count as `completed`; `remainder` expands them. A span loses the
+  per-probe `ts` and exact timing; min/mean/max are kept.
 
 ## `scan_warning`
 
-Stable `code`. Before probing, from plan resolution:
+`code` is stable; `message` is not. Before probing, from plan resolution:
 
 | code | meaning |
 |---|---|
@@ -221,7 +319,7 @@ During the scan, at most once per code, with `detail.remediation`:
 | `fd_pressure` | descriptors ran out |
 | `proxy_saturation` | proxy stopped accepting connections |
 
-Just before the terminal event; a `scanr` bug, not the environment:
+Just before the terminal event, and a `scanr` bug rather than the environment:
 
 | code | meaning |
 |---|---|
@@ -233,7 +331,7 @@ Just before the terminal event; a `scanr` bug, not the environment:
  "detail":{"remediation":"the local ephemeral port range (28232 ports) is exhausted"}}
 ```
 
-Codes are owned by `diag::WARNING_CODES`; a test checks this list against it both ways.
+`diag::WARNING_CODES` owns the codes; a test checks this list against it both ways.
 `fidelity_open_only`, `proxy_saturation` or either `*_pressure` means some non-open
 results describe the scanning environment, not the target.
 
@@ -257,9 +355,18 @@ scanr output events scan-*.jsonl.gz | jq -r 'select(.type=="scan_warning") | "\(
 | `abandoned` | issued, interrupt ended the drain first; may have touched the network |
 | `not_started` | never issued |
 
-`scan_interrupted` adds `signal`, `requested_at`, `forced`; `scan_failed` adds `error`,
-`error_code` (currently `worker_panic`, `writer_failure`; open set — `worker_panic` wins when both
-occurred, and `counts.worker_panics` survives either way).
+`counts` also carries `started` and `retried`.
+
+| event | adds |
+|---|---|
+| `scan_interrupted` | `signal`, `forced`, `requested_at` |
+| `scan_failed` | `error`, `error_code` (`worker_panic`, `writer_failure`; open set) |
+| any | `worker_panics` when a worker died; `not_started_from` and `abandoned_indices` when the scan was small enough to track them |
+
+`signal`, `forced` and `requested_at` appear whenever an interrupt happened, even when
+`scan_failed` took the label. `writer_failure` wins `error_code` when both occurred;
+`worker_panics` survives either way. Without `not_started_from`, `output remainder` reads
+every probe row instead.
 
 ## `output summarize`
 
@@ -300,7 +407,7 @@ by service (3 services):
   microsoft-ds          0      0        3      0  445
 ```
 
-- Every state counted; ports and services rank by open, then filtered.
+- Every state is counted; ports and services rank by open, then filtered.
 - Networks are fixed `/24` (IPv6 `/64`) buckets, not target specs, so records compare.
 - Unnarrowed view caps sections at 25 rows; `--by <section>` is full. Cost is hosts plus
   ports, not probes.
@@ -323,15 +430,15 @@ $ scanr output results scan-*.jsonl.gz --states open --format json | jq -r .targ
 
 `--hosts` takes `--targets` forms, repeatable, matched without expanding; `--ports` takes
 `--ports` forms; `--states` is a comma list of `open`, `closed`, `filtered`, `error`
-(unknown is an error); `--format` is `table` (default), `json`, `nmap`, `list` — see
+(unknown is an error); `--format` is `table` (default), `json`, `nmap`, `list`, see
 [cli.md](cli.md#handing-results-to-another-tool). Only `table` is coloured, only on a
 terminal (`--no-color`, `NO_COLOR` disable). Span-reconstructed results carry
 `"collapsed": true` in JSON and no `timing_ms`. The count goes to stderr.
 
 ## Recipes
 
-`scanr output events` emits plain JSONL from either form on any platform (`zcat -f`
-pass-through is a GNU extension).
+`scanr output events` emits plain JSONL from either form on any platform. `zcat -f`
+pass-through is a GNU extension.
 
 Open ports as `host:port`:
 
@@ -379,8 +486,8 @@ scanr output events scan-*.jsonl.gz | jq -r 'select(.type=="probe_result" and .s
 
 ## Reproducing a scan
 
-`scan_config` records the unexpanded spec plus counts, never the matrix (a /16 × 1000
-ports is 65M probes); `provenance` records which layer supplied each value.
+`scan_config` records the unexpanded spec plus counts, never the matrix. A /16 × 1000
+ports is 65M probes. `provenance` records which layer supplied each value.
 
 ```console
 cfg() { scanr output events scan-*.jsonl.gz | jq -r "select(.type==\"scan_config\")|$1"; }
@@ -396,7 +503,7 @@ scanr output remainder scan-*.jsonl.gz | scanr run --pairs -
 ```
 
 - `remainder` emits exactly the outstanding `host:port` endpoints, `abandoned` included.
-- Its `# resumed-from:` comment is provenance, not an endpoint; `--pairs` reads it,
+- Its `# resumed-from:` comment is provenance, not an endpoint. `--pairs` reads it,
   `--resumed-from <scan-id>` overrides it, and `verify` prints `resumed from scan <id>`.
 - A pair scan records `targets.mode = "pairs"` and embeds its list; above 50,000 pairs
   the list is omitted, `pairs_truncated` is set, and `remainder` refuses.

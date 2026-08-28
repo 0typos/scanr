@@ -1,26 +1,25 @@
 # Learning scanr by using it
 
-Ten use cases, each a real command with its real output, and at each step what the
-tool does that `nmap` does not — and what it deliberately leaves to nmap. Everything
-below was captured on 2026-08-26 against the lab in the next section; run it yourself
-and the outputs match apart from timings, ids, the version banner, and the certificate's
-fingerprint and dates. Each use case is also recorded: the animation under its heading
-is the section's commands run against the lab, and the `▶` link below it is the same
-recording as an [asciinema](https://asciinema.org) cast for `asciinema play`.
+Ten use cases, each a real command with its real output. Each step shows what scanr
+does that `nmap` does not, and what it leaves to nmap. Everything below was captured on
+2026-08-26 against the lab in the next section. Run it yourself and the outputs match
+apart from timings, ids, the version banner, and the certificate's fingerprint and dates.
+Each use case is also recorded. The animation under its heading is the section's commands
+run against the lab; the `▶` link below it is the same recording as an
+[asciinema](https://asciinema.org) cast for `asciinema play`.
 
-The claim, up front. A port scan through a proxy is usually both untrustworthy and
-unrepeatable: the proxy decides what `closed` means, the scanner guesses, and what
-survives the engagement is a terminal scrollback. scanr is built so that every scan
-leaves a record that states what was run, what answered, what the proxy could not tell
-you, and what was never reached — and so that a killed scan resumes to the endpoint, not
-the host. It is also fast, but that is a side effect of the design rather than the point.
-Each use case below shows one of those properties working, and what nmap does in the same
-spot.
+The claim, up front. A port scan through a proxy is usually untrustworthy and
+unrepeatable. The proxy decides what `closed` means, the scanner guesses, and what
+survives the engagement is a terminal scrollback. scanr makes every scan leave a record
+that states what was run, what answered, what the proxy could not tell you, and what was
+never reached. A killed scan resumes at the endpoint, not the host. It is also fast, but
+that is a side effect of the design rather than the point. Each use case below shows one
+of those properties working, and what nmap does in the same spot.
 
 ## The lab
 
-Three loopback services, two closed ports, one unroutable network, and four proxies —
-all packaged in [`docs/tutorial/`](tutorial/) so you can start without building anything:
+Three loopback services, two closed ports, one unroutable network and four proxies, all
+packaged in [`docs/tutorial/`](tutorial/) so you can start without building anything:
 
 ```console
 $ cd docs/tutorial
@@ -45,23 +44,22 @@ scanr-lab: lab is up on 127.0.0.1
   next: scanr-lab check  |  scanr-lab tunnel  |  scanr-lab down
 ```
 
-`./scanr-lab tunnel` adds the `ssh -D` for use case 5; `./scanr-lab check` shows a live
-`up` / `down` for every port; `./scanr-lab down` stops it all.
+`./scanr-lab tunnel` adds the `ssh -D` for use case 5, an OpenSSH dynamic forward through
+a throwaway `sshd`. `./scanr-lab check` shows a live `up` / `down` for every port.
+`./scanr-lab down` stops it all.
 
-`scanr-lab` is a single [`uv`](https://docs.astral.sh/uv/) script — no VM, no root — that
-brings the whole environment up: `./scanr-lab install` puts it on your PATH as
-`scanr-lab`, and `scanr-lab uninstall` removes it. The services it runs are
-`python3 docs/tutorial/lab.py`, standard library only: 25025 greets on connect like an
-SMTP server, 28080 accepts and says nothing, 28443 is a TLS 1.2 server with a self-signed
-certificate, and 28444 answers only TLS 1.0 and 1.1 — the old appliance use case 9
-surveys. Ports 29000 and 29001 have nothing listening.
-`192.0.2.0/24` (TEST-NET-1) is never routed, so probes to it time out. The proxies —
-dante (SOCKS5 `:1082`), 3proxy (SOCKS5 `:1081`), squid (HTTP CONNECT `:3128`) — run in
-rootless podman from `docs/tutorial/proxies/`; without podman, point the config at any
-SOCKS5 and HTTP proxy you have. `./scanr-lab tunnel` adds an OpenSSH dynamic forward
-through a throwaway `sshd`, for use case 5. `./scanr-lab down` stops all of it.
+`scanr-lab` is a single [`uv`](https://docs.astral.sh/uv/) script, no VM, no root.
+`./scanr-lab install` puts it on your PATH as `scanr-lab`; `scanr-lab uninstall` removes
+it. The services are `python3 docs/tutorial/lab.py`, standard library only. 25025 greets
+on connect like an SMTP server. 28080 accepts and says nothing. 28443 is a TLS 1.2 server
+with a self-signed certificate. 28444 answers only TLS 1.0 and 1.1, the old appliance that
+use case 9 surveys. Ports 29000 and 29001 have nothing listening. `192.0.2.0/24`
+(TEST-NET-1) is never routed, so probes to it time out. The proxies run in rootless
+podman from `docs/tutorial/proxies/`: dante (SOCKS5 `:1082`), 3proxy (SOCKS5 `:1081`,
+HTTP CONNECT `:3130`), squid (HTTP CONNECT `:3128`), tinyproxy (HTTP CONNECT `:3129`).
+Without podman, point the config at any SOCKS5 and HTTP proxy you have.
 
-The configuration below is `docs/tutorial/scanr.toml`; every command in this guide runs
+The configuration below is `docs/tutorial/scanr.toml`. Every command in this guide runs
 from that directory.
 
 ```toml
@@ -111,7 +109,7 @@ ports = ["lab"]
 
 ![01-first-scan](tutorial/demos/01-first-scan.gif)
 
-<sub>▶ [`demos/01-first-scan.cast`](tutorial/demos/01-first-scan.cast) — `asciinema play` for a real terminal</sub>
+<sub>▶ [`demos/01-first-scan.cast`](tutorial/demos/01-first-scan.cast), `asciinema play` for a real terminal</sub>
 
 ```console
 $ scanr run --targets 127.0.0.1 --ports 25025,28080,28443,29000,29001 --all --output-dir results
@@ -138,15 +136,16 @@ record          results/scan-adhoc-2026_08_26T01_53_14Z-5d2875ea.jsonl.gz
 
 What to notice:
 
-- Results stream as they arrive, in randomised order (the seed is printed; use case 4
-  shows why). `--all` shows every state; the default shows open ports only.
-- The greeting from 25025 is on the line. Nothing was sent to get it — the service
-  spoke first — and it is shown as printable ASCII only, because those bytes belong to
-  the scanned host and a terminal acts on escape sequences.
+- The Overview prints the resolved settings and the seed before any traffic. Results
+  stream as they arrive, in randomised order; use case 4 shows why the seed matters.
+  `--all` shows every state; the default shows open ports only.
+- The greeting from 25025 is on the line. Nothing was sent to get it; the service spoke
+  first. It is shown as printable ASCII only, because those bytes belong to the scanned
+  host and a terminal acts on escape sequences.
 - `saltd-licensing` is a guess from `/etc/services`, never a fingerprint.
-- The last line names a **record**. It was `.partial` while the scan ran and was renamed
-  when the terminal event was written. A file still called `.partial` means the process
-  died.
+- The Summary's `record` line names the file. It was `.partial` while the scan ran and
+  was renamed when the terminal event was written. A file still called `.partial` means
+  the process died.
 
 The same scan in nmap:
 
@@ -160,16 +159,16 @@ PORT      STATE  SERVICE
 29001/tcp closed unknown
 ```
 
-Same verdicts — the differential tests in CI hold that true. The difference is what is
-left afterwards. `nmap -oX` records what it found; it does not record the resolved
+Same verdicts; the differential tests in CI hold that true. The difference is what is
+left afterwards. `nmap -oX` records what it found. It does not record the resolved
 settings that produced it, whether the run finished, or what was never probed. scanr's
-record does, unconditionally, which is the rest of this guide.
+record does, unconditionally. The rest of this guide is that record.
 
 ## 2. Reading the record
 
 ![02-record](tutorial/demos/02-record.gif)
 
-<sub>▶ [`demos/02-record.cast`](tutorial/demos/02-record.cast) — `asciinema play` for a real terminal</sub>
+<sub>▶ [`demos/02-record.cast`](tutorial/demos/02-record.cast), `asciinema play` for a real terminal</sub>
 
 ```console
 $ scanr output verify results/scan-adhoc-2026_08_26T01_53_14Z-5d2875ea.jsonl.gz
@@ -209,9 +208,9 @@ $ scanr output verify truncated.jsonl
   problem: no terminal event — the scan did not finish writing (process died?)
 ```
 
-The terminal event's counts are the authority and every reader is held to them, so a
-record that has lost a result cannot pass as complete. Run `verify` on any record
-someone hands you. Exit `2` means the record is bad, `1` means it could not be read.
+The terminal event's counts are the authority and every reader checks against them, so
+a record that has lost a result cannot pass as complete. Run `verify` on any record
+someone hands you. Exit `2` means the record is bad; `1` means it could not be read.
 
 ```console
 $ scanr output summarize results/scan-adhoc-2026_08_26T01_53_14Z-5d2875ea.jsonl.gz
@@ -231,8 +230,7 @@ by host (1 host):
 ...
 ```
 
-`results` is the per-endpoint view with filters, and its formats are for handing work
-on:
+`results` is the per-endpoint view with filters. Its formats hand work on:
 
 ```console
 $ scanr output results --states open --format nmap results/scan-*.jsonl.gz
@@ -244,7 +242,7 @@ $ scanr output results --states open --format list results/scan-*.jsonl.gz | htt
 127.0.0.1:28443
 ```
 
-That first line is the intended relationship with nmap: scanr finds what is reachable,
+That first line is the intended relationship with nmap. scanr finds what is reachable,
 fast and through proxies, and hands the open set to `nmap -sV`, which has twenty years of
 service signatures scanr will never duplicate. `-Pn -n` stop nmap repeating the work.
 
@@ -256,8 +254,8 @@ service signatures scanr will never duplicate. `-Pn -n` stop nmap repeating the 
  "tool_version":"1.0.0-rc.5","ts":"2026-08-26T01:53:14.715Z","type":"scan_started", ...}
 ```
 
-and the last line is the terminal event, whose `counts` are the authority on totals —
-never count lines of any one type, since spans collapse repeated outcomes:
+and the last line is the terminal event. Its `counts` are the authority on totals. Never
+count lines of any one type, since spans collapse repeated outcomes:
 
 ```json
 {"type":"scan_completed","termination":"natural","graceful":true,"exit_code":0,
@@ -271,49 +269,64 @@ Schema and `jq` recipes: [output-schema.md](output-schema.md).
 
 ![03-plan](tutorial/demos/03-plan.gif)
 
-<sub>▶ [`demos/03-plan.cast`](tutorial/demos/03-plan.cast) — `asciinema play` for a real terminal</sub>
+<sub>▶ [`demos/03-plan.cast`](tutorial/demos/03-plan.cast), `asciinema play` for a real terminal</sub>
 
 ```console
 $ scanr plan lab-audit
+Overview
 scan            lab-audit
 description     The lab hosts through the dante proxy
 profile         proxy                                   builtin
+
+Transport
 transport       dante (socks5)                          scan.lab-audit
   address       127.0.0.1:1082
   fidelity      full                                    declared in config
-dns             auto -> transport                       builtin
+dns             auto -> transport (names handed to the proxy to resolve) builtin
+
+Scope
 targets         1 (127.0.0.1)
 ports           5 (25025,28080,28443,29000-29001)
 probes          5
 labels          /etc/services (5,863) + builtin (2)     builtin
-order           randomized, seed 57e8880e1ae550f9       builtin
+order           randomized, seed 0a693b6e29273549       builtin
+
+Timing
 concurrency     512                                     builtin.proxy
 rate            400/s                                   builtin.proxy
 connect_timeout 5s                                      builtin.proxy
 proxy_timeouts  connect 3s, handshake 5s                builtin.proxy
+retries         1 (timeouts only, delay 250ms)          builtin.proxy
+
+Probing
 banner          up to 1024 B, 500ms max wait            builtin
 tls probe       off                                     builtin
-retries         1 (timeouts only, delay 250ms)          builtin.proxy
+
+Output
 output          ./scanr-results                         builtin
   format        gzip                                    builtin
   detail        repeated outcomes collapsed             builtin
 
-projection      ~0.01s at 400/s if every probe answers
-                ~10.25s if every probe times out (5s x 2 attempts / 512 in flight)
-host            ephemeral 32768-60999 (28232 ports), tcp_tw_reuse=2 (loopback only), nofile=524288
+Projection
+rate-bound      ~0.01s at 400/s if every probe answers
+timeout-bound   ~10.25s if every probe times out (5s x 2 attempts / 512 in flight)
+
+Host
+facts           ephemeral 32768-60999 (28232 ports), tcp_tw_reuse=2 (loopback only), nofile=524288
 ```
 
-No traffic. Every value with the layer it came from (`builtin.proxy`, `scan.lab-audit`,
-`cli`), so "why is the rate 400?" is answered on the screen. The two projection lines
-are the ones to read before a big scan — the same plan for a `/24` × all 65,535 ports:
+No traffic. Every value shows the layer it came from (`builtin.proxy`, `scan.lab-audit`,
+`cli`), so "why is the rate 400?" is answered on the screen. Read the two projection
+lines before a big scan. The same plan for a `/24` × all 65,535 ports:
 
 ```console
 $ scanr plan --targets 10.0.0.0/24 --ports 1-65535 --transport dante
 ...
 probes          16,776,960
 ...
-projection      ~11h39m02s at 400/s if every probe answers
-                ~3d21h17m if every probe times out (5s x 2 attempts / 512 in flight)
+Projection
+rate-bound      ~11h39m02s at 400/s if every probe answers
+timeout-bound   ~3d21h17m if every probe times out (5s x 2 attempts / 512 in flight)
 ```
 
 The rate cap never binds on a network of silent ports; the timeout does. That is the
@@ -322,30 +335,30 @@ hosts that answered". nmap has no equivalent; you find out by waiting.
 
 ## 4. Named scans, and getting the same scan twice
 
-Use case 3 ran a scan defined in `scanr.toml`. That file is the point: it is committed
+Use case 3 ran a scan defined in `scanr.toml`. That file is the point. It is committed
 with the engagement, `plan` shows what it resolves to, and the record embeds the
-resolved configuration, so "what exactly did we run in March" is answered by the file,
-not by shell history.
+resolved configuration. "What exactly did we run in March" is answered by the file, not
+by shell history.
 
-A named scan also names its record: `scanr run internal-web` writes
-`scan-internal_web-2026_08_26T01_53_14Z-4a96aca3.jsonl.gz`, where an ad-hoc `run
---targets …` would write `scan-adhoc-…`. The scan name identifies the file at a glance,
-the `YYYY_MM_DDThh_mm_ssZ` stamp sorts it, and the `scan_id` breaks ties — `scan-*` still
+A named scan also names its record. `scanr run internal-web` writes
+`scan-internal_web-2026_08_26T01_53_14Z-4a96aca3.jsonl.gz`; an ad-hoc `run --targets …`
+writes `scan-adhoc-…`. The scan name identifies the file at a glance, the
+`YYYY_MM_DDThh_mm_ssZ` stamp sorts it, and the `scan_id` breaks ties. `scan-*` still
 globs them all, and the file's contents remain the authority.
 
 The seed is the other half. Probe order is a seeded permutation of the target × port
-matrix — the record has the seed, `--seed` replays it, and `output remainder` (use
-case 8) uses it to say precisely which endpoints a killed scan never reached.
+matrix. The record has the seed, `--seed` replays it, and `output remainder` (use case 8)
+uses it to say which endpoints a killed scan never reached.
 
 ## 5. Through a SOCKS5 proxy: know what the proxy can tell you
 
 ![05-socks5](tutorial/demos/05-socks5.gif)
 
-<sub>▶ [`demos/05-socks5.cast`](tutorial/demos/05-socks5.cast) — `asciinema play` for a real terminal</sub>
+<sub>▶ [`demos/05-socks5.cast`](tutorial/demos/05-socks5.cast), `asciinema play` for a real terminal</sub>
 
 This is the reason the tool exists. SOCKS5 defines distinct replies for refused,
-unreachable and denied, but not every proxy uses them, and a proxy that cannot say
-"refused" cannot let you tell a closed port from a filtered one. scanr measures it:
+unreachable and denied, but not every proxy uses them. A proxy that cannot say "refused"
+cannot let you tell a closed port from a filtered one. scanr measures it:
 
 ```console
 $ scanr transport test dante
@@ -364,8 +377,9 @@ transport dante (socks5 127.0.0.1:1082)
 ```
 
 dante answers `0x05` for a refused port and `0x01` for an unreachable one, so `closed` is
-real through it. Record the measurement in the config (it is in the lab file already)
-and the "fidelity not measured" warning goes away; the record states it on every scan.
+real through it. Record the measurement in the config (the lab file already has it) and
+the "fidelity not measured" warning goes away. The record then states the fidelity on
+every scan, and the Overview shows it next to the transport:
 
 ```console
 $ scanr run lab-audit --all --output-dir results-dante
@@ -388,15 +402,15 @@ states          3 open, 2 closed, 0 filtered, 0 error
 probed          5 of 5
 ```
 
-Same verdicts as the direct scan, and every result in the record carries
-`source: proxy_reply` — the classification is the proxy's assertion, and the record
-says so. Through OpenSSH's `ssh -D`, which sends no reply at all for a refused port,
-the same scan reports `error` for the two closed ports rather than guessing.
+Same verdicts as the direct scan. Every result in the record carries
+`source: proxy_reply`, so the record says the classification is the proxy's assertion.
+Through OpenSSH's `ssh -D`, which sends no reply at all for a refused port, the same
+scan reports `error` for the two closed ports rather than guessing.
 
 ### The proxy everyone actually uses: `ssh -D`
 
 The lab's last transport is an OpenSSH dynamic forward to a throwaway `sshd`
-(`ssh -N -D 127.0.0.1:1088 bastion`), which is how most people reach an internal network
+(`ssh -N -D 127.0.0.1:1088 bastion`). That is how most people reach an internal network
 in practice. Measure it:
 
 ```console
@@ -416,10 +430,10 @@ transport tunnel (socks5 127.0.0.1:1088)
       fidelity = "open_only"
 ```
 
-OpenSSH knows the port was refused — its own log says `connect failed: Connection
-refused` — but its SOCKS5 layer has no way to say so: it closes the channel without a
-reply. Through this proxy a closed port and a firewalled port look identical, and scanr
-says so before you spend the scan. Now the scan:
+OpenSSH knows the port was refused; its own log says `connect failed: Connection
+refused`. Its SOCKS5 layer has no way to say so, and closes the channel without a reply.
+Through this proxy a closed port and a firewalled port look identical, and scanr says so
+before you spend the scan. Now the scan:
 
 ```console
 $ scanr run lab-audit --transport tunnel --profile ssh --all --output-dir results-tunnel
@@ -447,25 +461,26 @@ states          3 open, 0 closed, 0 filtered, 2 error
 probed          5 of 5
 ```
 
-The open set is exact; the two closed ports are `error`, with the reason in the record,
-because `closed` was never observed. Record `fidelity = "open_only"` in the config and
-the warning becomes a statement in every record instead. `--profile ssh` is one of three
-built for this proxy: its listener is local, so the ephemeral-port rate cap that a remote
-proxy needs does not apply, and its throughput cliffs above ~128 in flight (measured;
+The open set is exact. The two closed ports are `error`, with the reason in the record,
+because `closed` was never observed. The Warnings section flags the unmeasured fidelity
+before the first result. Record `fidelity = "open_only"` in the config and it becomes a
+statement in every record instead. `--profile ssh` is one of three profiles built for
+this proxy. Its listener is local, so the ephemeral-port rate cap a remote proxy needs
+does not apply, and its throughput cliffs above ~128 in flight (measured;
 [tuning.md](tuning.md)).
 
-Versus nmap: `proxychains nmap` intercepts nmap's sockets with `LD_PRELOAD`, leaks DNS
-unless you are careful, fights nmap's parallelism, and gives you no way to know whether a
-`closed` came from the proxy's real reply or from the interception layer's guess.
-`nmap --proxies` exists but is documented as incomplete. scanr speaks SOCKS5 itself,
-resolves hostnames on the proxy side (`dns  auto -> transport` in the plan), and never
-records a state it did not observe.
+Versus nmap. `proxychains nmap` intercepts nmap's sockets with `LD_PRELOAD`, leaks DNS
+unless you are careful, fights nmap's parallelism, and gives no way to know whether a
+`closed` came from the proxy's reply or from the interception layer's guess.
+`nmap --proxies` exists, but its own documentation calls it incomplete. scanr speaks
+SOCKS5 itself, resolves hostnames on the proxy side (`dns  auto -> transport` in the
+plan), and never records a state it did not observe.
 
 ## 6. Through an HTTP CONNECT proxy
 
 ![06-http-connect](tutorial/demos/06-http-connect.gif)
 
-<sub>▶ [`demos/06-http-connect.cast`](tutorial/demos/06-http-connect.cast) — `asciinema play` for a real terminal</sub>
+<sub>▶ [`demos/06-http-connect.cast`](tutorial/demos/06-http-connect.cast), `asciinema play` for a real terminal</sub>
 
 Corporate proxies are usually HTTP CONNECT, not SOCKS. scanr supports them with the same
 config keys, and the measurement tells you the cost up front:
@@ -487,7 +502,8 @@ transport corp (http 127.0.0.1:3128)
 
 HTTP has no status that means "refused". squid says `503` for both a refused and an
 unreachable destination; tinyproxy says `500` for both; 3proxy `502`. So through an HTTP
-proxy every non-open port is `error`, honestly:
+proxy every non-open port is `error`, and the run's Warnings section says so before the
+first result:
 
 ```console
 $ scanr run lab-audit --transport corp --all --output-dir results-corp
@@ -512,18 +528,18 @@ states          3 open, 0 closed, 0 filtered, 2 error
 probed          5 of 5
 ```
 
-The open set is exactly right, which for most engagements is what matters. The record
-keeps the status line in each error's `reason`.
+The open set is exact, which for most engagements is what matters. The record keeps the
+status line in each error's `reason`.
 
 ## 7. Chains and pools
 
 ![07-chain-pool](tutorial/demos/07-chain-pool.gif)
 
-<sub>▶ [`demos/07-chain-pool.cast`](tutorial/demos/07-chain-pool.cast) — `asciinema play` for a real terminal</sub>
+<sub>▶ [`demos/07-chain-pool.cast`](tutorial/demos/07-chain-pool.cast), `asciinema play` for a real terminal</sub>
 
-A **chain** goes through several proxies in order; an HTTP hop can sit in front of a
-SOCKS5 one. Its fidelity is the *exit* hop's, because only the last CONNECT names the
-destination and its reply comes back untouched:
+A chain goes through several proxies in order; an HTTP hop can sit in front of a SOCKS5
+one. Its fidelity is the exit hop's, because only the last CONNECT names the destination
+and its reply comes back untouched:
 
 ```console
 $ scanr transport test path
@@ -535,9 +551,9 @@ transport path (chain 127.0.0.1:1082)
 
 squid then dante is `full`, even though squid alone is `open_only`.
 
-A **pool** spreads probes across proxies — multiplying both the proxies' connection caps
-and your local ephemeral-port budget — and assigns each endpoint to a member by hash, so
-a rerun goes the same way. Every result names its member:
+A pool spreads probes across proxies, which multiplies both the proxies' connection caps
+and your local ephemeral-port budget. It assigns each endpoint to a member by hash, so a
+rerun goes the same way. Every result names its member:
 
 ```console
 $ scanr run lab-audit --transport spread --all --no-spans --output-dir results-pool
@@ -555,18 +571,17 @@ $ scanr output results --format json results-pool/scan-*.jsonl.gz | jq -c '{port
 {"port":29001,"state":"closed","via":"exit-b"}
 ```
 
-`via` is what makes a mixed pool interpretable: if one member is broken, its share of
-results says so instead of looking like a flaky network. A pool is not failover — a dead
-member fails its share rather than silently rerouting, because that would make `via` a
-lie.
+`via` is what makes a mixed pool interpretable. If one member is broken, its share of
+results says so instead of looking like a flaky network. A pool is not failover. A dead
+member fails its share rather than rerouting, because rerouting would make `via` a lie.
 
 ## 8. Interruption, and resuming exactly
 
 ![08-interrupt](tutorial/demos/08-interrupt.gif)
 
-<sub>▶ [`demos/08-interrupt.cast`](tutorial/demos/08-interrupt.cast) — `asciinema play` for a real terminal</sub>
+<sub>▶ [`demos/08-interrupt.cast`](tutorial/demos/08-interrupt.cast), `asciinema play` for a real terminal</sub>
 
-A scan of three hosts, two of them silent, at concurrency 2 so it takes a while; Ctrl-C
+A scan of three hosts, two of them silent, at concurrency 2 so it takes a while. Ctrl-C
 after a second and a half:
 
 ```console
@@ -600,9 +615,9 @@ $ echo $?
 ```
 
 The first Ctrl-C drains what is in flight, bounded by the connect timeout; a second
-exits at once. Either way the record is finalised — `verify` passes on it — and the three
-buckets sum to the plan: 5 completed, 2 abandoned (issued, may have touched the
-network), 11 never started.
+exits at once. Either way the record is finalised and `verify` passes on it. The
+Summary's three buckets sum to the plan: 5 completed, 2 abandoned (issued, may have
+touched the network), 11 never started.
 
 ```console
 $ scanr output remainder results-int/scan-*.jsonl.gz
@@ -638,29 +653,28 @@ $ scanr output verify results-resumed/scan-*.jsonl.gz
 ok — record is complete and internally consistent
 ```
 
-Exactly the 13 endpoints that were outstanding — not the whole of any host — and the
-second record names the first, so the two are one scan for anyone reading them later.
-The abandoned probes are included because whether they reached the network is unknown.
+Exactly the 13 endpoints that were outstanding, not the whole of any host. The second
+record names the first, so the two are one scan for anyone reading them later. The
+abandoned probes are included because whether they reached the network is unknown.
 
 nmap's `--resume` works from its own normal/greppable output and resumes at host
-granularity; endpoints already finished on a partly scanned host are done again, and
+granularity. Endpoints already finished on a partly scanned host are done again, and
 nothing links the two outputs.
 
 ## 9. What a service says: banners, and the one active probe
 
 ![09-tls](tutorial/demos/09-tls.gif)
 
-<sub>▶ [`demos/09-tls.cast`](tutorial/demos/09-tls.cast) — `asciinema play` for a real terminal</sub>
+<sub>▶ [`demos/09-tls.cast`](tutorial/demos/09-tls.cast), `asciinema play` for a real terminal</sub>
 
-Banners are read by default and cost nothing to the target beyond the connection the
-scan already made — the service writes its greeting whether or not anyone reads it.
-Only services that speak first have one: SSH, SMTP, FTP, POP3, IMAP, MySQL. HTTP and
-anything behind TLS say nothing, and the record distinguishes "said nothing" from
-"nothing there".
+scanr reads banners by default. They cost the target nothing beyond the connection the
+scan already made; the service writes its greeting whether or not anyone reads it. Only
+services that speak first have one: SSH, SMTP, FTP, POP3, IMAP, MySQL. HTTP and anything
+behind TLS say nothing, and the record distinguishes "said nothing" from "nothing there".
 
-For those, `--tls` sends one fixed TLS 1.2 ClientHello and records what comes back. It is
-**off by default** because it is the only thing scanr ever sends to a service, and the
-record states what was sent either way:
+For those, `--tls` sends one fixed ClientHello and records what comes back. It is off by
+default because it is the only thing scanr ever sends to a service. The record states
+what was sent either way:
 
 ```console
 $ scanr run --targets 127.0.0.1 --ports 25025,28080,28443 --tls --output-dir results-tls
@@ -673,15 +687,14 @@ $ scanr output results --format json results-tls/scan-*.jsonl.gz \
 {"port":28443,"cn":"lab.internal","expires":"2026-09-26T01:43:02Z","alpn":"h2","cipher":"ECDHE-ECDSA-AES256-GCM-SHA384"}
 ```
 
-Three ports, three different answers: a greeting (never probed — a service that spoke
-first is not TLS), a silent port that closed on the hello (`tls no reply`), and a TLS
-server that returned its certificate, cipher and ALPN. The record holds what
-scanr read from the leaf under `tls.cert` — subject, issuer, alternative names, validity
-window, key type — and the DER itself for `openssl x509` or `tlsx`. Read, never
-verified: the line says `self-signed`, not `untrusted`, because trust is a policy
-scanr does not have.
+Three ports, three different answers. 25025 gave a greeting and was never probed; a
+service that spoke first is not TLS. 28080 closed on the hello (`tls no reply`). 28443
+returned its certificate, cipher and ALPN. The record holds what scanr read from the
+leaf under `tls.cert` (subject, issuer, alternative names, validity window, key type)
+and the DER itself for `openssl x509` or `tlsx`. Read, never verified. The line says
+`self-signed`, not `untrusted`, because trust is a policy scanr does not have.
 
-The hello offers TLS 1.3 and 1.2, and scanr reads either: on a 1.3 server it finishes
+The hello offers TLS 1.3 and 1.2, and scanr reads either. On a 1.3 server it finishes
 the key exchange and decrypts the certificate rather than stopping at the version. The
 scan's config event says `"tls": {"enabled": true, "offered": "1.3,1.2", "sent_bytes": 218}`;
 with `--tls` off it says `"sent_bytes": 0`. The exact 218 bytes are listed in
@@ -689,11 +702,11 @@ with `--tls` off it says `"sent_bytes": 0`. The exact 218 bytes are listed in
 
 ### Which SSL/TLS versions: the old appliance
 
-A server answers a hello with the *highest* version it shares, never the oldest it still
-accepts, so one hello cannot tell you whether a box still speaks SSLv3 — the thing you
-need to know before you can even connect to it with a modern client. `--tls-versions`
-asks each version for itself, on its own connection with a hello of that era. Port 28444
-is the lab's old appliance; 28443 is the modern server, for contrast:
+A server answers a hello with the highest version it shares, never the oldest it still
+accepts. One hello cannot tell you whether a box still speaks SSLv3, which you need to
+know before you can connect to it with a modern client. `--tls-versions` asks each
+version for itself, on its own connection with a hello of that era. Port 28444 is the
+lab's old appliance; 28443 is the modern server, for contrast:
 
 ```console
 $ scanr run --targets 127.0.0.1 --ports 28443,28444 --tls --tls-versions --output-dir results-ver
@@ -702,10 +715,10 @@ $ scanr run --targets 127.0.0.1 --ports 28443,28444 --tls --tls-versions --outpu
 ```
 
 28443 refused the survey's older hellos and speaks only 1.2 (`versions:1.2..1.2`). 28444
-rejected the main 1.3/1.2 hello outright — hence the alert — but answered the 1.0 and 1.1
-hellos, and nothing newer: **`legacy-only:tls1.1`**, a server no current browser or
-default `openssl` will connect to. The record says exactly which versions answered and
-what it takes to reach it:
+rejected the main 1.3/1.2 hello outright, hence the alert, but answered the 1.0 and 1.1
+hellos and nothing newer. That is `legacy-only:tls1.1`, a server no current browser or
+default `openssl` will connect to. The record says which versions answered and what it
+takes to reach it:
 
 ```console
 $ scanr output results --format json results-ver/scan-*.jsonl.gz \
@@ -717,26 +730,26 @@ $ scanr output results --format json results-ver/scan-*.jsonl.gz \
 {"ssl2":false,"ssl3":false,"1.0":true,"1.1":true,"1.2":false}
 ```
 
-`advice` is scanr answering the question you actually have — which tool, with which flag,
-still reaches this host — rather than leaving you to work it out. The survey costs up to
-five extra connections per silent open port (`.tls.versions.connections`), so it is
-opt-in: `--tls` records the version the server prefers, `--tls-versions` records the whole
-range it accepts. It is still all reading — no cipher is exercised, no handshake
-completed. Enumerating every cipher suite is `testssl.sh`'s job, and dozens of
-connections per port; scanr stops at the version range and the certificate.
+`advice` names the tool and flag that still reach this host, so you do not have to work
+it out. The survey costs up to five extra connections per silent open port
+(`.tls.versions.connections`), so it is opt-in. `--tls` records the version the server
+prefers; `--tls-versions` records the whole range it accepts. It is still all reading.
+No cipher is exercised, no handshake completed. Enumerating every cipher suite is
+`testssl.sh`'s job, at dozens of connections per port; scanr stops at the version range
+and the certificate.
 
-nmap `-sV` does far more with the open ports themselves — and that is where use case 2's
+nmap `-sV` does far more with the open ports themselves. That is where use case 2's
 `--format nmap` sends them.
 
 ## 10. Tuning: the proxy is the limit, not scanr
 
 ![10-calibrate](tutorial/demos/10-calibrate.gif)
 
-<sub>▶ [`demos/10-calibrate.cast`](tutorial/demos/10-calibrate.cast) — `asciinema play` for a real terminal</sub>
+<sub>▶ [`demos/10-calibrate.cast`](tutorial/demos/10-calibrate.cast), `asciinema play` for a real terminal</sub>
 
 Concurrency and rate are yours to set, and the plan shows them. The number that decides
-whether a proxied scan succeeds is usually the proxy's own connection cap, which
-`--calibrate` measures by reproducing a scan's churn:
+whether a proxied scan succeeds is usually the proxy's own connection cap. `--calibrate`
+measures it by reproducing a scan's churn:
 
 ```console
 $ scanr transport test exit-b --calibrate
@@ -754,28 +767,28 @@ transport exit-b (socks5 127.0.0.1:1081)
 ```
 
 That is 3proxy at its default `maxconn 100`. Seven built-in profiles cover the common
-shapes (`proxy`, `proxy-careful`, three for `ssh -D`, `direct`, `direct-fast`), and
+shapes (`proxy`, `proxy-careful`, three for `ssh -D`, `direct`, `direct-fast`);
 [tuning.md](tuning.md) has the measurements behind them.
 
-On its own engine, direct, scanr is not the bottleneck. Same terms for both tools —
+On its own engine, direct, scanr is not the bottleneck. Same terms for both tools:
 unprivileged connect scans, loopback `/24`, every port refused except the real listeners,
-nmap 7.92 at `-T5 --min-rate 10000 --max-retries 0 -Pn -n`, 64-core machine:
+nmap 7.92 at `-T5 --min-rate 10000 --max-retries 0 -Pn -n`, 64-core machine.
 
 | | probes | scanr, default profile | nmap `-T5` | ratio |
 |---|---|---|---|---|
 | `/24` × 1,000 ports | 256,000 | **0.40 s** (~640,000/s) | 4.82 s | 12× |
 | `/24` × 10,000 ports | 2,560,000 | **4.3 s** (~600,000/s) | 48.4 s | 11× |
 
-Same open ports from both (259 and 515), 18 MB resident against 105 MB, and the
-2.56M-probe record is 36 KB. Through a proxy neither tool's engine matters — the proxy's
-cap and the network's RTT set the rate — which is why the measurements above are the
-ones this tool is built around.
+Both found the same open ports (259 and 515). scanr used 18 MB resident against nmap's
+105 MB, and the 2.56M-probe record is 36 KB. Through a proxy neither tool's engine
+matters; the proxy's cap and the network's RTT set the rate. That is why the tool is
+built around the measurements above.
 
 ## 11. Trusting the result
 
 - `output verify` on every record you act on, or receive.
-- Credentials never enter a record or an error message; inline passwords in config are
-  refused, not warned about; the record is created mode 0600.
+- Credentials never enter a record or an error message. scanr refuses inline passwords
+  in config rather than warning about them, and creates the record mode 0600.
 - Every claim in this guide is backed by a named test, a corpus record or a measurement:
   [evidence.md](evidence.md). What 1.x promises to keep stable: [stability.md](stability.md).
 
@@ -792,11 +805,11 @@ ones this tool is built around.
 | 8 · interruption | `--resume` at host granularity from its own output | exact endpoint remainder, piped straight back in, records linked |
 | 9 · what a service says | `-sV`, far more, actively | passive banners by default; one documented ClientHello (TLS 1.3 and 1.2) on request; `--tls-versions` names a server only an old client can reach and how to reach it; then `--format nmap` hands the open set to `-sV` |
 | 10 · limits | adaptive timing hides them | measured proxy caps, explicit knobs, and the numbers on the page |
-| 11 · trust | — | credentials never recorded, mode 0600, every claim mapped to a test |
+| 11 · trust | nothing | credentials never recorded, mode 0600, every claim mapped to a test |
 
 ## Where next
 
 [getting-started.md](getting-started.md) is the short path from install to a verified
-record; [cli.md](cli.md) every flag; [transports.md](transports.md) the measured
-behaviour of real proxies; [troubleshooting.md](troubleshooting.md) is keyed to the
-warnings the tool emits.
+record. [cli.md](cli.md) lists every flag. [transports.md](transports.md) has the
+measured behaviour of real proxies. [troubleshooting.md](troubleshooting.md) is keyed to
+the warnings the tool emits.

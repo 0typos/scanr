@@ -74,7 +74,8 @@ Seven built-ins. Flat and complete, no inheritance. `scanr config show` prints t
 - Default follows the transport: `proxy` for any proxy (socks5, http, chain, pool), else `direct`.
 - `[profiles.proxy]` overrides only the fields set; a new name falls back to the transport-appropriate built-in.
 - See [tuning.md](tuning.md) before changing these.
-- Also profile fields: `banner_bytes` (1024), `banner_timeout` (500ms), `tls_timeout` (1s) — ceilings for the banner read and the TLS probe. `[defaults]` and a scan may set `tls` (false) and `tls_versions` (false, needs `tls`).
+- Other profile fields, no CLI flag: `proxy_connect_timeout` (TCP connect to the proxy) and `handshake_timeout` (SOCKS5 greeting, authentication, CONNECT reply), both ignored for direct and profile-dependent; `retry_delay` (before a retry, profile-dependent); `banner_bytes` (1024), `banner_timeout` (500ms), `tls_timeout` (1s), ceilings for the banner read and the TLS probe.
+- `[defaults]` keys: `profile`, `transport`, `output_dir`, `open_only`, `compress`, `spans`, `banner` (true), `tls` (false), `tls_versions` (false, needs `tls`), `services_file`, `use_etc_services`. A scan may set all but the last two, plus `exclude` and `dns`, for itself.
 
 ## Transports
 
@@ -88,7 +89,7 @@ dns = "auto"
 fidelity = "full"                     # from `scanr transport test lab`
 ```
 
-`direct` always exists undefined. `fidelity`: [transports.md](transports.md).
+`direct` always exists undefined. `password_file` is the alternative to `password_env`; an inline `password` is rejected. `type = "chain"` takes `hops`, `type = "pool"` takes `members`. `fidelity`, chains and pools: [transports.md](transports.md).
 
 ## Target sets
 
@@ -144,6 +145,8 @@ An unmatched name is a literal spec: `targets = ["10.0.0.0/24"]` needs no set.
 dns = "auto"   # auto | transport | local | disabled
 ```
 
+A key on a transport or a scan; `--dns` overrides both.
+
 | mode | who resolves | leaks locally | records the address probed |
 |---|---|---|---|
 | `transport` | the proxy | no | no |
@@ -176,7 +179,7 @@ All problems at once, with line and nearest match. Unknown keys are errors.
 
 ## CLI overrides
 
-An allowlist; timing knobs stay in config. Full list: [cli.md](cli.md#flags).
+An allowlist; proxy-side timing knobs stay in config. Full list: [cli.md](cli.md#flags).
 
 ```
 --profile  --transport  --targets  --ports  --exclude

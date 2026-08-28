@@ -1,15 +1,24 @@
 # Getting started
 
-Install, configure, measure the proxy, run, check the record. Every output is real.
+Install, configure, measure the proxy, run, check the record. Every output below is
+captured from a real run; the version banner varies.
 
 ## Install
+
+Prebuilt static binaries for eight Linux targets are attached to each
+[GitHub release](https://github.com/0typos/scanr/releases); unpack the tarball and put
+`scanr` on your `PATH`. From source:
+
+```console
+cargo install --git https://github.com/0typos/scanr --locked
+```
+
+or, for a static binary from a checkout:
 
 ```console
 cargo build --release --target x86_64-unknown-linux-musl
 sudo install -m755 target/x86_64-unknown-linux-musl/release/scanr /usr/local/bin/
 ```
-
-The musl build is static; `cargo install --path .` also works.
 
 ```console
 $ scanr --version
@@ -17,7 +26,7 @@ scanr 1.0.0-rc.5 (ee3bf48f4 x86_64-unknown-linux-gnu)
 rustc 1.98.0 (88d9e12ae 2026-08-18)
 ```
 
-The commit is recorded in every scan record.
+Every scan record carries this commit.
 
 ## 1. Write a configuration
 
@@ -48,7 +57,7 @@ help: did you mean `concurrency`?
 
 ## 2. Find out what your proxy can tell you
 
-Do this before trusting a proxied scan: a proxy not using SOCKS5's distinct
+Do this before trusting a proxied scan. A proxy that does not use SOCKS5's distinct
 refused/unreachable replies cannot separate closed from filtered.
 
 ```console
@@ -68,7 +77,8 @@ transport lab (socks5 127.0.0.1:1080)
 ```
 
 Paste that line into the config; it silences the per-scan "not measured" warning.
-`open_only` (OpenSSH `ssh -D`) gives open vs not-open only; non-open is recorded as `error`.
+`open_only` (OpenSSH `ssh -D`) gives open vs not-open only, and non-open is recorded as
+`error`.
 
 `--calibrate` finds the proxy's concurrency cap (real traffic, about a minute):
 
@@ -83,7 +93,7 @@ $ scanr transport test lab --calibrate
 
 ## 3. Look before you scan
 
-No network. Right-hand column: the configuration layer that supplied each value.
+No network. The right-hand column is the configuration layer that supplied each value.
 
 ```console
 $ scanr plan internal-web
@@ -106,10 +116,13 @@ retries         1 (timeouts only, delay 250ms)          builtin.proxy
 output          ./scanr-results                         defaults
 ```
 
-Warns on unmeasured fidelity, rate above the ephemeral-port budget, concurrency above
-`RLIMIT_NOFILE`.
+`plan` warns on unmeasured fidelity, rate above the ephemeral-port budget, and
+concurrency above `RLIMIT_NOFILE`.
 
 ## 4. Run it
+
+stderr is grouped into Overview, Warnings (when any), Results and Summary; stdout carries
+the result lines only.
 
 ```console
 $ scanr run internal-web --all
@@ -132,16 +145,15 @@ probed          3 of 3
 record          ./scanr-results/scan-internal_web-2026_07_30T23_50_11Z-0e1a180b.jsonl.gz
 ```
 
-The record is named `scan-<scan>-<UTC time>-<id>.jsonl.gz`: the scan name (`adhoc` for an
-ad-hoc run, the config name otherwise) so a directory of records is self-describing, a
-`YYYY_MM_DDThh_mm_ssZ` timestamp that sorts chronologically, and the record's `scan_id`
-to break ties and join back to the file's contents. `-` separates the four fields and
-appears in none of them — a hyphen in the name becomes `_`, and `T` splits the date from
-the time — so the name never runs into the delimiters. `scan-*` still matches them all.
+The record is named `scan-<scan>-<UTC time>-<id>.jsonl.gz`. The scan name is `adhoc`
+for an ad-hoc run and the config name otherwise, the `YYYY_MM_DDThh_mm_ssZ` timestamp
+sorts chronologically, and the `scan_id` breaks ties and joins the file to its contents.
+`-` separates the fields and appears in none of them; a hyphen in the scan name becomes
+`_`. `scan-*` matches them all.
 
 Without `--all` only open ports print; the record keeps every outcome. stdout is results
-only: `scanr run internal-web | awk '{print $1}' > open-ports.txt`. Ctrl-C drains
-in-flight probes and writes a complete record marked interrupted.
+only, so `scanr run internal-web | awk '{print $1}' > open-ports.txt` works. Ctrl-C
+drains in-flight probes and writes a complete record marked interrupted.
 
 ## 5. Check the record
 
@@ -155,8 +167,9 @@ scanr-results/scan-adhoc-2026_07_30T23_50_11Z-0e1a180b.jsonl.gz
 ok — record is complete and internally consistent
 ```
 
-Checks structure, count reconciliation, and credential leakage. A file still named
-`scan-<...>.jsonl.gz.partial` died before finalizing: results valid, `verify` says truncated.
+`verify` checks structure, count reconciliation and credential leakage. A file still
+named `scan-<...>.jsonl.gz.partial` died before finalizing; its results are valid and
+`verify` reports it truncated.
 
 ```console
 $ scanr output summarize scanr-results/scan-*.jsonl.gz
@@ -170,9 +183,9 @@ by host (1 host):
   127.0.0.1             2      1        0      0  8080/http-proxy 8443/https-alt
 ```
 
-`summarize` also breaks down by network, port, service (`--by`, `--format json`). `output
-results` filters by host, port, state; `--format nmap` / `list` hand on:
-[cli.md](cli.md#handing-results-to-another-tool).
+`summarize` also breaks down by network, port or service (`--by`, `--format json`).
+`output results` filters by host, port and state; `--format nmap` / `list` hand results
+to another tool: [cli.md](cli.md#handing-results-to-another-tool).
 
 ## 6. If it was interrupted
 
@@ -180,7 +193,8 @@ results` filters by host, port, state; `--format nmap` / `list` hand on:
 scanr output remainder scanr-results/scan-*.jsonl.gz | scanr run --pairs -
 ```
 
-Re-probes only endpoints never reported. The new record names the one it continues:
+`remainder` emits only endpoints never reported. The new record names the one it
+continues:
 
 ```console
 $ scanr output verify scanr-results/scan-*.jsonl.gz | grep resumed
@@ -189,5 +203,6 @@ $ scanr output verify scanr-results/scan-*.jsonl.gz | grep resumed
 
 ## Next
 
-Commands and global flags: [cli.md](cli.md). Doc index: [README.md](README.md). Man
-pages: `man scanr`, `man scanr-run`, etc.
+Ten worked use cases against a local lab, with recorded sessions: [tutorial.md](tutorial.md).
+Commands and global flags: [cli.md](cli.md). Diagnostics: [troubleshooting.md](troubleshooting.md).
+Doc index: [README.md](README.md). Man pages: `man scanr`, `man scanr-run`, etc.

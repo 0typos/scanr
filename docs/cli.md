@@ -64,14 +64,15 @@ The only command-line settings; all else is config, so a run is reproducible fro
 --full
 ```
 
+- `-V` / `--version` prints the version and exits.
 - `--full`: banners untruncated as they arrive (default cuts at 48 characters); display only, not recorded.
 - `--seed`: replay a randomized scan; order is randomized by default and the seed recorded.
 - `--pairs`: exact `host:port` endpoints, not target × port. `output remainder … | run --pairs -` resumes without re-probing.
 - `--resumed-from`: scan being continued. `remainder` emits `# resumed-from:`; `run` reads it from the pipe.
-- `--dns` (default `auto`): who resolves hostname targets. `auto` follows the transport — `local` (resolve on this host, a multi-address name expands to several targets) for direct and HTTP CONNECT, `transport` (hand the name to the proxy) for SOCKS5. `plan`'s `dns` row shows the effective mode and its resolver, e.g. `auto -> local (names resolved on this host)`; a `dns_mode_auto` warning fires when `auto` had a hostname to resolve, since a different transport could resolve it differently. `transport` on a transport that cannot resolve remotely is an error; `disabled` rejects hostname targets.
+- `--dns` (default `auto`): who resolves hostname targets. `local` resolves on this host; a multi-address name expands to several targets. `transport` hands the name to the proxy. `auto` picks `local` for direct and HTTP CONNECT, `transport` for SOCKS5. `plan`'s `dns` row shows the effective mode and its resolver, e.g. `auto -> local (names resolved on this host)`. A `dns_mode_auto` warning fires when `auto` had a hostname to resolve, since a different transport could resolve it differently. `transport` on a transport that cannot resolve remotely is an error; `disabled` rejects hostname targets.
 - `--banner` (default on): read what an open service volunteers, sending nothing. Only SSH, SMTP, FTP, POP3, IMAP, MySQL greet first; HTTP and TLS do not, so empty means "said nothing unprompted". `banner_timeout` (500ms) is a ceiling; the wait scales off measured connect time. A worker waiting on a silent port issues no probes.
-- `--tls` (default off): send one ClientHello offering TLS 1.3 and 1.2 to open ports that volunteered no banner, on the same connection — finishing the 1.3 key exchange to read the encrypted flight, taking older servers' flights in the clear — and record the certificate (leaf DER, SHA-256, and what it says: subject, issuer, alternative names, validity, key type — read, not verified), cipher and ALPN the server answers with; SNI is sent when the target was given as a name; a server wanting a version or key-share group the hello lacks answers an alert or HelloRetryRequest, recorded as such. The one active probe scanr has — `scan_config.tls.sent_bytes` states what was sent. `tls_timeout` (1s) is the ceiling on the wait.
-- `--tls-versions` (default off, needs `--tls`): after the hello, ask SSLv2, SSLv3, TLS 1.0, 1.1 and — when the server took 1.3 — 1.2 for themselves, each on its own connection with a hello of its era, and record which the server accepts. The line ends `versions:ssl3..1.3`, or `legacy-only:tls1.0` when nothing a current client speaks is accepted; the record's `tls.versions.advice` says what will reach it. Up to five more connections per silent open port.
+- `--tls` (default off): send one ClientHello offering TLS 1.3 and 1.2 to open ports that volunteered no banner, on the same connection. scanr finishes the 1.3 key exchange to read the encrypted flight; older servers' flights arrive in the clear. Recorded: the certificate (leaf DER, SHA-256, and its subject, issuer, alternative names, validity and key type, read but not verified), plus the cipher and ALPN the server answers with. SNI is sent when the target was given as a name. A server wanting a version or key-share group the hello lacks answers an alert or HelloRetryRequest, recorded as such. This is the one active probe scanr has; `scan_config.tls.sent_bytes` states what was sent. `tls_timeout` (1s) is the ceiling on the wait.
+- `--tls-versions` (default off, needs `--tls`): after the hello, ask SSLv2, SSLv3, TLS 1.0, 1.1 and, when the server took 1.3, 1.2 for themselves, each on its own connection with a hello of its era, and record which the server accepts. The line ends `versions:ssl3..1.3`, or `legacy-only:tls1.0` when nothing a current client speaks is accepted; the record's `tls.versions.advice` says what will reach it. Up to five more connections per silent open port.
 
 ### Flags on the other commands
 
@@ -111,19 +112,19 @@ Use `--states open`; stderr warns otherwise.
 
 ## stdout and stderr
 
-stdout: results only — `target:port/proto`, state, service label, elapsed. Hostname
-targets show the hostname; `-v` appends the resolved address.
+stdout carries results only: `target:port/proto`, state, service label, elapsed.
+Hostname targets show the hostname; `-v` appends the resolved address.
 
 ```
 10.20.30.40:22/tcp    open   ssh      18.2ms
 10.20.30.40:443/tcp   open   https    21.4ms
 ```
 
-stderr: header (transport, scan ID), progress, warnings, errors.
+stderr carries the header (transport, scan ID), progress, warnings and errors.
 
 Colour, alignment and the progress line only on a terminal; `--no-color` or `NO_COLOR`
-disables colour. Never prompts: a missing credential is an error naming its environment
-variable.
+disables colour. scanr never prompts; a missing credential is an error naming its
+environment variable.
 
 ## Exit codes
 

@@ -1,6 +1,7 @@
 # Troubleshooting
 
-Keyed to what `scanr` reports; remediation in each diagnostic is derived from the host.
+Keyed to what `scanr` reports. Each diagnostic derives its remediation from the host it
+runs on. Warnings appear in the `Warnings` section of `run`'s stderr.
 
 ## Most results are `error`
 
@@ -12,7 +13,7 @@ probed          64 of 64
 note            64 of 64 probes returned `error`, so these results describe the scanner's environment more than the target
 ```
 
-Cause: the environment, not the targets. Find which from the reasons:
+Cause: the environment, not the targets. The reasons say which part:
 
 ```console
 $ scanr output events scan-*.jsonl.gz | jq -r 'select(.type=="probe_result" and .state=="error") | .reason' | sort | uniq -c
@@ -28,7 +29,7 @@ warning: out of file descriptors
     - raise it:  ulimit -n 4096
 ```
 
-Cause: one descriptor per in-flight probe; bites only when probes accumulate. Fix:
+Cause: one descriptor per in-flight probe, so it bites only when probes accumulate. Fix:
 `ulimit -n`, or lower `--concurrency`. `scanr plan` warns first (`fd_budget`).
 
 ## `local ephemeral ports exhausted` (`ephemeral_pressure`)
@@ -69,8 +70,8 @@ warning: the proxy stopped accepting connections
 ```
 
 Cause: the proxy's connection cap. Fix: raise it on the proxy rather than lower
-concurrency — see [transports](transports.md#how-much-concurrency-will-it-take); measure
-with `scanr transport test <name> --calibrate`. Reported once per scan.
+concurrency, see [transports](transports.md#how-much-concurrency-will-it-take). Measure
+the cap with `scanr transport test <name> --calibrate`. Reported once per scan.
 
 ## Everything is `filtered`
 
@@ -84,8 +85,8 @@ $ scanr run --transport lab --targets <a-host-you-know-answers> --ports 22 --all
 
 ## `closed` and `filtered` look wrong through a proxy
 
-Cause: the proxy may not distinguish them. Run `scanr transport test <name>`; under
-`open_only` non-open results are recorded as `error`, not guessed.
+Cause: the proxy may not distinguish them. Run `scanr transport test <name>`. Under
+`open_only`, non-open results are recorded as `error`, not guessed.
 
 ## `dns is disabled but N hostname target(s) were given`
 
@@ -104,7 +105,7 @@ the cost of leaking queries and possibly resolving differently.
 
 ## The scan record ends in `.partial`
 
-Cause: the process died before the terminal event. Results in it remain valid:
+Cause: the process died before the terminal event. The results in it remain valid:
 
 ```console
 $ scanr output verify scanr-results/scan-*.partial
@@ -112,12 +113,12 @@ $ scanr output verify scanr-results/scan-*.partial
   problem: file still has the .partial suffix, meaning the process never finalized it
 ```
 
-An interrupted but finalized scan is renamed normally with `scan_interrupted` in its
+An interrupted but finalized scan is renamed normally, with `scan_interrupted` as its
 terminal event.
 
 ## Exit code 3
 
-Cause: the output writer failed — full disk, permissions, file-size limit. The record
+Cause: the output writer failed (full disk, permissions, file-size limit). The record
 stays `.partial`; check the terminal event's `error` field if one was written.
 
 ## A scan is slower than expected
@@ -138,9 +139,10 @@ projection      ~10m39s at 400/s if every probe answers
 
 ## Localhost shows open ports in 32768-60999
 
-Expected: the scanner draws its own source ports from the ephemeral range, so a port can
-be occupied by the scan itself when probed (nmap reports the same). Only affects the host
-the scan runs from; audit listeners with `ss -tlnp` instead. Check the range:
+Expected. The scanner draws its own source ports from the ephemeral range, so the scan
+itself can occupy a port at the moment it is probed (nmap reports the same). This affects
+only the host the scan runs from; audit listeners with `ss -tlnp` instead. Check the
+range:
 
 ```console
 cat /proc/sys/net/ipv4/ip_local_port_range
@@ -149,13 +151,13 @@ cat /proc/sys/net/ipv4/ip_local_port_range
 ## 127.0.0.0/8 shows the same port open on every address
 
 All of `127.0.0.0/8` routes to loopback, so a service on `0.0.0.0` answers on all
-16,777,216 addresses: `127.16.0.0/16` port 22 on a host running sshd is 65,536 genuine
+16,777,216 addresses. `127.16.0.0/16` port 22 on a host running sshd is 65,536 genuine
 open results. Useful for load-testing a scanner, misleading otherwise.
 
 ## Every port on every host looks open
 
-Cause: something in the path completes handshakes — transparent proxy, captive portal,
-middlebox. Verify with a port nothing should listen on:
+Cause: something in the path completes handshakes (transparent proxy, captive portal,
+middlebox). Verify with a port nothing should listen on:
 
 ```console
 $ scanr run --targets <host> --ports 1 --all

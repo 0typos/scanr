@@ -4,13 +4,13 @@ Start with [getting-started.md](getting-started.md).
 
 | | |
 |---|---|
-| [getting-started.md](getting-started.md) | install, first scan, verifying the record |
-| [tutorial.md](tutorial.md) | learn it by using it: ten use cases with real output, and where nmap fits; the lab is [`tutorial/`](tutorial/) (`./scanr-lab up`) and `tests/tutorial.rs` keeps the document true |
+| [getting-started.md](getting-started.md) | install, configure, measure the proxy, first scan, verify the record |
+| [tutorial.md](tutorial.md) | ten use cases with captured output, and where nmap fits; the lab is [`tutorial/`](tutorial/) (`./scanr-lab up`), recorded sessions are in [`tutorial/demos/`](tutorial/demos/), and `tests/tutorial.rs` checks the document against the code |
 | [cli.md](cli.md) | every command and flag, streams, exit codes (test-checked) |
 | [configuration.md](configuration.md) | discovery, precedence, profiles (test-checked), targets, ports, DNS, labels |
-| [transports.md](transports.md) | direct and SOCKS5; what a proxy can tell you; concurrency |
+| [transports.md](transports.md) | direct, SOCKS5 and HTTP CONNECT; what a proxy can tell you; concurrency |
 | [output-schema.md](output-schema.md) | the record, its guarantees, `jq` recipes (test-checked) |
-| [tuning.md](tuning.md) | where the limits are, with numbers |
+| [tuning.md](tuning.md) | limits, with numbers |
 | [troubleshooting.md](troubleshooting.md) | keyed to emitted diagnostics |
 | [security.md](security.md) | trust boundaries, credentials, DNS leakage, the one active probe, `unsafe` inventory (test-checked) |
 | [stability.md](stability.md) | what 1.x promises and what it does not |

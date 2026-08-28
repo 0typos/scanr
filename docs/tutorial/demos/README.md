@@ -1,9 +1,9 @@
 # Tutorial demos
 
-One recording per section of [`../../tutorial.md`](../../tutorial.md), against the lab:
-an [asciinema](https://asciinema.org) `.cast` and the same recording rendered to a `.gif`
-by [`agg`](https://github.com/asciinema/agg), which the tutorial embeds under each
-heading. Play a cast:
+One recording per section of [`../../tutorial.md`](../../tutorial.md), against the lab.
+Each is an [asciinema](https://asciinema.org) `.cast` plus the same recording rendered
+to a `.gif` by [`agg`](https://github.com/asciinema/agg), which the tutorial embeds
+under its heading. Play a cast:
 
 ```console
 asciinema play docs/tutorial/demos/05-socks5.cast
@@ -36,7 +36,8 @@ cd docs/tutorial
 
 Needs `asciinema` (`uv tool install asciinema`), `agg` (`cargo install --git
 https://github.com/asciinema/agg`), `target/release/scanr` (`cargo build --release`) and
-`jq`. `nmap` is used in `01` if present. Each command is preceded by a `# comment`
+`jq`. `01` runs `nmap` if present. Each command is preceded by a `# comment`
 (`COMMENT_PAUSE`, 2 s), typed at `TYPE_DELAY` (40 ms/char), held `PRE_RUN` (1.5 s)
-before it runs, then `POST_RUN` (2.5 s) after its output; idle gaps are capped at
-`IDLE_LIMIT` (4 s); terminal is `COLS`×`ROWS` (100×32). Records go to `results*/` here, wiped before and after.
+before it runs, then `POST_RUN` (2.5 s) after its output. Idle gaps are capped at
+`IDLE_LIMIT` (4 s). The terminal is `COLS`x`ROWS` (100x32). Records go to `results*/`
+here, wiped before and after.

@@ -27,7 +27,7 @@ or the proxy answers first and the distinction is lost.
 
 OpenSSH sends no reply for a refused destination (client log: `channel N: open failed:
 connect failed: Connection refused`), and its `BND.ADDR` is `0.0.0.0`, so a
-proxy-resolved hostname never has its address recorded — see
+proxy-resolved hostname never has its address recorded; see
 [configuration](configuration.md#dns).
 
 ### Measuring
@@ -49,7 +49,7 @@ transport lab (socks5 127.0.0.1:1080)
 |---|---|---|
 | known-open | loopback proxy: a listener scanr binds; remote: the proxy's own address | `--known-open host:port` |
 | known-closed | port 1 on the proxy host (refused in most deployments, not all) | `--known-closed host:port` |
-| blackholed | `192.0.2.1` (RFC 5737 TEST-NET-1) | — |
+| blackholed | `192.0.2.1` (RFC 5737 TEST-NET-1) | none |
 
 The proxy's own socket fails as known-open on half the proxies measured: dante `0x02`
 (ruleset), 3proxy `0x09` (undefined code). Remote proxy:
@@ -60,8 +60,8 @@ scanr transport test lab --known-open 10.1.1.5:443 --known-closed 10.1.1.5:1
 
 ### Recording
 
-Silences the `fidelity_unknown` ("not measured") warning; kept in the scan record with
-provenance. Never cached automatically.
+Declaring `fidelity` silences the `fidelity_unknown` ("not measured") warning. The scan
+record keeps it with provenance. It is never cached automatically.
 
 ```toml
 [transports.lab]
@@ -104,10 +104,10 @@ Loss against 64 unroutable targets × 4 ports:
 
 | proxy | c=16 | c=24 | c=32 | c=48 | c=64 | c=256 | c=512 |
 |---|---|---|---|---|---|---|---|
-| microsocks | 0% | — | 0% | — | 0% | 0% | 0% |
-| `ssh -D` | 0% | — | 0% | — | 0% | 0% | 0% |
+| microsocks | 0% | not measured | 0% | not measured | 0% | 0% | 0% |
+| `ssh -D` | 0% | not measured | 0% | not measured | 0% | 0% | 0% |
 | 3proxy, default `maxconn 100` | 0% | 0% | 7% | 37% | 48% | 95% | 80% |
-| 3proxy, `maxconn 2000` | 0% | — | 0% | — | 0% | 0% | 0% |
+| 3proxy, `maxconn 2000` | 0% | not measured | 0% | not measured | 0% | 0% | 0% |
 
 Raise the proxy's cap rather than lower concurrency. A burst does not predict this:
 3proxy accepts 64 held connections yet loses 48% of a churning scan at 64, since closed
@@ -116,7 +116,7 @@ connections linger in its table.
 ## HTTP CONNECT
 
 `type = "http"`, same keys as `socks5`; credentials become `Proxy-Authorization: Basic`
-(base64, cleartext — the same protection as RFC 1929). Hostnames are handed to the proxy
+(base64 cleartext, the same protection as RFC 1929). Hostnames are handed to the proxy
 unresolved.
 
 HTTP standardises no status meaning "the destination refused", so an HTTP proxy is
@@ -208,7 +208,7 @@ username = "scanner"
 password_env = "SCANR_LAB_PASSWORD"
 ```
 
-Inline passwords are rejected — see [security](security.md#credentials).
+Inline passwords are rejected; see [security](security.md#credentials).
 
 ## `ssh -D`
 

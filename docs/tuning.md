@@ -32,8 +32,8 @@ sustained throughput:
 | without | 9,189 | 21,931 |
 | with | 68,949 | 1 |
 
-Without it a 28,232-port range exhausts in ~7 s. Cost: some proxies log RSTs as errors;
-marginally more detectable.
+Without it a 28,232-port range exhausts in ~7 s. The cost is that some proxies log RSTs
+as errors, and the scan is marginally more detectable.
 
 ## Ephemeral port ceiling
 
@@ -65,8 +65,8 @@ contention made 512 40% slower than 64. Loopback `/24 × 1,000`, 256,000 probes:
 
 The right value is in-flight ≈ rate × RTT: 64 covers loopback, ~250 a 1 ms LAN, 512 a
 WAN. Threads are cheap (64 KiB stacks; 40.6 MB resident at 5,000, 81 MB at 10,000, ~227 ms
-one-off spawn at 10,000): contention and the destination limit first. Above ~10,000 the
-design runs out — [`design/decisions.md`](design/decisions.md), D1. For a proxy:
+one-off spawn at 10,000); contention and the destination limit first. Above ~10,000 the
+design runs out; see [`design/decisions.md`](design/decisions.md), D1. For a proxy:
 `scanr transport test lab --calibrate`.
 
 ## Rate limiting
@@ -194,7 +194,7 @@ unreadable evidence. Revisit when one is widely deployed.
 
 ### Memory
 
-Stable: the million-probe scan held 17 MB resident throughout (5.8 MB baseline plus the
+Stable; the million-probe scan held 17 MB resident throughout (5.8 MB baseline plus the
 target list). `output` streams; peak resident on the 374 MB record:
 
 | command | peak | holds |
@@ -234,7 +234,7 @@ nmap wins line one because `--max-retries 0` is one attempt and `direct-fast` ma
 unresponsive case is timeout-bound, so batching changes it little). Neither reported
 anything open.
 
-nmap adapts its timeout from observed RTT; scanr does not (below): on an unfamiliar
+nmap adapts its timeout from observed RTT; scanr does not (see below). On an unfamiliar
 network set `--connect-timeout` by hand and let `scanr plan` show the consequence.
 
 Caveats: loopback and TEST-NET on one machine measure the tools, not a network; nmap's
@@ -245,6 +245,6 @@ record throughout.
 
 - More concurrency against a capped proxy: 3proxy at default cap went from 7% loss at
   32 to 48% at 64.
-- Adaptive tuning: deliberately absent. Clear limits and diagnostics beat hidden
+- Adaptive tuning is deliberately absent. Clear limits and diagnostics beat hidden
   behaviour that also makes a record hard to interpret afterwards.
 - Concurrency past ~512 on most workloads.
