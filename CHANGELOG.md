@@ -14,6 +14,20 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
 
 ## [Unreleased]
 
+## [1.0.0-rc.7] - 2026-08-28
+
+### Changed
+
+- `run`'s stderr is grouped into bold-cyan `Overview` / `Warnings` / `Results` / `Summary`
+  sections in the same `key value` columns as `plan`: scan, transport with its fidelity
+  coloured by trust, scope, timing, scan id + seed; warnings in their own block; a dim
+  column header under `Results` on a terminal; the closing counts as `result` / `states`
+  (each state in its colour) / `probed` / `record`. Warnings keep their wording.
+
+### Added
+
+- `docs/tutorial/demos/`: an asciinema cast per tutorial section, linked from each use case; `demos/record` re-records them against the lab.
+
 ## [1.0.0-rc.6] - 2026-08-27
 
 ### Added

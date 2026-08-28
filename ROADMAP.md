@@ -1,7 +1,7 @@
 # Roadmap to 1.0
 
-Status 2026-08-27. **1.0.0-rc.6 is released** (rc.1 with 0.3.0–0.5.0 on 2026-08-26;
-rc.2 through rc.6 on 2026-08-27; binaries on GitHub, now eight cross-compiled targets).
+Status 2026-08-28. **1.0.0-rc.7 is released** (rc.1 with 0.3.0–0.5.0 on 2026-08-26;
+rc.2 through rc.6 on 2026-08-27, rc.7 on 2026-08-28; binaries on GitHub, now eight cross-compiled targets).
 P0–P3 are done.
 
 The promised surface last moved in rc.2/rc.3, which expanded the TLS probe (D35 amended):
