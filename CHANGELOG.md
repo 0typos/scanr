@@ -14,15 +14,7 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
 
 ## [Unreleased]
 
-### Changed
-
-- `plan` groups its rows into coloured sections — Overview, Transport, Scope, Timing,
-  Probing, Output, Projection, Host — for fast visual inspection. Section headers are
-  bold cyan; `fidelity` is coloured by trust (green full, yellow open_only, red unknown);
-  an armed TLS probe and the timeout-bound projection are highlighted; provenance stays
-  dim. The two projections are labelled `rate-bound` and `timeout-bound`. Colour follows
-  the usual rules (a terminal, no `--no-color`/`NO_COLOR`); piped output is unchanged
-  plain text. `plan` rendering is not a promised surface.
+## [1.0.0-rc.6] - 2026-08-27
 
 ### Added
 
@@ -35,6 +27,13 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
 
 ### Changed
 
+- `plan` groups its rows into coloured sections — Overview, Transport, Scope, Timing,
+  Probing, Output, Projection, Host — for fast visual inspection. Section headers are
+  bold cyan; `fidelity` is coloured by trust (green full, yellow open_only, red unknown);
+  an armed TLS probe and the timeout-bound projection are highlighted; provenance stays
+  dim. The two projections are labelled `rate-bound` and `timeout-bound`. Colour follows
+  the usual rules (a terminal, no `--no-color`/`NO_COLOR`); piped output is unchanged
+  plain text. `plan` rendering is not a promised surface.
 - The tutorial lab is a single installable `uv` script, `docs/tutorial/scanr-lab`
   (PEP 723, `typer`), replacing the bash `docs/tutorial/lab`. `up` prints an aligned
   summary of the services and proxies it owns (no longer echoing `lab.py`'s banner with
