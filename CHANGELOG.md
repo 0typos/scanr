@@ -14,6 +14,13 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
 
 ## [Unreleased]
 
+### Fixed
+
+- Release binaries were stamped `-dirty` (rc.6, rc.7): the workflow wrote shell
+  completions into an untracked `completions/` before the cross build, so `build.rs` saw
+  a dirty tree. They go to the ignored `dist/` now, and the workflow refuses a `-dirty`
+  binary.
+
 ## [1.0.0-rc.7] - 2026-08-28
 
 ### Changed

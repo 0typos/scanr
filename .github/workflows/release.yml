@@ -74,11 +74,14 @@ jobs:
           fi
 
       - name: Completions (native, identical for every target)
+        # Into the git-ignored dist/, as scripts/build-all.sh does. rc.6 and rc.7 shipped
+        # stamped `-dirty`: an untracked completions/ here made `git status --porcelain`
+        # non-empty by the time build.rs ran for the cross target.
         run: |
           cargo build --release --locked
-          mkdir -p completions
+          mkdir -p dist/completions
           for sh in bash zsh fish elvish power-shell; do
-            target/release/scanr completion "$sh" > "completions/$sh"
+            target/release/scanr completion "$sh" > "dist/completions/$sh"
           done
 
       - name: Build
@@ -95,6 +98,9 @@ jobs:
           if [ "$want" != "$got" ]; then
             echo "::error::tag $GITHUB_REF_NAME does not match binary version $got"; exit 1
           fi
+          if "$BIN" --version | head -1 | grep -q -- '-dirty'; then
+            echo "::error::binary is stamped -dirty: $("$BIN" --version | head -1)"; exit 1
+          fi
 
       - name: Package
         run: |
@@ -102,7 +108,7 @@ jobs:
           mkdir -p "dist/$name/completions"
           cp target/${{ matrix.target }}/release/scanr "dist/$name/"
           cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "dist/$name/"
-          cp completions/* "dist/$name/completions/"
+          cp dist/completions/* "dist/$name/completions/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           ( cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )
 
