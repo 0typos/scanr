@@ -1,0 +1,246 @@
+#!/usr/bin/env bash
+# Record the tutorial's use cases as asciinema casts, one per section, against the lab.
+#
+#   ./demos/record            # record every demo into demos/*.cast, render demos/*.gif
+#   ./demos/record 05 08      # only these
+#   ./demos/record --no-gif   # casts only
+#   ./demos/record --render   # only re-render the gifs from the existing casts
+#   ./demos/record --list
+#
+# Run from docs/tutorial with the lab up (`./scanr-lab up && ./scanr-lab tunnel`).
+# Each demo replays the tutorial's commands with simulated typing, so the cast shows
+# what the section shows. Records land in results*/ (git-ignored) and are wiped first.
+set -euo pipefail
+
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+LAB=$(dirname "$HERE")
+ROOT=$(dirname "$(dirname "$LAB")")
+export PATH="$ROOT/target/release:$PATH"
+COLS=${COLS:-100}
+ROWS=${ROWS:-32}
+TYPE_DELAY=${TYPE_DELAY:-0.04}   # per character
+PRE_RUN=${PRE_RUN:-1.5}          # pause after the command is typed, before it runs
+POST_RUN=${POST_RUN:-2.5}        # pause after its output
+COMMENT_PAUSE=${COMMENT_PAUSE:-2}
+IDLE_LIMIT=${IDLE_LIMIT:-4}
+
+DEMOS=(
+  "00-lab            The lab: what is listening"
+  "01-first-scan     1. A first scan, and the file it leaves behind"
+  "02-record         2. Reading the record"
+  "03-plan           3. Look before you scan"
+  "05-socks5         5. Through a SOCKS5 proxy, and ssh -D"
+  "06-http-connect   6. Through an HTTP CONNECT proxy"
+  "07-chain-pool     7. Chains and pools"
+  "08-interrupt      8. Interruption, and resuming exactly"
+  "09-tls            9. Banners, TLS, and the old appliance"
+  "10-calibrate      10. Tuning: the proxy is the limit"
+)
+
+# ---- inside the recording -------------------------------------------------------
+
+type_cmd() {                       # print "$ cmd" with typing, then run it
+  local cmd=$1
+  printf '\033[1;32m$\033[0m '
+  local i
+  for ((i = 0; i < ${#cmd}; i++)); do
+    printf '%s' "${cmd:i:1}"
+    sleep "$TYPE_DELAY"
+  done
+  sleep "$PRE_RUN"
+  printf '\n'
+  ( exit "${last:-0}" )             # so a typed `echo $?` reports the previous command
+  eval "$cmd"; last=$?
+  sleep "$POST_RUN"
+}
+
+say() {                            # a dim "# comment" line (or several), then a beat
+  printf '\n'
+  local line
+  for line in "$@"; do printf '\033[2;36m# %s\033[0m\n' "$line"; sleep 0.4; done
+  sleep "$COMMENT_PAUSE"
+}
+newest() { ls -t "$1"/scan-*.jsonl.gz | head -1; }
+
+demo_00_lab() {
+  say "The lab: three loopback services, two closed ports, four proxies, one ssh -D." \
+      "scanr-lab up started it; check shows what is listening."
+  type_cmd "./scanr-lab check"
+}
+
+demo_01_first_scan() {
+  say "A first scan: five ports on 127.0.0.1, direct. --all prints every verdict," \
+      "not just open ones. The last line names the record it wrote."
+  type_cmd "scanr run --targets 127.0.0.1 --ports 25025,28080,28443,29000,29001 --all --output-dir results"
+  say "The record: scan-<name>-<timestamp>-<scan_id>.jsonl.gz, gzipped JSON lines."
+  type_cmd "ls results"
+  if command -v nmap >/dev/null; then
+    say "Same ports with nmap, for comparison: same verdicts, but nmap's output is" \
+        "just the verdicts — no resolved settings, no statement that it finished."
+    type_cmd "nmap -sT -Pn -n -p 25025,28080,28443,29000,29001 127.0.0.1"
+  fi
+}
+
+demo_02_record() {
+  scanr run --targets 127.0.0.1 --ports 25025,28080,28443,29000,29001 --all --output-dir results >/dev/null 2>&1
+  local rec; rec=$(newest results)
+  say "verify checks the record against itself: a terminal event with authoritative" \
+      "counts, and every probe accounted for."
+  type_cmd "scanr output verify $rec"
+  say "Drop one result from a copy and verify again: the counts no longer add up."
+  type_cmd "zcat results/scan-*.jsonl.gz | grep -v '\"port\":25025' > tampered.jsonl"
+  type_cmd "scanr output verify tampered.jsonl"
+  say "Non-zero exit, so a pipeline can refuse the file."
+  type_cmd "echo \$?"
+  say "Cut the last line off instead: no terminal event, so the scan never finished writing."
+  type_cmd "zcat results/scan-*.jsonl.gz | head -n -1 > truncated.jsonl"
+  type_cmd "scanr output verify truncated.jsonl"
+  say "summarize: what was run, by host, by network, by port."
+  type_cmd "scanr output summarize $rec"
+  say "results: filter and reformat. --format nmap hands the open set to nmap -sV;" \
+      "--format list feeds httpx or anything that reads host:port."
+  type_cmd "scanr output results --states open --format nmap results/scan-*.jsonl.gz"
+  type_cmd "scanr output results --states open --format list results/scan-*.jsonl.gz"
+  rm -f tampered.jsonl truncated.jsonl
+}
+
+demo_03_plan() {
+  say "plan resolves a scan without running it: every value with the layer it came" \
+      "from, both duration bounds, and any warnings. lab-audit is defined in scanr.toml."
+  type_cmd "scanr plan lab-audit"
+  say "An ad-hoc plan: a /24 by every port through dante. Look at the duration" \
+      "estimate before you spend it."
+  type_cmd "scanr plan --targets 10.0.0.0/24 --ports 1-65535 --transport dante"
+}
+
+demo_05_socks5() {
+  say "Through a proxy the proxy decides what closed means. transport test measures" \
+      "it: a known-open, a known-closed and a blackholed destination, and what came back."
+  type_cmd "scanr transport test dante"
+  say "dante says 0x05 for refused, 0x01 for unreachable: fidelity full, so closed is real."
+  type_cmd "scanr run lab-audit --all --output-dir results-dante"
+  say "The proxy everyone actually uses: ssh -D. OpenSSH sends no SOCKS reply for a" \
+      "refused port — it just closes the channel. Measure it:"
+  type_cmd "scanr transport test tunnel"
+  say "open_only: closed and filtered are indistinguishable through it. The scan says so" \
+      "up front, and records error rather than guessing closed."
+  type_cmd "scanr run lab-audit --transport tunnel --profile ssh --all --output-dir results-tunnel"
+}
+
+demo_06_http_connect() {
+  say "Corporate proxies are HTTP CONNECT. HTTP has no status that means refused:" \
+      "squid says 503 for both refused and unreachable."
+  type_cmd "scanr transport test corp"
+  say "So every non-open port is error, honestly, with the status line in the record." \
+      "The open set is exact."
+  type_cmd "scanr run lab-audit --transport corp --all --output-dir results-corp"
+}
+
+demo_07_chain_pool() {
+  say "A chain: squid, then dante. Its fidelity is the exit hop's, because only the" \
+      "last CONNECT names the destination — so squid then dante is full."
+  type_cmd "scanr transport test path"
+  say "A pool spreads probes across dante and exit-b by hash of the endpoint, so a" \
+      "rerun goes the same way. Every result names its member."
+  type_cmd "scanr run lab-audit --transport spread --all --no-spans --output-dir results-pool"
+  say "via on each result: if one member is broken, its share says so."
+  type_cmd "scanr output results --format json results-pool/scan-*.jsonl.gz | jq -c '{port, state, via}'"
+}
+
+demo_08_interrupt() {
+  say "Three hosts, two of them silent, concurrency 2 so it takes a while." \
+      "Ctrl-C after a second and a half."
+  local cmd="scanr run --targets 127.0.0.1,192.0.2.1,192.0.2.2 --ports 25025,28080,29000,80,443,8080 --all --concurrency 2 --connect-timeout 2s --seed 7 --no-spans --output-dir results-int"
+  printf '\033[1;32m$\033[0m '
+  local i
+  for ((i = 0; i < ${#cmd}; i++)); do printf '%s' "${cmd:i:1}"; sleep "$TYPE_DELAY"; done
+  sleep "$PRE_RUN"
+  printf '\n'
+  $cmd & local pid=$!
+  sleep 1.5
+  printf '^C\n'
+  kill -INT "$pid"
+  wait "$pid" || true
+  sleep "$POST_RUN"
+  say "The first Ctrl-C drains what is in flight; the record is finalised either way." \
+      "completed + abandoned + never started = the plan. remainder lists the rest:"
+  type_cmd "scanr output remainder results-int/scan-*.jsonl.gz"
+  say "Pipe exactly those endpoints back in. The new record names the one it resumes."
+  type_cmd "scanr output remainder results-int/scan-*.jsonl.gz | scanr run --pairs - --all --connect-timeout 1s --output-dir results-resumed"
+  type_cmd "scanr output verify results-resumed/scan-*.jsonl.gz"
+}
+
+demo_09_tls() {
+  say "Banners are read by default; only services that speak first have one." \
+      "--tls sends one fixed ClientHello to silent open ports — the only thing scanr" \
+      "ever sends — and records what comes back."
+  type_cmd "scanr run --targets 127.0.0.1 --ports 25025,28080,28443 --tls --output-dir results-tls"
+  say "Three answers: a greeting (never probed), a silent port that closed on the" \
+      "hello, and a certificate. The leaf is in the record, read but never verified."
+  type_cmd "scanr output results --format json results-tls/scan-*.jsonl.gz | jq -c 'select(.tls.negotiated != null) | {port, cn: .tls.cert.subject_cn, expires: .tls.cert.not_after, alpn: .tls.alpn, cipher: .tls.cipher_name}'"
+  say "One hello only shows the highest shared version. --tls-versions asks each" \
+      "version for itself. 28444 is the lab's old appliance."
+  type_cmd "scanr run --targets 127.0.0.1 --ports 28443,28444 --tls --tls-versions --output-dir results-ver"
+  say "legacy-only:tls1.1 — no current browser reaches it. The record says how to."
+  type_cmd "scanr output results --format json results-ver/scan-*.jsonl.gz | jq -c 'select(.tls.versions.legacy_only) | {port, newest: .tls.versions.newest, advice: .tls.versions.advice}'"
+  type_cmd "scanr output results --format json results-ver/scan-*.jsonl.gz | jq -c 'select(.port==28444) | .tls.versions | {ssl2:.ssl2.accepted, ssl3:.ssl3.accepted, \"1.0\":.\"1.0\".accepted, \"1.1\":.\"1.1\".accepted, \"1.2\":.\"1.2\".accepted}'"
+}
+
+demo_10_calibrate() {
+  say "The number that decides a proxied scan is the proxy's own connection cap." \
+      "--calibrate reproduces a scan's churn at rising concurrency and finds it." \
+      "exit-b is 3proxy at its default maxconn 100."
+  type_cmd "scanr transport test exit-b --calibrate"
+}
+
+# ---- driver ------------------------------------------------------------------------
+
+if [[ ${1:-} == --play ]]; then
+  set +e
+  cd "$LAB"
+  fn="demo_${2//-/_}"
+  "$fn"
+  sleep 1.5
+  exit 0
+fi
+
+want=() gif=1 render_only=0
+for a in "$@"; do
+  case $a in
+    --gif) gif=1 ;;
+    --no-gif) gif=0 ;;
+    --render) render_only=1 ;;
+    --list) printf '%s\n' "${DEMOS[@]}"; exit 0 ;;
+    *) want+=("$a") ;;
+  esac
+done
+
+render() { agg --cols "$COLS" --rows "$ROWS" --font-size 14 "$HERE/$1.cast" "$HERE/$1.gif" 2>&1 | tail -c 0; }
+
+(( gif )) && ! command -v agg >/dev/null && { echo "agg not found (cargo install --git https://github.com/asciinema/agg)" >&2; exit 1; }
+if (( render_only )); then
+  for entry in "${DEMOS[@]}"; do
+    name=${entry%% *}
+    [[ -f $HERE/$name.cast ]] || continue
+    echo "rendering $name"; render "$name"
+  done
+  exit 0
+fi
+command -v asciinema >/dev/null || { echo "asciinema not found (uv tool install asciinema)" >&2; exit 1; }
+[[ -x $ROOT/target/release/scanr ]] || { echo "build first: cargo build --release" >&2; exit 1; }
+cd "$LAB"
+./scanr-lab check | grep -q '^ *down' && { echo "lab is not fully up: ./scanr-lab up && ./scanr-lab tunnel" >&2; exit 1; }
+
+for entry in "${DEMOS[@]}"; do
+  name=${entry%% *}
+  title=${entry#* }; title=${title##+( )}; title=$(sed 's/^ *//' <<<"$title")
+  if ((${#want[@]})); then
+    hit=0; for w in "${want[@]}"; do [[ $name == "$w"* ]] && hit=1; done; ((hit)) || continue
+  fi
+  rm -rf results results-* tampered.jsonl truncated.jsonl
+  echo "recording $name"
+  asciinema rec --overwrite --quiet --cols "$COLS" --rows "$ROWS" --idle-time-limit "$IDLE_LIMIT" \
+    --title "scanr — $title" --env "" -c "bash '$HERE/record' --play $name" "$HERE/$name.cast"
+  (( gif )) && render "$name"
+done
+rm -rf results results-* tampered.jsonl truncated.jsonl

@@ -113,14 +113,23 @@ Warns on unmeasured fidelity, rate above the ephemeral-port budget, concurrency 
 
 ```console
 $ scanr run internal-web --all
-scanr 1.0.0-rc.5 — internal-web via socks5 127.0.0.1:1080 — 3 probes (1 targets x 3 ports)
-  scan 0e1a180b  seed 950f58a8b869db32  concurrency 512  -> ./scanr-results/scan-adhoc-2026_07_30T23_50_11Z-0e1a180b.jsonl.gz.partial
+Overview
+scan            internal-web
+transport       bastion (socks5 127.0.0.1:1080)  fidelity full
+scope           3 probes (1 targets x 3 ports)
+timing          concurrency 512, rate 400/s, connect_timeout 5s
+scan id         0e1a180b  seed 950f58a8b869db32
+
+Results
 127.0.0.1:8080/tcp open http-proxy 0.6ms
 127.0.0.1:8443/tcp open https-alt 0.5ms
 127.0.0.1:9999/tcp closed 0.4ms
 
-completed in 0.01s — 2 open, 1 closed, 0 filtered, 0 error (3 of 3 probed)
-  record: ./scanr-results/scan-adhoc-2026_07_30T23_50_11Z-0e1a180b.jsonl.gz
+Summary
+result          completed in 0.01s
+states          2 open, 1 closed, 0 filtered, 0 error
+probed          3 of 3
+record          ./scanr-results/scan-internal_web-2026_07_30T23_50_11Z-0e1a180b.jsonl.gz
 ```
 
 The record is named `scan-<scan>-<UTC time>-<id>.jsonl.gz`: the scan name (`adhoc` for an

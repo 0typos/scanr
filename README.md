@@ -10,13 +10,23 @@ proxy-native, config-first, forensically complete.
 
 ```console
 $ scanr run internal-web
-scanr 1.0.0-rc.5 — internal-web via socks5 127.0.0.1:1080 — 255,510 probes (255 targets x 1002 ports)
-  scan a3f19c02  seed 9f2c00a1b4de7731  concurrency 512  -> ./scanr-results/scan-adhoc-2026_07_29T03_11_44Z-a3f19c02.jsonl.partial
+Overview
+scan            internal-web
+transport       bastion (socks5 127.0.0.1:1080)  fidelity full
+scope           255,510 probes (255 targets x 1002 ports)
+timing          concurrency 512, rate 400/s, connect_timeout 5s
+scan id         a3f19c02  seed 9f2c00a1b4de7731
+
+Results
 10.20.30.40:22/tcp    open   ssh          18.2ms
 10.20.30.40:443/tcp   open   https        21.4ms
 ...
-completed in 10m41s — 38 open, 1204 closed, 254210 filtered, 58 error (255,510 of 255,510 probed)
-  record: ./scanr-results/scan-adhoc-2026_07_29T03_11_44Z-a3f19c02.jsonl
+
+Summary
+result          completed in 10m41s
+states          38 open, 1,204 closed, 254,210 filtered, 58 error
+probed          255,510 of 255,510
+record          ./scanr-results/scan-internal_web-2026_07_29T03_11_44Z-a3f19c02.jsonl.gz
 ```
 
 ## Why

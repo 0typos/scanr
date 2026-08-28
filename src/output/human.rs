@@ -125,6 +125,30 @@ impl ResultPrinter {
         }
     }
 
+    /// A dim column header matching `format`'s aligned layout, for the caller to print
+    /// on stderr under `Results`. `None` when stdout is a pipe: rows are then
+    /// single-spaced and stdout carries results only.
+    pub fn header(&self) -> Option<String> {
+        if !self.aligned {
+            return None;
+        }
+        let pad = |n: usize| " ".repeat(n);
+        let mut line = String::new();
+        for (name, w) in [
+            ("endpoint", self.target_width + 10),
+            ("state", Self::STATE_W),
+            ("service", Self::LABEL_W),
+        ] {
+            line.push_str(name);
+            line.push_str(&pad(w.saturating_sub(name.len()) + Self::GAP));
+        }
+        line.push_str(&pad(Self::LATENCY_W.saturating_sub("rtt".len())));
+        line.push_str("rtt");
+        line.push_str(&pad(Self::GAP));
+        line.push_str("banner / tls");
+        Some(self.style.dim(&line))
+    }
+
     pub fn should_print(&self, outcome: &ProbeOutcome) -> bool {
         !self.open_only || outcome.is_open()
     }

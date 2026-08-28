@@ -5,7 +5,7 @@
 //! writer on one thread is also what makes `seq` monotonic and stdout consistent with
 //! the JSONL without any coordination.
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,7 +18,7 @@ use crate::cancel::Cancel;
 use crate::diag::HostFacts;
 use crate::net::Target;
 use crate::output::{
-    Counts, JsonlWriter, ProbeRecord, Progress, ResultPrinter, SCHEMA_VERSION, Spans,
+    Counts, JsonlWriter, ProbeRecord, Progress, ResultPrinter, SCHEMA_VERSION, Spans, human::Style,
 };
 use crate::plan::types::{ScanPlan, TransportKind};
 use crate::plan::{Permutation, types::Fidelity};
@@ -235,8 +235,15 @@ pub(crate) fn execute_with(
     let mut writer_error: Option<std::io::Error> = None;
     emit_plan_diagnostics(&mut writer, &mut writer_error, &plan);
 
+    let printer = ResultPrinter::new(
+        target_width(&plan),
+        plan.open_only,
+        opts.no_color,
+        opts.full,
+    );
     if !opts.quiet {
-        print_header(&plan, &scan_id, writer.partial_path());
+        let style = Style::for_stream(std::io::stderr().is_terminal(), opts.no_color);
+        print_header(&plan, &scan_id, printer.header().as_deref(), &style);
     }
 
     let total = plan.probe_count();
@@ -253,12 +260,7 @@ pub(crate) fn execute_with(
         facts: &facts,
         opts,
         cancel: &cancel,
-        printer: ResultPrinter::new(
-            target_width(&plan),
-            plan.open_only,
-            opts.no_color,
-            opts.full,
-        ),
+        printer,
         progress: Progress::new(opts.quiet, opts.no_color),
         // The real bound on drain is the connect timeout, since a blocking connect
         // cannot be interrupted. MAX_DRAIN keeps a very long timeout from feeling hung.
@@ -1193,101 +1195,225 @@ fn pairs_truncated(plan: &ScanPlan) -> bool {
         .is_some_and(|p| p.len() > MAX_EMBEDDED_PAIRS)
 }
 
-fn print_header(plan: &ScanPlan, scan_id: &str, partial: &std::path::Path) {
-    let mut err = std::io::stderr();
-    let _ = writeln!(
-        err,
-        "scanr {} — {} via {} — {} probes ({} targets x {} ports)",
-        env!("CARGO_PKG_VERSION"),
-        plan.scan_name,
-        plan.transport.describe(),
-        commas(plan.probe_count()),
-        commas(plan.targets.len() as u64),
-        commas(plan.ports.len() as u64),
-    );
-    let _ = writeln!(
-        err,
-        "  scan {scan_id}  seed {:016x}  concurrency {}  -> {}",
-        plan.seed,
-        plan.timing.concurrency,
-        partial.display()
-    );
-    for w in &plan.warnings {
-        let _ = writeln!(
-            err,
-            "  warning: {}",
-            w.message.replace('\n', "\n           ")
-        );
-    }
+/// `{key:<16}{value}` — the same two-column shape as `plan`, so the three surfaces the
+/// user reads (plan, run header, run summary) line up the same way.
+fn kv(s: &mut String, k: &str, v: impl AsRef<str>) {
+    s.push_str(&format!("{k:<16}{}\n", v.as_ref()));
 }
 
-/// Final one-line summary on stderr.
-pub fn print_summary(summary: &ScanSummary, quiet: bool) {
+/// A coloured key: padded first, painted after — escapes inflate `str::len`, so a
+/// painted key formatted with `{:<16}` would not align (D22).
+fn kv_key(s: &mut String, style: &Style, code: &str, k: &str, v: impl AsRef<str>) {
+    s.push_str(&format!(
+        "{}{}\n",
+        style.paint(code, &format!("{k:<16}")),
+        v.as_ref()
+    ));
+}
+
+fn section(s: &mut String, style: &Style, title: &str) {
+    if !s.is_empty() {
+        s.push('\n');
+    }
+    s.push_str(&style.paint("1;36", title));
+    s.push('\n');
+}
+
+fn print_header(plan: &ScanPlan, scan_id: &str, columns: Option<&str>, style: &Style) {
+    let _ = write!(
+        std::io::stderr(),
+        "{}",
+        render_header(plan, scan_id, columns, style)
+    );
+}
+
+/// `Overview`, `Warnings` if any, then the `Results` heading (with the column header
+/// when stdout is aligned) under which stdout's result lines stream. All on stderr, so
+/// stdout stays results-only.
+pub fn render_header(
+    plan: &ScanPlan,
+    scan_id: &str,
+    columns: Option<&str>,
+    style: &Style,
+) -> String {
+    let mut s = String::new();
+    section(&mut s, style, "Overview");
+    kv(&mut s, "scan", style.bold(&plan.scan_name));
+    let mut transport = plan.transport.describe();
+    if !matches!(plan.transport.kind, TransportKind::Direct) {
+        transport = format!("{} ({transport})", plan.transport.name);
+        let fid = plan.transport.fidelity.to_string();
+        let fid = match plan.transport.fidelity {
+            Fidelity::Full => style.paint("32", &fid),
+            Fidelity::OpenOnly => style.paint("33", &fid),
+            Fidelity::Unknown => style.paint("31", &fid),
+        };
+        transport = format!("{transport}  fidelity {fid}");
+    }
+    kv(&mut s, "transport", transport);
+    kv(
+        &mut s,
+        "scope",
+        format!(
+            "{} probes ({} targets x {} ports)",
+            commas(plan.probe_count()),
+            commas(plan.targets.len() as u64),
+            commas(plan.ports.len() as u64),
+        ),
+    );
+    kv(
+        &mut s,
+        "timing",
+        format!(
+            "concurrency {}, rate {}, connect_timeout {}",
+            plan.timing.concurrency,
+            match plan.timing.rate {
+                0 => "unlimited".to_string(),
+                r => format!("{r}/s"),
+            },
+            crate::units::render_duration(plan.timing.connect_timeout)
+        ),
+    );
+    kv(
+        &mut s,
+        "scan id",
+        format!(
+            "{scan_id}  {}",
+            style.dim(&format!("seed {:016x}", plan.seed))
+        ),
+    );
+    if !plan.warnings.is_empty() {
+        section(&mut s, style, "Warnings");
+        for w in &plan.warnings {
+            kv_key(
+                &mut s,
+                style,
+                "1;33",
+                "warning",
+                w.message.replace('\n', &format!("\n{:<16}", "")),
+            );
+        }
+    }
+    section(&mut s, style, "Results");
+    if let Some(c) = columns {
+        s.push_str(c);
+        s.push('\n');
+    }
+    s
+}
+
+/// Final summary on stderr.
+pub fn print_summary(summary: &ScanSummary, quiet: bool, no_color: bool) {
     if quiet {
         return;
     }
-    let _ = write!(std::io::stderr(), "{}", render_summary(summary));
+    let style = Style::for_stream(std::io::stderr().is_terminal(), no_color);
+    let _ = write!(std::io::stderr(), "{}", render_summary(summary, &style));
 }
 
 /// The summary text, separated from the act of writing it so that what the user is told
 /// at the end of a scan can be asserted on rather than merely executed.
-pub fn render_summary(summary: &ScanSummary) -> String {
-    use std::fmt::Write as _;
+pub fn render_summary(summary: &ScanSummary, style: &Style) -> String {
     let c = &summary.counts;
-    let verb = match summary.termination {
-        Termination::Completed => "completed",
-        Termination::Interrupted => "interrupted",
-        Termination::Failed => "failed",
+    let (verb, code) = match summary.termination {
+        Termination::Completed => ("completed", "1;32"),
+        Termination::Interrupted => ("interrupted", "1;33"),
+        Termination::Failed => ("failed", "1;31"),
     };
-    let mut s = String::new();
-    let _ = writeln!(
-        s,
-        "\n{verb} in {} — {} open, {} closed, {} filtered, {} error ({} of {} probed)",
-        HumanElapsed(summary.duration),
-        c.open,
-        c.closed,
-        c.filtered,
-        c.error,
-        commas(c.completed),
-        commas(c.planned),
+    let mut s = String::from("\n");
+    s.push_str(&style.paint("1;36", "Summary"));
+    s.push('\n');
+    kv(
+        &mut s,
+        "result",
+        format!(
+            "{} in {}",
+            style.paint(code, verb),
+            HumanElapsed(summary.duration)
+        ),
+    );
+    let state = |st: State, n: u64| {
+        let text = format!("{} {}", commas(n), st.as_str());
+        if n > 0 {
+            style.paint_state(st, &text)
+        } else {
+            style.dim(&text)
+        }
+    };
+    kv(
+        &mut s,
+        "states",
+        format!(
+            "{}, {}, {}, {}",
+            state(State::Open, c.open),
+            state(State::Closed, c.closed),
+            state(State::Filtered, c.filtered),
+            state(State::Error, c.error),
+        ),
+    );
+    kv(
+        &mut s,
+        "probed",
+        format!("{} of {}", commas(c.completed), commas(c.planned)),
     );
     if c.abandoned() > 0 {
-        let _ = writeln!(
-            s,
-            "  {} probes were started but abandoned mid-flight",
-            commas(c.abandoned())
+        kv(
+            &mut s,
+            "abandoned",
+            format!(
+                "{} probes were started but abandoned mid-flight",
+                commas(c.abandoned())
+            ),
         );
     }
     if c.not_started() > 0 {
-        let _ = writeln!(s, "  {} probes were never started", commas(c.not_started()));
+        kv(
+            &mut s,
+            "not started",
+            format!("{} probes were never started", commas(c.not_started())),
+        );
     }
     if c.retried > 0 {
-        let _ = writeln!(
-            s,
-            "  {} probes were retried after a timeout",
-            commas(c.retried)
+        kv(
+            &mut s,
+            "retried",
+            format!("{} probes were retried after a timeout", commas(c.retried)),
         );
     }
     if summary.worker_panics > 0 {
-        let _ = writeln!(
-            s,
-            "  {} scan worker(s) crashed — this is a bug in scanr, and these results are \
-             incomplete; the record's terminal event records it as `worker_panic`",
-            summary.worker_panics
+        kv_key(
+            &mut s,
+            style,
+            "1;31",
+            "crashed",
+            format!(
+                "{} scan worker(s) crashed — this is a bug in scanr, and these results are \
+                 incomplete; the record's terminal event records it as `worker_panic`",
+                summary.worker_panics
+            ),
         );
     }
     // A run that "completed" while most probes errored is not a useful result, and the
     // word `completed` on its own invites reading it as one.
     if c.completed > 0 && c.error * 2 > c.completed {
-        let _ = writeln!(
-            s,
-            "  note: {} of {} probes returned `error`, so these results describe the \
-             scanner's environment more than the target",
-            commas(c.error),
-            commas(c.completed)
+        kv_key(
+            &mut s,
+            style,
+            "33",
+            "note",
+            format!(
+                "{} of {} probes returned `error`, so these results describe the \
+                 scanner's environment more than the target",
+                commas(c.error),
+                commas(c.completed)
+            ),
         );
     }
-    let _ = writeln!(s, "  record: {}", summary.path.display());
+    kv(
+        &mut s,
+        "record",
+        style.bold(&summary.path.display().to_string()),
+    );
     s
 }
 
@@ -1929,14 +2055,17 @@ mod tests {
             error: 5,
             retried: 7,
         };
-        let s = render_summary(&summary_of(counts, Termination::Interrupted, 2));
+        let s = render_summary(
+            &summary_of(counts, Termination::Interrupted, 2),
+            &Style { color: false },
+        );
         assert!(s.contains("interrupted in 3.00s"), "{s}");
-        assert!(s.contains("80 of 100 probed"), "{s}");
+        assert!(s.contains("80 of 100"), "{s}");
         assert!(s.contains("10 probes were started but abandoned"), "{s}");
         assert!(s.contains("10 probes were never started"), "{s}");
         assert!(s.contains("7 probes were retried"), "{s}");
         assert!(s.contains("2 scan worker(s) crashed"), "{s}");
-        assert!(s.contains("record: /tmp/scan.jsonl"), "{s}");
+        assert!(s.contains("record          /tmp/scan.jsonl"), "{s}");
     }
 
     #[test]
@@ -1952,7 +2081,10 @@ mod tests {
             error: 8,
             retried: 0,
         };
-        let s = render_summary(&summary_of(counts, Termination::Completed, 0));
+        let s = render_summary(
+            &summary_of(counts, Termination::Completed, 0),
+            &Style { color: false },
+        );
         assert!(s.contains("describe the scanner's environment"), "{s}");
 
         // And a healthy scan does not carry the note.
@@ -1961,7 +2093,10 @@ mod tests {
             closed: 9,
             ..counts
         };
-        let s = render_summary(&summary_of(healthy, Termination::Completed, 0));
+        let s = render_summary(
+            &summary_of(healthy, Termination::Completed, 0),
+            &Style { color: false },
+        );
         assert!(!s.contains("describe the scanner's environment"), "{s}");
         assert!(!s.contains("crashed"), "{s}");
     }

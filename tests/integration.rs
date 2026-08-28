@@ -215,9 +215,9 @@ fn stdout_carries_only_results_and_stderr_the_rest() {
 
     // stderr: the header and summary.
     let se = stderr(&out);
-    assert!(se.contains("scanr"), "{se}");
+    assert!(se.contains("Overview"), "{se}");
     assert!(se.contains("completed in"), "{se}");
-    assert!(se.contains("record:"), "{se}");
+    assert!(se.contains("record"), "{se}");
 }
 
 #[test]

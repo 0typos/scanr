@@ -23,6 +23,7 @@ first run fetches `typer` into uv's cache; every run after is instant.
 | `scanr-lab.lock` | uv's lockfile for the script's one dependency (`typer`), so the environment is reproducible |
 | `lab.py` | the services: 25025 greets, 28080 silent, 28443 TLS 1.2 (h2), 28444 TLS 1.0/1.1 only; standard library only, `--check` probes them. `scanr-lab up` spawns it; `tests/tutorial.rs` runs it directly |
 | `scanr.toml` | the configuration every command in the tutorial uses — run them from this directory |
+| `demos/` | one asciinema cast per tutorial section, and `demos/record` to re-record them against the lab |
 | `proxies/` | `Containerfile` and one config each for squid `:3128`, tinyproxy `:3129`, 3proxy (HTTP `:3130`, SOCKS5 `:1081`), dante `:1082` — loopback only, rootless podman |
 
 No podman? Use cases 1–4, 8 and 9 need only `lab.py`. Point `scanr.toml`'s transports at

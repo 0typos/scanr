@@ -673,7 +673,7 @@ fn cmd_run(
 
     match crate::run::execute(plan, cancel, &opts) {
         Ok(summary) => {
-            crate::run::print_summary(&summary, cli.quiet);
+            crate::run::print_summary(&summary, cli.quiet, cli.no_color);
             // Same helper the record's `exit_code` field goes through, so the number the
             // process exits with and the number written into the record cannot drift.
             Ok(exit_code_for(summary.termination, summary.writer_failed))

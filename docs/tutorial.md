@@ -4,7 +4,9 @@ Ten use cases, each a real command with its real output, and at each step what t
 tool does that `nmap` does not — and what it deliberately leaves to nmap. Everything
 below was captured on 2026-08-26 against the lab in the next section; run it yourself
 and the outputs match apart from timings, ids, the version banner, and the certificate's
-fingerprint and dates.
+fingerprint and dates. Each use case is also recorded: the animation under its heading
+is the section's commands run against the lab, and the `▶` link below it is the same
+recording as an [asciinema](https://asciinema.org) cast for `asciinema play`.
 
 The claim, up front. A port scan through a proxy is usually both untrustworthy and
 unrepeatable: the proxy decides what `closed` means, the scanner guesses, and what
@@ -16,6 +18,9 @@ Each use case below shows one of those properties working, and what nmap does in
 spot.
 
 ## The lab
+
+![00-lab](tutorial/demos/00-lab.gif)
+<sub>▶ [`demos/00-lab.cast`](tutorial/demos/00-lab.cast) — `asciinema play` for a real terminal</sub>
 
 Three loopback services, two closed ports, one unroutable network, and four proxies —
 all packaged in [`docs/tutorial/`](tutorial/) so you can start without building anything:
@@ -107,18 +112,30 @@ ports = ["lab"]
 
 ## 1. A first scan, and the file it leaves behind
 
+![01-first-scan](tutorial/demos/01-first-scan.gif)
+<sub>▶ [`demos/01-first-scan.cast`](tutorial/demos/01-first-scan.cast) — `asciinema play` for a real terminal</sub>
+
 ```console
 $ scanr run --targets 127.0.0.1 --ports 25025,28080,28443,29000,29001 --all --output-dir results
-scanr 1.0.0-rc.5 — (ad-hoc) via direct — 5 probes (1 targets x 5 ports)
-  scan 5d2875ea  seed bf052d2f27c67ba1  concurrency 512  -> results/scan-adhoc-2026_08_26T01_53_14Z-5d2875ea.jsonl.gz.partial
+Overview
+scan            (ad-hoc)
+transport       direct
+scope           5 probes (1 targets x 5 ports)
+timing          concurrency 512, rate unlimited, connect_timeout 1s
+scan id         5d2875ea  seed bf052d2f27c67ba1
+
+Results
 127.0.0.1:29000/tcp closed saltd-licensing 0.2ms
 127.0.0.1:25025/tcp open 0.1ms 220 mail.lab.internal ESMTP ready..
 127.0.0.1:29001/tcp closed 0.2ms
 127.0.0.1:28080/tcp open 0.2ms
 127.0.0.1:28443/tcp open 0.1ms
 
-completed in 0.05s — 3 open, 2 closed, 0 filtered, 0 error (5 of 5 probed)
-  record: results/scan-adhoc-2026_08_26T01_53_14Z-5d2875ea.jsonl.gz
+Summary
+result          completed in 0.05s
+states          3 open, 2 closed, 0 filtered, 0 error
+probed          5 of 5
+record          results/scan-adhoc-2026_08_26T01_53_14Z-5d2875ea.jsonl.gz
 ```
 
 What to notice:
@@ -151,6 +168,9 @@ settings that produced it, whether the run finished, or what was never probed. s
 record does, unconditionally, which is the rest of this guide.
 
 ## 2. Reading the record
+
+![02-record](tutorial/demos/02-record.gif)
+<sub>▶ [`demos/02-record.cast`](tutorial/demos/02-record.cast) — `asciinema play` for a real terminal</sub>
 
 ```console
 $ scanr output verify results/scan-adhoc-2026_08_26T01_53_14Z-5d2875ea.jsonl.gz
@@ -250,6 +270,9 @@ Schema and `jq` recipes: [output-schema.md](output-schema.md).
 
 ## 3. Look before you scan
 
+![03-plan](tutorial/demos/03-plan.gif)
+<sub>▶ [`demos/03-plan.cast`](tutorial/demos/03-plan.cast) — `asciinema play` for a real terminal</sub>
+
 ```console
 $ scanr plan lab-audit
 scan            lab-audit
@@ -316,6 +339,9 @@ case 8) uses it to say precisely which endpoints a killed scan never reached.
 
 ## 5. Through a SOCKS5 proxy: know what the proxy can tell you
 
+![05-socks5](tutorial/demos/05-socks5.gif)
+<sub>▶ [`demos/05-socks5.cast`](tutorial/demos/05-socks5.cast) — `asciinema play` for a real terminal</sub>
+
 This is the reason the tool exists. SOCKS5 defines distinct replies for refused,
 unreachable and denied, but not every proxy uses them, and a proxy that cannot say
 "refused" cannot let you tell a closed port from a filtered one. scanr measures it:
@@ -342,14 +368,23 @@ and the "fidelity not measured" warning goes away; the record states it on every
 
 ```console
 $ scanr run lab-audit --all --output-dir results-dante
-scanr 1.0.0-rc.5 — lab-audit via socks5 127.0.0.1:1082 — 5 probes (1 targets x 5 ports)
+Overview
+scan            lab-audit
+transport       dante (socks5 127.0.0.1:1082)  fidelity full
+scope           5 probes (1 targets x 5 ports)
+...
+
+Results
 127.0.0.1:29001/tcp closed 0.8ms
 127.0.0.1:29000/tcp closed saltd-licensing 0.8ms
 127.0.0.1:28080/tcp open 0.8ms
 127.0.0.1:25025/tcp open 1.0ms 220 mail.lab.internal ESMTP ready..
 127.0.0.1:28443/tcp open 0.9ms
 
-completed in 0.06s — 3 open, 2 closed, 0 filtered, 0 error (5 of 5 probed)
+Summary
+result          completed in 0.06s
+states          3 open, 2 closed, 0 filtered, 0 error
+probed          5 of 5
 ```
 
 Same verdicts as the direct scan, and every result in the record carries
@@ -387,16 +422,28 @@ says so before you spend the scan. Now the scan:
 
 ```console
 $ scanr run lab-audit --transport tunnel --profile ssh --all --output-dir results-tunnel
-scanr 1.0.0-rc.5 — lab-audit via socks5 127.0.0.1:1088 — 5 probes (1 targets x 5 ports)
-  warning: result fidelity of proxy `tunnel` has not been measured; closed and filtered may be indistinguishable
-           run: scanr transport test tunnel
+Overview
+scan            lab-audit
+transport       tunnel (socks5 127.0.0.1:1088)  fidelity unknown
+scope           5 probes (1 targets x 5 ports)
+timing          concurrency 96, rate unlimited, connect_timeout 6s
+...
+
+Warnings
+warning         result fidelity of proxy `tunnel` has not been measured; closed and filtered may be indistinguishable
+                run: scanr transport test tunnel
+
+Results
 127.0.0.1:29000/tcp error saltd-licensing 1.0ms
 127.0.0.1:28080/tcp open 1.1ms
 127.0.0.1:29001/tcp error 1.0ms
 127.0.0.1:25025/tcp open 1.1ms 220 mail.lab.internal ESMTP ready..
 127.0.0.1:28443/tcp open 1.1ms
 
-completed in 0.05s — 3 open, 0 closed, 0 filtered, 2 error (5 of 5 probed)
+Summary
+result          completed in 0.05s
+states          3 open, 0 closed, 0 filtered, 2 error
+probed          5 of 5
 ```
 
 The open set is exact; the two closed ports are `error`, with the reason in the record,
@@ -414,6 +461,9 @@ resolves hostnames on the proxy side (`dns  auto -> transport` in the plan), and
 records a state it did not observe.
 
 ## 6. Through an HTTP CONNECT proxy
+
+![06-http-connect](tutorial/demos/06-http-connect.gif)
+<sub>▶ [`demos/06-http-connect.cast`](tutorial/demos/06-http-connect.cast) — `asciinema play` for a real terminal</sub>
 
 Corporate proxies are usually HTTP CONNECT, not SOCKS. scanr supports them with the same
 config keys, and the measurement tells you the cost up front:
@@ -439,20 +489,34 @@ proxy every non-open port is `error`, honestly:
 
 ```console
 $ scanr run lab-audit --transport corp --all --output-dir results-corp
-  warning: proxy `corp` is an HTTP CONNECT proxy, which has no status meaning refused: closed and filtered are indistinguishable through it, so non-open results will be `error`
+Overview
+scan            lab-audit
+transport       corp (http 127.0.0.1:3128)  fidelity open_only
+...
+
+Warnings
+warning         proxy `corp` is an HTTP CONNECT proxy, which has no status meaning refused: closed and filtered are indistinguishable through it, so non-open results will be `error`
+
+Results
 127.0.0.1:29001/tcp error 0.8ms
 127.0.0.1:29000/tcp error saltd-licensing 0.8ms
 127.0.0.1:28080/tcp open 0.5ms
 127.0.0.1:25025/tcp open 0.5ms 220 mail.lab.internal ESMTP ready..
 127.0.0.1:28443/tcp open 0.4ms
 
-completed in 0.06s — 3 open, 0 closed, 0 filtered, 2 error (5 of 5 probed)
+Summary
+result          completed in 0.06s
+states          3 open, 0 closed, 0 filtered, 2 error
+probed          5 of 5
 ```
 
 The open set is exactly right, which for most engagements is what matters. The record
 keeps the status line in each error's `reason`.
 
 ## 7. Chains and pools
+
+![07-chain-pool](tutorial/demos/07-chain-pool.gif)
+<sub>▶ [`demos/07-chain-pool.cast`](tutorial/demos/07-chain-pool.cast) — `asciinema play` for a real terminal</sub>
 
 A **chain** goes through several proxies in order; an HTTP hop can sit in front of a
 SOCKS5 one. Its fidelity is the *exit* hop's, because only the last CONNECT names the
@@ -474,7 +538,11 @@ a rerun goes the same way. Every result names its member:
 
 ```console
 $ scanr run lab-audit --transport spread --all --no-spans --output-dir results-pool
-scanr 1.0.0-rc.5 — lab-audit via pool of 2 across dante, exit-b — 5 probes ...
+Overview
+scan            lab-audit
+transport       spread (pool of 2 across dante, exit-b)  fidelity full
+scope           5 probes (1 targets x 5 ports)
+...
 
 $ scanr output results --format json results-pool/scan-*.jsonl.gz | jq -c '{port, state, via}'
 {"port":25025,"state":"open","via":"exit-b"}
@@ -491,13 +559,23 @@ lie.
 
 ## 8. Interruption, and resuming exactly
 
+![08-interrupt](tutorial/demos/08-interrupt.gif)
+<sub>▶ [`demos/08-interrupt.cast`](tutorial/demos/08-interrupt.cast) — `asciinema play` for a real terminal</sub>
+
 A scan of three hosts, two of them silent, at concurrency 2 so it takes a while; Ctrl-C
 after a second and a half:
 
 ```console
 $ scanr run --targets 127.0.0.1,192.0.2.1,192.0.2.2 --ports 25025,28080,29000,80,443,8080 \
     --all --concurrency 2 --connect-timeout 2s --seed 7 --no-spans --output-dir results-int
-scanr 1.0.0-rc.5 — (ad-hoc) via direct — 18 probes (3 targets x 6 ports)
+Overview
+scan            (ad-hoc)
+transport       direct
+scope           18 probes (3 targets x 6 ports)
+timing          concurrency 2, rate unlimited, connect_timeout 2s
+scan id         d65f8c99  seed 0000000000000007
+
+Results
 ^C
 interrupt: no new probes will start; draining in-flight work (interrupt again to exit immediately)
 192.0.2.1:80/tcp filtered http 2001.0ms
@@ -506,10 +584,13 @@ interrupt: no new probes will start; draining in-flight work (interrupt again to
 127.0.0.1:29000/tcp closed saltd-licensing 0.0ms
 192.0.2.2:443/tcp filtered https 2000.8ms
 
-interrupted in 2.00s — 0 open, 3 closed, 2 filtered, 0 error (5 of 18 probed)
-  2 probes were started but abandoned mid-flight
-  11 probes were never started
-  record: results-int/scan-adhoc-2026_08_26T02_04_48Z-d65f8c99.jsonl.gz
+Summary
+result          interrupted in 2.00s
+states          0 open, 3 closed, 2 filtered, 0 error
+probed          5 of 18
+abandoned       2 probes were started but abandoned mid-flight
+not started     11 probes were never started
+record          results-int/scan-adhoc-2026_08_26T02_04_48Z-d65f8c99.jsonl.gz
 $ echo $?
 130
 ```
@@ -530,12 +611,21 @@ $ scanr output remainder results-int/scan-*.jsonl.gz
 13 of 18 endpoints were not probed; re-run exactly those with:
   scanr output remainder results-int/scan-adhoc-2026_08_26T02_04_48Z-d65f8c99.jsonl.gz | scanr run --pairs -
 
-$ scanr output remainder results-int/scan-*.jsonl.gz | scanr run --pairs - --all --connect-timeout 1s
-scanr 1.0.0-rc.5 — (ad-hoc) via direct — 13 probes (3 targets x 6 ports)
+$ scanr output remainder results-int/scan-*.jsonl.gz | scanr run --pairs - --all --connect-timeout 1s --output-dir results-resumed
+Overview
+scan            (ad-hoc)
+scope           13 probes (3 targets x 6 ports)
+...
+
+Results
 127.0.0.1:28080/tcp open 0.1ms
 127.0.0.1:25025/tcp open 0.1ms 220 mail.lab.internal ESMTP ready..
 ...
-completed in 2.25s — 2 open, 1 closed, 10 filtered, 0 error (13 of 13 probed)
+
+Summary
+result          completed in 2.25s
+states          2 open, 1 closed, 10 filtered, 0 error
+probed          13 of 13
 
 $ scanr output verify results-resumed/scan-*.jsonl.gz
   terminal: scan_completed
@@ -553,6 +643,9 @@ granularity; endpoints already finished on a partly scanned host are done again,
 nothing links the two outputs.
 
 ## 9. What a service says: banners, and the one active probe
+
+![09-tls](tutorial/demos/09-tls.gif)
+<sub>▶ [`demos/09-tls.cast`](tutorial/demos/09-tls.cast) — `asciinema play` for a real terminal</sub>
 
 Banners are read by default and cost nothing to the target beyond the connection the
 scan already made — the service writes its greeting whether or not anyone reads it.
@@ -631,6 +724,9 @@ nmap `-sV` does far more with the open ports themselves — and that is where us
 `--format nmap` sends them.
 
 ## 10. Tuning: the proxy is the limit, not scanr
+
+![10-calibrate](tutorial/demos/10-calibrate.gif)
+<sub>▶ [`demos/10-calibrate.cast`](tutorial/demos/10-calibrate.cast) — `asciinema play` for a real terminal</sub>
 
 Concurrency and rate are yours to set, and the plan shows them. The number that decides
 whether a proxied scan succeeds is usually the proxy's own connection cap, which

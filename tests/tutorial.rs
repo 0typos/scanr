@@ -289,7 +289,8 @@ fn the_direct_use_cases_hold_against_the_lab() {
         "banner on the line: {shown}"
     );
     assert!(
-        err(&run).contains("3 open, 2 closed, 0 filtered, 0 error (5 of 5 probed)"),
+        err(&run).contains("3 open, 2 closed, 0 filtered, 0 error")
+            && err(&run).contains("probed          5 of 5"),
         "{}",
         err(&run)
     );
@@ -517,7 +518,7 @@ fn the_interrupt_and_resume_use_case_holds_against_the_lab() {
     assert_eq!(o.status.code(), Some(130), "{}", err(&o));
     let stderr = err(&o);
     assert!(stderr.contains("interrupted in"), "{stderr}");
-    assert!(stderr.contains("of 18 probed"), "{stderr}");
+    assert!(stderr.contains("5 of 18"), "{stderr}");
     let rec = record_in(&d.path().join("results-int"));
     let v = scanr(d.path(), &["output", "verify", rec.to_str().unwrap()]);
     assert_eq!(code(&v), 0, "{}", out(&v));
@@ -549,7 +550,7 @@ fn the_interrupt_and_resume_use_case_holds_against_the_lab() {
     );
     assert_eq!(code(&r), 0, "{}", err(&r));
     assert!(
-        err(&r).contains(&format!("({outstanding} of {outstanding} probed)")),
+        err(&r).contains(&format!("probed          {outstanding} of {outstanding}")),
         "{}",
         err(&r)
     );

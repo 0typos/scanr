@@ -5,9 +5,11 @@ Keyed to what `scanr` reports; remediation in each diagnostic is derived from th
 ## Most results are `error`
 
 ```
-completed in 2.31s — 0 open, 0 closed, 0 filtered, 64 error (64 of 64 probed)
-  note: 64 of 64 probes returned `error`, so these results describe the
-        scanner's environment more than the target
+Summary
+result          completed in 2.31s
+states          0 open, 0 closed, 0 filtered, 64 error
+probed          64 of 64
+note            64 of 64 probes returned `error`, so these results describe the scanner's environment more than the target
 ```
 
 Cause: the environment, not the targets. Find which from the reasons:
