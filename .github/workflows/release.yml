@@ -5,9 +5,9 @@
 # job, and the tag-versus-`--version` comparison inside the build job. Neither has
 # ever executed. Expect to iterate on them during the first real `v*` tag.
 #
-# The matrix cross-compiles nine targets with cargo-zigbuild (scanr is pure Rust with no
+# The matrix cross-compiles eight targets with cargo-zigbuild (scanr is pure Rust with no
 # C deps, so one toolchain covers them all). `scripts/build-all.sh` is the same build
-# locally; it has produced all nine archives, so compilation and packaging are proven,
+# locally; it has produced all eight archives, so compilation and packaging are proven,
 # but the workflow's tooling install and cross legs are new — iterate on the first tag.
 #
 # Distribution is prebuilt static binaries attached to a GitHub release; the crate is
@@ -38,8 +38,8 @@ jobs:
       fail-fast: false
       matrix:
         # Pure-Rust, no C deps, so cargo-zigbuild cross-compiles every one of these from
-        # the x86_64 runner — static musl for drop-anywhere use, glibc where musl has no
-        # Rust std (s390x). Locally: `scripts/build-all.sh`.
+        # the x86_64 runner — static musl for drop-anywhere use, plus glibc x86_64 and
+        # aarch64. Locally: `scripts/build-all.sh`.
         target:
           - x86_64-unknown-linux-musl
           - aarch64-unknown-linux-musl
@@ -49,7 +49,6 @@ jobs:
           - powerpc64le-unknown-linux-musl
           - x86_64-unknown-linux-gnu
           - aarch64-unknown-linux-gnu
-          - s390x-unknown-linux-gnu
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         # build.rs stamps the commit into every scan record, so the tag must resolve to

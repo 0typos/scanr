@@ -21,7 +21,7 @@ period, or a config key's meaning changed is a **major** version.
 - Performance figures. They are measurements on one machine, recorded with their method.
 - Platforms. **Linux x86_64 (gnu and musl) is the tested platform** — the full suite runs
   there in CI. Release binaries are also cross-compiled for aarch64, armv7, i686, riscv64
-  and ppc64le (static musl) and for aarch64 and s390x (glibc); those are built and
+  and ppc64le (static musl) and for aarch64 (glibc); those are built and
   smoke-run under emulation, not full-tested, and are provided best-effort. macOS builds
   and passes CI as a courtesy; Windows is not planned.
 - MSRV. A bump is a minor.

@@ -26,7 +26,6 @@ TARGETS=(
   powerpc64le-unknown-linux-musl
   x86_64-unknown-linux-gnu
   aarch64-unknown-linux-gnu
-  s390x-unknown-linux-gnu
 )
 
 command -v cargo-zigbuild >/dev/null || { echo "cargo-zigbuild not found" >&2; exit 1; }

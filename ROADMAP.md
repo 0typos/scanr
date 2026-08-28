@@ -1,7 +1,7 @@
 # Roadmap to 1.0
 
 Status 2026-08-27. **1.0.0-rc.6 is released** (rc.1 with 0.3.0–0.5.0 on 2026-08-26;
-rc.2 through rc.6 on 2026-08-27; binaries on GitHub, now nine cross-compiled targets).
+rc.2 through rc.6 on 2026-08-27; binaries on GitHub, now eight cross-compiled targets).
 P0–P3 are done.
 
 The promised surface last moved in rc.2/rc.3, which expanded the TLS probe (D35 amended):
@@ -13,7 +13,7 @@ new surface, so it restarted the soak: P4 runs from 2026-08-27, earliest 1.0 no 
 than 2026-09-24 or three engagements. rc.4-rc.6 carry only non-promised changes — the
 `plan` `dns` row naming its resolver (rc.4); output record filenames now
 `scan-<name>-<UTC time>-<id>` (rc.5); the `plan` output grouped into coloured sections,
-release binaries cross-compiled for six more architectures (best-effort), and the tutorial
+release binaries cross-compiled for five more architectures (best-effort), and the tutorial
 lab as an installable uv script (rc.6) — so the soak clock is unchanged. The rc.1-only additions (D37 batched collector, D38 deferred, the
 timeout-bound plan projection, `results --format json` evidence fields) carried no
 surface change.

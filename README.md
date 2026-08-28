@@ -43,7 +43,7 @@ cargo build --release --target x86_64-unknown-linux-musl   # static-pie, ~2 MB, 
 
 Linux x86_64 (gnu and musl) is the tested platform — the full suite runs there. Every
 release also ships static-musl binaries for aarch64, armv7, i686, riscv64 and ppc64le,
-and glibc binaries for aarch64 and s390x, cross-compiled with `cargo-zigbuild`
+and a glibc binary for aarch64, cross-compiled with `cargo-zigbuild`
 (`scripts/build-all.sh` does the same locally) — built and smoke-run under emulation,
 provided best-effort. macOS builds and passes CI (`cargo install --path .`, then
 `ulimit -n 8192`); its `/proc` diagnostics report unknown and there is no static build.

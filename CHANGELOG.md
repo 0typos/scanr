@@ -20,7 +20,7 @@ the same promise from 1.0. The path there is `ROADMAP.md`.
 
 - Release binaries for many more architectures, cross-compiled with `cargo-zigbuild`
   (no VMs — scanr is pure Rust with no C deps): static-musl `aarch64`, `armv7`, `i686`,
-  `riscv64gc` and `powerpc64le`, and glibc `aarch64` and `s390x`, alongside the existing
+  `riscv64gc` and `powerpc64le`, and glibc `aarch64`, alongside the existing
   x86_64 gnu+musl. `scripts/build-all.sh` builds the whole set locally. Linux x86_64
   stays the tested platform; the rest are built and smoke-run under emulation,
   best-effort (`docs/stability.md`).
