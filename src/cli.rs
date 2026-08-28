@@ -708,17 +708,21 @@ pub fn render_plan(plan: &ScanPlan, facts: &HostFacts, no_color: bool) -> String
     let style = Style::for_stream(std::io::stdout().is_terminal() && !no_color, no_color);
     let mut s = String::new();
 
+    plan_section(&mut s, &style, "Overview");
     let mut row = |k: &str, v: String, src: &str| plan_row(&mut s, &style, k, v, src);
 
-    row("scan", plan.scan_name.clone(), "");
+    row("scan", style.bold(&plan.scan_name), "");
     if let Some(d) = &plan.description {
-        row("description", d.clone(), "");
+        row("description", style.dim(d), "");
     }
     row(
         "profile",
         plan.profile.clone(),
         &plan.provenance.render("profile"),
     );
+
+    plan_section(&mut s, &style, "Transport");
+    let mut row = |k: &str, v: String, src: &str| plan_row(&mut s, &style, k, v, src);
     row(
         "transport",
         format!("{} ({})", plan.transport.name, plan.transport.type_name()),
@@ -764,9 +768,15 @@ pub fn render_plan(plan: &ScanPlan, facts: &HostFacts, no_color: bool) -> String
         }
     }
     if !matches!(plan.transport.kind, TransportKind::Direct) {
+        let fid = plan.transport.fidelity.to_string();
+        let fid = match plan.transport.fidelity {
+            Fidelity::Full => style.paint("32", &fid),
+            Fidelity::OpenOnly => style.paint("33", &fid),
+            Fidelity::Unknown => style.paint("31", &fid),
+        };
         row(
             "  fidelity",
-            plan.transport.fidelity.to_string(),
+            fid,
             match (&plan.transport.kind, plan.transport.fidelity) {
                 (TransportKind::Http { .. }, _) => "inherent to HTTP CONNECT",
                 (_, Fidelity::Unknown) => "not measured",
@@ -777,6 +787,9 @@ pub fn render_plan(plan: &ScanPlan, facts: &HostFacts, no_color: bool) -> String
         );
     }
     row("dns", dns_summary(plan), &plan.provenance.render("dns"));
+
+    plan_section(&mut s, &style, "Scope");
+    let mut row = |k: &str, v: String, src: &str| plan_row(&mut s, &style, k, v, src);
     // A pair scan is an explicit endpoint list, not a matrix, and describing it as one
     // reads as nonsense: the old rendering produced `targets 2 (3 explicit host:port
     // pairs)` and `ports 3 ((explicit pairs))`. `plan` is the "look before you scan"
@@ -870,17 +883,44 @@ fn plan_row(s: &mut String, style: &Style, k: &str, v: String, src: &str) {
     } else {
         // `{v:<40}` alone pads nothing once the value reaches the column width, so a
         // long value ran straight into the provenance: `... + builtin (59)defaults`.
-        // The `.max(1)` is the whole fix — always leave a separator. (The format width
-        // was never the bug: `Formatter::pad` already counts characters, not bytes.)
-        let pad = 40usize.saturating_sub(v.chars().count()).max(1);
+        // The `.max(1)` is the whole fix — always leave a separator. Width is measured
+        // ignoring ANSI escapes so a coloured value still aligns its provenance (D22).
+        let pad = 40usize.saturating_sub(visible_width(&v)).max(1);
         format!("{k:<16}{v}{}{}", " ".repeat(pad), style.dim(src))
     };
     s.push_str(line.trim_end());
     s.push('\n');
 }
 
+/// A bold cyan section header (blank line before it unless it opens the output), so
+/// `plan` scans as grouped blocks.
+fn plan_section(s: &mut String, style: &Style, title: &str) {
+    if !s.is_empty() {
+        s.push('\n');
+    }
+    s.push_str(&style.paint("1;36", title));
+    s.push('\n');
+}
+
+/// Displayed character count, skipping `\x1b[..m` colour escapes so padding still aligns.
+fn visible_width(v: &str) -> usize {
+    let mut n = 0;
+    let mut in_escape = false;
+    for c in v.chars() {
+        if in_escape {
+            in_escape = c != 'm';
+        } else if c == '\x1b' {
+            in_escape = true;
+        } else {
+            n += 1;
+        }
+    }
+    n
+}
+
 /// The knobs that decide how hard the scan pushes, and where each came from.
 fn render_plan_timing(s: &mut String, plan: &ScanPlan, style: &Style) {
+    plan_section(s, style, "Timing");
     let mut row = |k: &str, v: String, src: &str| plan_row(s, style, k, v, src);
     row(
         "concurrency",
@@ -912,6 +952,18 @@ fn render_plan_timing(s: &mut String, plan: &ScanPlan, style: &Style) {
             &plan.provenance.render("proxy_connect_timeout"),
         );
     }
+    row(
+        "retries",
+        format!(
+            "{} (timeouts only, delay {})",
+            plan.timing.retries,
+            render_duration(plan.timing.retry_delay)
+        ),
+        &plan.provenance.render("retries"),
+    );
+
+    plan_section(s, style, "Probing");
+    let mut row = |k: &str, v: String, src: &str| plan_row(s, style, k, v, src);
     // It changes what the scan *does to a target*, which is a stronger reason to confirm
     // it before a run than anything else on this screen.
     row(
@@ -928,30 +980,21 @@ fn render_plan_timing(s: &mut String, plan: &ScanPlan, style: &Style) {
     );
     // The one active probe: it sends bytes to the target, so it is the line on this
     // screen most worth reading before a run.
-    row(
-        "tls probe",
-        match &plan.timing.tls {
-            None => "off".to_string(),
-            Some(t) if t.versions() => format!(
-                "ClientHello to silent open ports, {} max wait; then SSLv2, SSLv3, TLS 1.0, 1.1 (and 1.2) asked for on their own connections",
-                render_duration(t.timeout())
-            ),
-            Some(t) => format!(
-                "ClientHello to silent open ports, {} max wait",
-                render_duration(t.timeout())
-            ),
-        },
-        &plan.provenance.render("tls"),
-    );
-    row(
-        "retries",
-        format!(
-            "{} (timeouts only, delay {})",
-            plan.timing.retries,
-            render_duration(plan.timing.retry_delay)
-        ),
-        &plan.provenance.render("retries"),
-    );
+    let tls_val = match &plan.timing.tls {
+        None => style.dim("off"),
+        Some(t) if t.versions() => style.paint("33", &format!(
+            "ClientHello to silent open ports, {} max wait; then SSLv2, SSLv3, TLS 1.0, 1.1 (and 1.2) asked for on their own connections",
+            render_duration(t.timeout())
+        )),
+        Some(t) => style.paint("33", &format!(
+            "ClientHello to silent open ports, {} max wait",
+            render_duration(t.timeout())
+        )),
+    };
+    row("tls probe", tls_val, &plan.provenance.render("tls"));
+
+    plan_section(s, style, "Output");
+    let mut row = |k: &str, v: String, src: &str| plan_row(s, style, k, v, src);
     row(
         "output",
         plan.output_dir.display().to_string(),
@@ -982,32 +1025,39 @@ fn render_plan_timing(s: &mut String, plan: &ScanPlan, style: &Style) {
 }
 
 fn render_plan_footer(s: &mut String, plan: &ScanPlan, facts: &HostFacts, style: &Style) {
-    s.push('\n');
+    plan_section(s, style, "Projection");
     match plan.projected_duration() {
         Some(d) => s.push_str(&format!(
             "{:<16}~{} at {}/s if every probe answers\n",
-            "projection",
+            "rate-bound",
             HumanElapsed(d),
             plan.timing.rate
         )),
         None => s.push_str(&format!(
             "{:<16}unbounded rate; as fast as the transport answers\n",
-            "projection"
+            "rate-bound"
         )),
     }
     // The bound `rate` says nothing about, and the one that binds on real networks: a
     // silent port costs the whole connect budget per attempt, `concurrency` at a time.
+    // Painted, because it is the number that surprises people.
     let t = &plan.timing;
-    s.push_str(&format!(
-        "{:<16}~{} if every probe times out ({} x {} attempt{} / {} in flight)\n",
-        "",
+    let timeout_bound = format!(
+        "~{} if every probe times out ({} x {} attempt{} / {} in flight)",
         HumanElapsed(plan.silent_duration()),
         render_duration(t.connect_timeout),
         1 + t.retries,
         if t.retries == 0 { "" } else { "s" },
         t.concurrency
+    );
+    s.push_str(&format!(
+        "{:<16}{}\n",
+        "timeout-bound",
+        style.paint("33", &timeout_bound)
     ));
-    s.push_str(&format!("{:<16}{}\n", "host", facts));
+
+    plan_section(s, style, "Host");
+    s.push_str(&format!("{:<16}{}\n", "facts", facts));
 
     if !plan.warnings.is_empty() {
         s.push('\n');
