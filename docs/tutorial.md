@@ -3,7 +3,8 @@
 Ten use cases, each a real command with its real output, and at each step what the
 tool does that `nmap` does not — and what it deliberately leaves to nmap. Everything
 below was captured on 2026-08-26 against the lab in the next section; run it yourself
-and the outputs match apart from timings, ids, and the certificate's fingerprint and dates.
+and the outputs match apart from timings, ids, the version banner, and the certificate's
+fingerprint and dates.
 
 The claim, up front. A port scan through a proxy is usually both untrustworthy and
 unrepeatable: the proxy decides what `closed` means, the scanner guesses, and what
@@ -108,7 +109,7 @@ ports = ["lab"]
 
 ```console
 $ scanr run --targets 127.0.0.1 --ports 25025,28080,28443,29000,29001 --all --output-dir results
-scanr 1.0.0-rc.1 — (ad-hoc) via direct — 5 probes (1 targets x 5 ports)
+scanr 1.0.0-rc.5 — (ad-hoc) via direct — 5 probes (1 targets x 5 ports)
   scan 5d2875ea  seed bf052d2f27c67ba1  concurrency 512  -> results/scan-adhoc-2026_08_26T01_53_14Z-5d2875ea.jsonl.gz.partial
 127.0.0.1:29000/tcp closed saltd-licensing 0.2ms
 127.0.0.1:25025/tcp open 0.1ms 220 mail.lab.internal ESMTP ready..
@@ -197,7 +198,7 @@ someone hands you. Exit `2` means the record is bad, `1` means it could not be r
 $ scanr output summarize results/scan-adhoc-2026_08_26T01_53_14Z-5d2875ea.jsonl.gz
 results/scan-adhoc-2026_08_26T01_53_14Z-5d2875ea.jsonl.gz
   scan            (ad-hoc)
-  started         2026-08-26T01:53:14.715Z  (scanr 1.0.0-rc.1)
+  started         2026-08-26T01:53:14.715Z  (scanr 1.0.0-rc.5)
   transport       direct via direct (full)
   scope           1 targets x 5 ports = 5 probes
   seed            bf052d2f27c67ba1
@@ -233,7 +234,7 @@ service signatures scanr will never duplicate. `-Pn -n` stop nmap repeating the 
 ```json
 {"git_commit":"0957b9d00","hostname":"main.trusted.mad.family","pid":3541013,
  "rustc":"rustc 1.98.0 (88d9e12ae 2026-08-18)","scan_id":"5d2875ea","schema_version":2,
- "tool_version":"1.0.0-rc.1","ts":"2026-08-26T01:53:14.715Z","type":"scan_started", ...}
+ "tool_version":"1.0.0-rc.5","ts":"2026-08-26T01:53:14.715Z","type":"scan_started", ...}
 ```
 
 and the last line is the terminal event, whose `counts` are the authority on totals —
@@ -341,7 +342,7 @@ and the "fidelity not measured" warning goes away; the record states it on every
 
 ```console
 $ scanr run lab-audit --all --output-dir results-dante
-scanr 1.0.0-rc.1 — lab-audit via socks5 127.0.0.1:1082 — 5 probes (1 targets x 5 ports)
+scanr 1.0.0-rc.5 — lab-audit via socks5 127.0.0.1:1082 — 5 probes (1 targets x 5 ports)
 127.0.0.1:29001/tcp closed 0.8ms
 127.0.0.1:29000/tcp closed saltd-licensing 0.8ms
 127.0.0.1:28080/tcp open 0.8ms
@@ -386,7 +387,7 @@ says so before you spend the scan. Now the scan:
 
 ```console
 $ scanr run lab-audit --transport tunnel --profile ssh --all --output-dir results-tunnel
-scanr 1.0.0-rc.1 — lab-audit via socks5 127.0.0.1:1088 — 5 probes (1 targets x 5 ports)
+scanr 1.0.0-rc.5 — lab-audit via socks5 127.0.0.1:1088 — 5 probes (1 targets x 5 ports)
   warning: result fidelity of proxy `tunnel` has not been measured; closed and filtered may be indistinguishable
            run: scanr transport test tunnel
 127.0.0.1:29000/tcp error saltd-licensing 1.0ms
@@ -473,7 +474,7 @@ a rerun goes the same way. Every result names its member:
 
 ```console
 $ scanr run lab-audit --transport spread --all --no-spans --output-dir results-pool
-scanr 1.0.0-rc.1 — lab-audit via pool of 2 across dante, exit-b — 5 probes ...
+scanr 1.0.0-rc.5 — lab-audit via pool of 2 across dante, exit-b — 5 probes ...
 
 $ scanr output results --format json results-pool/scan-*.jsonl.gz | jq -c '{port, state, via}'
 {"port":25025,"state":"open","via":"exit-b"}
@@ -496,7 +497,7 @@ after a second and a half:
 ```console
 $ scanr run --targets 127.0.0.1,192.0.2.1,192.0.2.2 --ports 25025,28080,29000,80,443,8080 \
     --all --concurrency 2 --connect-timeout 2s --seed 7 --no-spans --output-dir results-int
-scanr 1.0.0-rc.1 — (ad-hoc) via direct — 18 probes (3 targets x 6 ports)
+scanr 1.0.0-rc.5 — (ad-hoc) via direct — 18 probes (3 targets x 6 ports)
 ^C
 interrupt: no new probes will start; draining in-flight work (interrupt again to exit immediately)
 192.0.2.1:80/tcp filtered http 2001.0ms
@@ -530,7 +531,7 @@ $ scanr output remainder results-int/scan-*.jsonl.gz
   scanr output remainder results-int/scan-adhoc-2026_08_26T02_04_48Z-d65f8c99.jsonl.gz | scanr run --pairs -
 
 $ scanr output remainder results-int/scan-*.jsonl.gz | scanr run --pairs - --all --connect-timeout 1s
-scanr 1.0.0-rc.1 — (ad-hoc) via direct — 13 probes (3 targets x 6 ports)
+scanr 1.0.0-rc.5 — (ad-hoc) via direct — 13 probes (3 targets x 6 ports)
 127.0.0.1:28080/tcp open 0.1ms
 127.0.0.1:25025/tcp open 0.1ms 220 mail.lab.internal ESMTP ready..
 ...
